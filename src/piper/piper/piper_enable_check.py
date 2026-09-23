@@ -20,7 +20,7 @@ import can
 from piper.piper_enable_status import EnableState, aggregate, describe
 from piper.piper_feedback import FEEDBACK_CAN_IDS, JOINT_COUNT, FeedbackTracker
 
-DEFAULT_PORTS = ('can_fr', 'can_ml')
+DEFAULT_PORTS = ('can_fl', 'can_fr')
 DEFAULT_DURATION = 3.0
 DEFAULT_TIMEOUT = 0.5
 

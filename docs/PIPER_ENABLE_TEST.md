@@ -20,7 +20,7 @@
 | 2 | 机械臂处于空载状态，或负载已固定足以抵抗小幅沉降 | 人工确认 |
 | 3 | 机械臂在当前姿态下已有支撑，关节变硬后不会失稳 | 人工确认 |
 | 4 | 两臂均报 `DISABLED`，且六个关节的反馈都是新鲜的 | `piper_enable_check --expect disabled` |
-| 5 | 四路 CAN 均为 `ERROR-ACTIVE`，无总线错误 | `ip -details -statistics link show dev can_fr can_ml` |
+| 5 | 四路 CAN 均为 `ERROR-ACTIVE`，无总线错误 | `ip -details -statistics link show dev can_fl can_fr` |
 | 6 | 没有控制节点在发布运动，且 `/pos_cmd_*`、`/joint_ctrl_cmd_*` 都没有发布者 | `ros2 topic info /pos_cmd_left` 显示 `Publisher count: 0` |
 
 使能关节会让它进入力矩保持状态、锁住当前位置。它不应产生位移，但轻微的
@@ -49,20 +49,20 @@ ros2 launch piper start_two_piper.launch.py \
 
 ```bash
 # 基线：两臂必须报 DISABLED，且退出码为 0。
-ros2 run piper piper_enable_check --port can_fr --port can_ml \
+ros2 run piper piper_enable_check --port can_fl --port can_fr \
   --duration 3 --timeout 0.5 --expect disabled
 ```
 
 记录发送计数器，以便后续把通电动作的流量归属清楚：
 
 ```bash
-for i in can_fr can_ml; do echo "$i tx=$(cat /sys/class/net/$i/statistics/tx_packets)"; done
+for i in can_fl can_fr; do echo "$i tx=$(cat /sys/class/net/$i/statistics/tx_packets)"; done
 ```
 
 ## 第 2 步 —— 只使能左臂
 
 只使能一条臂，不要同时使能两条，这样一条臂出现意外时不会和另一条叠加。
-左臂是 `can_fr`。
+左臂是 `can_fl`。
 
 ```bash
 # 使能：这是本手册中第一条也是唯一一条改变状态的命令。
@@ -77,9 +77,9 @@ ros2 service call /enable_srv_left piper_msgs/srv/Enable "{enable_request: true}
 
 ```bash
 # 预期 ENABLED，且六个关节都新鲜。
-ros2 run piper piper_enable_check --port can_fr --timeout 0.5 --expect enabled
+ros2 run piper piper_enable_check --port can_fl --timeout 0.5 --expect enabled
 
-# 预期 state 为 ENABLED、all_enabled 为 True、can_port 为 can_fr。
+# 预期 state 为 ENABLED、all_enabled 为 True、can_port 为 can_fl。
 ros2 topic echo /arm_enable_status_left --once
 
 # err_code 必须保持为 0。
@@ -104,7 +104,7 @@ ros2 topic echo /arm_status_left --once
 
 ```bash
 ros2 service call /enable_srv_left piper_msgs/srv/Enable "{enable_request: false}"
-ros2 run piper piper_enable_check --port can_fr --expect disabled
+ros2 run piper piper_enable_check --port can_fl --expect disabled
 ```
 
 ## 回滚
@@ -113,7 +113,7 @@ ros2 run piper piper_enable_check --port can_fr --expect disabled
 
 ```bash
 ros2 service call /enable_srv_left piper_msgs/srv/Enable "{enable_request: false}"
-ros2 run piper piper_enable_check --port can_fr --expect disabled
+ros2 run piper piper_enable_check --port can_fl --expect disabled
 ```
 
 响应字段是按请求命名的，而不是按结果状态命名的：调用**失能**同样会返回
@@ -132,9 +132,9 @@ ros2 run piper piper_enable_check --port can_fr --expect disabled
 | 节点启动（`PiperInit`） | +13（`0x472` 查询 12 帧、`0x4AF` 1 帧） |
 | 节点空闲且 `auto_enable:=false` | 每 15 秒 +0 |
 | `piper_enable_check` | +0 |
-| 左臂一次使能加一次失能 | `can_fr` +8，`can_ml` +0 |
+| 左臂一次使能加一次失能 | `can_fl` +8，`can_fr` +0 |
 
-使能/失能流量被限制在 `can_fr` 上，因此右臂所在总线根本没有看到任何使能帧。
+使能/失能流量被限制在 `can_fl` 上，因此右臂所在总线根本没有看到任何使能帧。
 使能路径是节点既有行为，它在每次迭代中下发 `EnableArm(7)` 以及一条夹爪使能
 指令，直到六个关节全部报使能为止，这就是帧数不是 1 的原因。
 
@@ -179,7 +179,7 @@ ros2 run piper piper_enable_check --port can_fr --expect disabled
 两条从臂均已按本手册完成一次「使能 → 确认 → 失能 → 确认」的完整往返，
 全部判据通过。
 
-| 项目 | 左臂 `can_fr` | 右臂 `can_ml` |
+| 项目 | 左臂 `can_fl` | 右臂 `can_fr` |
 | --- | --- | --- |
 | 使能前 | 六轴全 `False` | 六轴全 `False` |
 | 使能后 | 六轴全 `True`，`state=ENABLED` | 六轴全 `True`，`state=ENABLED` |
@@ -189,14 +189,14 @@ ros2 run piper piper_enable_check --port can_fr --expect disabled
 
 **双向隔离均已确认。** 使能左臂时右臂保持 `DISABLED`，使能右臂时左臂保持
 `DISABLED`；两次的 `ENABLED` / `DISABLED` 判定都正确归属到各自的接口，话题
-`can_port` 字段分别为 `can_fr` 与 `can_ml`。
+`can_port` 字段分别为 `can_fl` 与 `can_fr`。
 
 **零运动。** 左臂往返窗口内 14,255 个采样点、38.7 秒，右臂 11,651 个采样点、
 30.8 秒；两臂六关节相对首帧的最大偏差均为 `0.000000000 rad`。关节变硬但未
 移动，符合预期。
 
 **发送帧账目。** 节点启动每接口 `+13`（`PiperInit` 查询）；左臂往返在
-`can_fr` 上 `+8`、`can_ml` 上 `+0`；右臂往返在 `can_ml` 上 `+8`、`can_fr` 上
+`can_fl` 上 `+8`、`can_fr` 上 `+0`；右臂往返在 `can_fr` 上 `+8`、`can_fl` 上
 `+0`。每次操作只在自己那条总线上产生流量，另一条上一帧使能流量都没有。
 
 **CAN 完整性。** 四路接口计数器在全部往返前后完全一致，无 bus error、
@@ -254,10 +254,10 @@ ros2 run piper piper_joint_move --target joint1 --delta-deg 0.5 --send
 
 | 接口 | joint2 静置 | joint3 静置 |
 | --- | --- | --- |
-| `can_fl` | −2.044° | +2.120° |
+| `can_ml` | −2.044° | +2.120° |
 | `can_mr` | −1.848° | +2.010° |
-| `can_fr` | −2.597° | +1.810° |
-| `can_ml` | −1.956° | +1.727° |
+| `can_fl` | −2.597° | +1.810° |
+| `can_fr` | −1.956° | +1.727° |
 
 所以「使能前先把臂摆进范围」解决不了问题——一失能它又会掉回去，下次使能照旧越界。
 **每次失能-使能循环都会带来一次对齐位移**，这是该机械臂的设计特征，不是故障。
@@ -289,7 +289,7 @@ V1.5-2 之后才支持的，在旧固件上 `max_joint_spd` 的 `0x7FFF` 会被�
 - 回滚：`MotorAngleLimitMaxSpdSet(2, 1800, 0, 300)` 与
   `MotorAngleLimitMaxSpdSet(3, 0, -1700, 300)`。
 
-**实测效果**（`can_fr`，`joint1 +0.5° @ 2%`，判决点看 joint2 停在哪）：
+**实测效果**（`can_fl`，`joint1 +0.5° @ 2%`，判决点看 joint2 停在哪）：
 
 | 关节 | 发送前 | 发送后 | 实际位移 | 放宽限位前会是 |
 | --- | --- | --- | --- | --- |
@@ -313,10 +313,10 @@ joint2 停在 −2.058° 而**不是 0°**，这是限位改动确实作用于�
 
 | 接口 | j1 | j2 | j3 | j4 | j5 | j6 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `can_fl` | [−150, 150] | **[−2.0, 180]** | **[−170, 2.0]** | [−100, 100] | [−70, 70] | [−180, 180] |
-| `can_mr` | [−150, 150] | **[−2.0, 180]** | **[−170, 2.0]** | [−100, 100] | [−70, 70] | [−180, 180] |
-| `can_fr` | [−150, 150] | **[−2.0, 180]** | **[−170, 2.0]** | [−100, 100] | [−70, 70] | [−180, 180] |
 | `can_ml` | [−150, 150] | **[−2.0, 180]** | **[−170, 2.0]** | [−100, 100] | [−70, 70] | [−180, 180] |
+| `can_mr` | [−150, 150] | **[−2.0, 180]** | **[−170, 2.0]** | [−100, 100] | [−70, 70] | [−180, 180] |
+| `can_fl` | [−150, 150] | **[−2.0, 180]** | **[−170, 2.0]** | [−100, 100] | [−70, 70] | [−180, 180] |
+| `can_fr` | [−150, 150] | **[−2.0, 180]** | **[−170, 2.0]** | [−100, 100] | [−70, 70] | [−180, 180] |
 
 各台 `max_joint_spd` 均为 300（0.3 rad/s ≈ 17.2 deg/s），至今未被改动。**2026-09-23
 曾计划把它放大到 1500（≈86 deg/s）以提升遥操作跟随能力，当天真机实测后判定不需要**：
@@ -346,8 +346,8 @@ piper.MotorAngleLimitMaxSpdSet(3, 0, -1700, 300)
 
 | 臂 | 越界关节 | 结果 |
 | --- | --- | --- |
-| `can_fr`（左） | joint2 低于下限、joint3 高于上限 | **执行并钳制**，附带位移 0.539° / 0.730° |
-| `can_ml`（右） | joint3 高于上限 | **整条指令被拒**，全关节零位移（含原本合法的 joint1） |
+| `can_fl`（左） | joint2 低于下限、joint3 高于上限 | **执行并钳制**，附带位移 0.539° / 0.730° |
+| `can_fr`（右） | joint3 高于上限 | **整条指令被拒**，全关节零位移（含原本合法的 joint1） |
 
 右臂的拒绝行为用五个实验隔离确认（都是 joint1 ±0.5° @ 2%，只改变 joint3 目标是否越界）：
 

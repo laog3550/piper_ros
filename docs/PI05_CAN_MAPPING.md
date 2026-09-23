@@ -1,52 +1,47 @@
 # Pi05 CAN 映射
 
-本分支使用稳定的角色名，而不用 Linux `can0` 的枚举顺序：
+本分支使用稳定的角色名，而不用 Linux `can0` 的枚举顺序。**接口名不是判据，序列号才是**：
 
-| 角色 | 接口 | USB 端口 | 波特率 |
-| --- | --- | --- | --- |
-| `master_left` | `can_fl` | `1-11:1.0` | 1 Mbps |
-| `master_right` | `can_mr` | `1-4:1.0` | 1 Mbps |
-| `follower_left` | `can_fr` | `1-13:1.0` | 1 Mbps |
-| `follower_right` | `can_ml` | `1-2:1.0` | 1 Mbps |
+| 角色 | 接口 | USB 端口 | 适配器序列号 | 波特率 |
+| --- | --- | --- | --- | --- |
+| `master_left` | `can_ml` | `1-11:1.0` | `0040002E4148570C20343133` | 1 Mbps |
+| `master_right` | `can_mr` | `1-4:1.0` | `0040003D4148570D20343133` | 1 Mbps |
+| `follower_left` | `can_fl` | `1-13:1.0` | `004B00395443570F20393433` | 1 Mbps |
+| `follower_right` | `can_fr` | `1-2:1.0` | `004C003B5443570F20393433` | 1 Mbps |
 
-## 警告：不要按接口名推断角色
+## 接口命名：现在可以直读，但**不能**当作判据
 
-上面四个接口名是本项目自定的（官方 SDK 的脚本用的是 `can_arm1`/`can_arm2`），
-仓库里没有任何文档说明它们的构词规则，而且**这些名字极易被误读**。
+现在的名字是自然读法：`can_` + 角色首字母（`f`=follower、`m`=master）+ 左右
+（`l`=left、`r`=right），与上表一致。
 
-字母与角色的实际对应关系如下：
+**但名字会被改，历史上就不是这样。** 2026-09-24 的只读普查发现接口名被重新绑定
+过一轮：同一批适配器、同一批 USB 端口、同一批序列号，名字全换了。
 
-| 接口 | 第 1 位 | 第 2 位 | 实际角色 |
-| --- | --- | --- | --- |
-| `can_fl` | `f` | `l` | `master_left` |
-| `can_fr` | `f` | `r` | `follower_left` |
-| `can_mr` | `m` | `r` | `master_right` |
-| `can_ml` | `m` | `l` | `follower_right` |
+| 角色 | USB 端口 | 序列号前缀 | 变更前（2026-09-23 及以前） | 变更后（2026-09-24 起） |
+| --- | --- | --- | --- | --- |
+| `master_left` | `1-11:1.0` | `0040002E…` | `can_fl` | `can_ml` |
+| `master_right` | `1-4:1.0` | `0040003D…` | `can_mr` | `can_mr` |
+| `follower_left` | `1-13:1.0` | `004B00…` | `can_fr` | `can_fl` |
+| `follower_right` | `1-2:1.0` | `004C00…` | `can_ml` | `can_fr` |
 
-第 1 位决定左右（`can_f*` 均为 left，`can_m*` 均为 right）。但第 2 位在左右两组
-的含义**相反**：左侧 `l` 为主、`r` 为从，右侧 `r` 为主、`l` 为从。因此这套命名
-不是自洽的编码，`l`/`r` 既不代表固定含义的 left/right，也不代表固定含义的
-master/follower，只看名字无法判断角色。
+变更前那套名字里，第 2 位在左右两组含义**相反**（左侧 `l` 为主、`r` 为从，右侧
+`r` 为主、`l` 为从），按自然读法去解会得出错误角色。**这正是现场踩到的坑**：按旧表
+把 master 起在 `can_fl`，实际起的是 `follower_left`，遥操作的"master"成了一条失能
+从臂的姿态，`--side left` 驱动的是 `follower_right`（真实主臂在 `can_ml` 上，
+手拖它时遥操作完全看不到）。
 
-按最自然的读法（`f`=follower、`m`=master、`l`=left、`r`=right）去解读，四个名字
-里有三个会得出**错误**角色：
+名字有**两个来源、两套规则**：仓库的 `can_muti_activate.sh` 与
+`config/pi05_can_map.json` 按 USB 端口分配名字；系统里的
+`/etc/systemd/network/20-piper-can-*.link` 按适配器序列号分配（**当前生效的是后者**）。
+两者一旦不一致，就会出现"照文档传参、实际驱动另一台臂"。
 
-| 名字 | 直觉读作 | 实际是 |
-| --- | --- | --- |
-| `can_fl` | follower_left | **`master_left`** |
-| `can_fr` | follower_right | **`follower_left`** |
-| `can_ml` | master_left | **`follower_right`** |
-| `can_mr` | master_right | `master_right` |
-
-其中 `can_ml` 最危险：它会被读成「master left」，实际却是 `follower_right`，
-主从与左右**同时**搞反；`can_fl` 次之，会被当成从臂而实际是主臂。
-
-**因此：一切以本文件与 `config/pi05_can_map.json` 的角色名为准，绝不要从接口名
-反推角色。** 在需要选择机械臂的任何脚本或命令行里，先查这张表。
+**因此：判断实体一律按序列号与 USB 端口（本文件与 `config/pi05_can_map.json`）；
+要进一步区分主从，用硬件判据——主臂总线上多出 5 个未定义 ID（见下）。**
 
 `config/pi05_can_map.json` 是权威来源，其对应关系已通过两种独立手段确认：按
 适配器序列号与 USB 端口校验接口身份（`piper_pi05_can verify`），以及逐台拖动
-机械臂观察哪条接口读数变化（`piper_joint_watch`）。
+机械臂观察哪条接口读数变化（`piper_joint_watch`）。**本文中 2026-09-24 之前的
+记录用的是变更前的接口名**，引用时按上表换算。
 
 
 已确认的接口名、USB 端口、适配器序列号与波特率保存在纳入版本管理的
@@ -80,17 +75,17 @@ sudo /usr/bin/python3 /home/mips/piper_ros/src/piper/piper/pi05_can.py \
 冲突，配置 1 Mbps，并把四路 SocketCAN 链路拉起。它不启动任何 ROS 节点，也不
 发送任何 Piper 运动指令。
 
-例如，在 `can_ml` 上启动右从臂：
+例如，在 `can_fl` 上启动左从臂：
 
 ```bash
 ros2 launch piper start_single_piper.launch.py \
-  can_port:=can_ml auto_enable:=false gripper_exist:=false
+  can_port:=can_fl auto_enable:=false gripper_exist:=false
 ```
 
-上表是经操作者确认的实体机械臂映射。上游的 `can_muti_activate.sh` 包含相同的
-四组 USB 端口与接口对应关系，而 `start_two_piper.launch.py` 默认使用两个从臂
-接口：左侧 `can_fr`、右侧 `can_ml`。若当前 Linux 中接口与序列号的对应关系与
-此不符，请先修复持久化的链路命名再进入控制阶段；不要仅凭接口名去选择机械臂。
+上表是经操作者确认的实体机械臂映射，现已与 `can_muti_activate.sh`（按 USB 端口
+分配名字）以及 `start_two_piper.launch.py` 的默认值（左侧 `can_fl`、右侧 `can_fr`）
+一致。若某天 `piper_pi05_can verify all` 又出现 FAIL，说明接口名与序列号的对应关系
+又变了：**先把它修回本表，再进入控制阶段**；不要仅凭接口名去选择机械臂。
 
 ## 只读映射确认
 
@@ -123,6 +118,8 @@ ros2 run piper piper_bus_probe --port can_fl --duration 2
 四条接口的 20 个核心帧全部齐全，退出码 0。四台臂报出**四个互不相同且数值合理**
 的关节角度，说明它们是四台独立的物理设备，而不是同一台被读了四次。
 
+**下表用的是当天的接口名**（变更前后的对应关系见本文「接口命名」一节）：
+
 | 接口 | 角色 | 不同 ID 数 | 布局 | j1 角度 | 母线电压 |
 | --- | --- | --- | --- | --- | --- |
 | `can_fl` | `master_left` | 25 | 常规 | −6.993° | 23.0 V |
@@ -133,10 +130,26 @@ ros2 run piper piper_bus_probe --port can_fl --duration 2
 **结论：映射关系正确。** 四条接口各有完整的 Piper 反馈帧、帧率正常、供电正常、
 角度合理，无 ID 冲突。
 
+### 2026-09-24 检测结果（发现接口名已被变更）
+
+| 接口 | 角色 | 不同 ID 数 | 布局 | j1 角度 | 母线电压 |
+| --- | --- | --- | --- | --- | --- |
+| `can_ml` | `master_left` | 25 | 常规 | −26.005° | 23.0 V |
+| `can_mr` | `master_right` | 25 | 常规 | +7.284° | 23.0 V |
+| `can_fl` | `follower_left` | 20 | 常规 | −12.128° | 24.0 V |
+| `can_fr` | `follower_right` | 20 | 常规 | −0.894° | 24.0 V |
+
+四条接口核心帧齐全、退出码 0，四台臂的角度互不相同。**主臂判据（25 个 ID）落在
+`can_ml` 与 `can_mr` 上**，而 2026-09-23 的同类检测里它落在 `can_fl` 与 `can_mr`
+上——序列号与 USB 端口都没变，所以这是**接口名被重新绑定**的直接证据。当天正是
+靠这条判据才发现工作区的映射表已经过时（`piper_pi05_can verify all` 也同时报了
+3 条 FAIL）。
+
 ### 两台 master 臂多出 5 个未定义 ID
 
-`can_fl` 与 `can_mr` 各比从臂多出 5 个 CAN ID，且两条总线上的这 5 个 ID
-**完全一致**（ID、频率、载荷都相同）：
+两条 master 总线（2026-09-24 起名为 `can_ml`、`can_mr`）各比从臂多出 5 个 CAN ID，
+且两条总线上的这 5 个 ID **完全一致**（ID、频率、载荷都相同）。**这条判据只看
+总线上有没有这几个 ID、不看接口名，所以它在接口名变动后仍是可靠的主臂识别方式：**
 
 | CAN ID | 频率 | 载荷 |
 | --- | --- | --- |
@@ -196,17 +209,17 @@ ros2 run piper piper_joint_watch
 | 拖动某台臂时，没有任何接口变化 | 该臂未接入被监视的总线，或接线/接口名有误 |
 | 某条接口始终显示「无角度帧」 | 该接口上没有可通信的 Piper 臂 |
 
-用 `--arm` 可以只看其中几条接口，例如只确认两条 master：
+用 `--arm` 可以只看其中几条接口，例如只确认两条 master（今天的名字）：
 
 ```bash
-ros2 run piper piper_joint_watch --arm can_fl --arm can_mr
+ros2 run piper piper_joint_watch --arm can_ml --arm can_mr
 ```
 
 ### 运行前要知道的事
 
 - **本工具绝对只读。** 它只调用 `recv()`，代码中没有任何发送路径，不会使能、
-  失能或运动任何关节。实测四条接口的 `tx_packets` 在运行前后完全一致
-  （`can_fl`、`can_mr` 保持 0）。所以人手接触机械臂时运行是安全的。
+  失能或运动任何关节。实测四条接口的 `tx_packets` 在运行前后完全一致。所以人手
+  接触机械臂时运行是安全的。
 - **四台臂当前都处于失能状态**，因此可以自由拖动。失能状态下拖动需要克服重力，
   承载重力的关节会下坠，这是正常的，不是故障。
 - 请**逐台**拖动，每次只碰一台臂，判读才会清晰。

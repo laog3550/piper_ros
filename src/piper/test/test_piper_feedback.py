@@ -8,7 +8,14 @@ import numpy as np
 
 from piper.piper_feedback import (
     AlphaBetaFilter,
+    DEFAULT_ALPHA_BETA_ALPHA,
+    DEFAULT_ALPHA_BETA_BETA,
+    DEFAULT_ALPHA_BETA_MAX_DT_S,
+    DEFAULT_ALPHA_BETA_POLE,
+    DEFAULT_DEADBAND_DEG,
+    DEFAULT_DEADBAND_SPEED_DEG_S,
     DEFAULT_FILTER_TAU_S,
+    DEFAULT_SMOOTH_BANDWIDTH_RAD_S,
     DEFAULT_SMOOTH_MAX_ACCELERATION_DEG_S2,
     DEFAULT_SMOOTH_MAX_JERK_DEG_S3,
     DEFAULT_SMOOTH_MAX_VELOCITY_DEG_S,
@@ -75,6 +82,82 @@ def test_alpha_beta_rejects_invalid_parameters():
                    {'beta': 1.1}, {'max_dt': 0.0}):
         with pytest.raises(ValueError):
             AlphaBetaFilter(**kwargs)
+
+
+def test_alpha_beta_defaults_sit_on_a_repeated_error_pole():
+    """默认增益由极点推导，不是手调的：α=1-λ²、β=(1-λ)²。"""
+    pole = DEFAULT_ALPHA_BETA_POLE
+    assert DEFAULT_ALPHA_BETA_ALPHA == pytest.approx(1.0 - pole ** 2)
+    assert DEFAULT_ALPHA_BETA_BETA == pytest.approx((1.0 - pole) ** 2)
+    # 2026-09-24 真机反馈「抖动已可接受、但迟滞明显」后由 0.65 收到 0.40：
+    # 暂态滞后降约 1/3，代价是残留抖动 0.021°→0.052°。
+    assert pole == pytest.approx(0.40)
+
+
+def _follow_pipeline(master, alpha, beta, seconds=4.0):
+    """与 piper_teleop 同一条跟随链：死区 -> α-β -> 平滑级（速度前馈）。"""
+    dt = 1.0 / 50.0
+    gate = DeadbandGate(DEFAULT_DEADBAND_DEG, DEFAULT_DEADBAND_SPEED_DEG_S)
+    flt = AlphaBetaFilter(alpha, beta, DEFAULT_ALPHA_BETA_MAX_DT_S)
+    smooth = MotionSmoother(DEFAULT_SMOOTH_BANDWIDTH_RAD_S,
+                            DEFAULT_SMOOTH_MAX_VELOCITY_DEG_S,
+                            DEFAULT_SMOOTH_MAX_ACCELERATION_DEG_S2,
+                            DEFAULT_SMOOTH_MAX_JERK_DEG_S3)
+    for stage in (gate, flt, smooth):
+        stage.reset({1: master(0.0)})
+    outputs, references = [], []
+    for index in range(int(seconds / dt)):
+        value = master(index * dt)
+        sample = gate.update({1: value}, dt)
+        sample = flt.update(sample, dt)
+        sample = smooth.update(sample, flt.velocities(), dt)
+        outputs.append(sample[1])
+        references.append(value)
+    return outputs, references, dt
+
+
+def test_the_default_pole_shortens_the_transient_without_touching_steady_lag():
+    """λ 只改暂态：变速峰值降下来，而匀速段滞后与老参数相同（都接近 0）。"""
+    def speed_change(t):
+        return 20.0 * min(t, 1.0) + 100.0 * max(0.0, t - 1.0)
+
+    def steady(t):
+        return 100.0 * t
+
+    old = (0.5775, 0.1225)
+    new = (DEFAULT_ALPHA_BETA_ALPHA, DEFAULT_ALPHA_BETA_BETA)
+    peaks = {}
+    for name, (alpha, beta) in (('old', old), ('new', new)):
+        out, ref, dt = _follow_pipeline(speed_change, alpha, beta)
+        start = int(1.0 / dt)
+        peaks[name] = max(abs(ref[i] - out[i])
+                          for i in range(start, start + 25))
+    # 实测：老参数 5.12 度 -> 新参数 3.39 度。
+    assert peaks['new'] < 0.75 * peaks['old'], peaks
+
+    lags = {}
+    for name, (alpha, beta) in (('old', old), ('new', new)):
+        out, ref, dt = _follow_pipeline(steady, alpha, beta, seconds=6.0)
+        start = int(3.0 / dt)
+        lags[name] = (sum(ref[i] - out[i] for i in range(start, len(out)))
+                      / (len(out) - start))
+    # 匀速段的滞后只取决于「有没有速度前馈」，与 α、β 无关：两套参数必须一致，
+    # 而且都要远小于不带前馈时的 100/7.5 ≈ 13 度。
+    assert lags['old'] == pytest.approx(lags['new'], abs=0.05)
+    assert abs(lags['new']) < 3.0, lags
+
+
+def test_the_faster_default_keeps_the_residual_jitter_near_the_floor():
+    """换暂态的代价是残留抖动上升，但不能越过机械臂自身本底的量级。"""
+    def wobble(t):
+        return 5.0 + 0.3 * math.sin(2.0 * math.pi * 10.0 * t)
+
+    out, _, dt = _follow_pipeline(wobble, DEFAULT_ALPHA_BETA_ALPHA,
+                                  DEFAULT_ALPHA_BETA_BETA, seconds=5.0)
+    tail = out[int(2.0 / dt):]
+    spread = max(tail) - min(tail)
+    # 实测 0.052°；机械臂自身的机械本底是 0.011~0.041°。
+    assert spread < 0.08, spread
 
 
 def _frame(enabled, joint=1, voltage=240, foc_temp=30):

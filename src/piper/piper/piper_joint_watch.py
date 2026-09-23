@@ -19,10 +19,10 @@ import can
 from piper.piper_feedback import JOINT_ANGLE_IDS, ArmAngleTracker
 
 DEFAULT_ARMS = (
-    ('can_fl', 'master_left'),
+    ('can_ml', 'master_left'),
     ('can_mr', 'master_right'),
-    ('can_fr', 'follower_left'),
-    ('can_ml', 'follower_right'),
+    ('can_fl', 'follower_left'),
+    ('can_fr', 'follower_right'),
 )
 JOINTS = tuple(sorted({j for pair in JOINT_ANGLE_IDS.values() for j in pair}))
 REFRESH_SECONDS = 0.15

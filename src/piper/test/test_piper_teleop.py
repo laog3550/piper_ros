@@ -374,9 +374,9 @@ def _follow_run(monkeypatch, **overrides):
     return summary, [value for value in series if value > 1e-9]
 
 
-def test_a_small_hand_wobble_moves_nothing(monkeypatch):
-    # 死区默认 0.2 度：手"停着"时目标一动不动。这里的手抖取 5 Hz、±0.15 度
-    # ——它低于死区，却是 One Euro 的 1 Hz 截止频率压不干净的那一段。
+def test_a_small_hand_wobble_does_not_bias_the_target(monkeypatch):
+    # 滤波级的单元用例（平滑级默认关闭，见 _options）：5 Hz、±0.15 度的抖晃幅度
+    # 低于死区，但速度门限会放行它（那是为了让慢拖不被切成台阶）。
     assert piper_teleop.DEFAULT_DEADBAND_DEG == 0.2
 
     clock = FakeClock()
@@ -391,14 +391,46 @@ def test_a_small_hand_wobble_moves_nothing(monkeypatch):
             node.master = _pose(10.0 + 0.15 * math.sin(count * 0.6283))
 
     node.on_spin = on_spin
-    options = _options(align_seconds=0.1, duration=0.4, deadband_deg=0.2)
+    # 0.4 秒只够看阶跃暂态、量不到稳态，所以这里跑长一些：断言的是**收敛后**的值。
+    options = _options(align_seconds=0.1, duration=1.2, deadband_deg=0.2)
     piper_teleop._run_teleop(node, options)
     series = [math.degrees(command[0]) for command in node.publisher.sent]
-    tail = series[-5:]
-    # 5 Hz 手抖"在动"，速度门限会放行（这是为了慢拖不被切成台阶）；压掉它的是
-    # α-β 状态估计与平滑级继续压制速度门限放行的高频分量。
-    assert series[-1] == pytest.approx(10.0, abs=0.05)
-    assert max(tail) - min(tail) < 0.15, '整条链应把 ±0.15 度的手抖压到 1/3 以下'
+    # 判据取**整数个抖晃周期**的均值：单个采样点看的是被滤过抖晃的瞬时相位，均值
+    # 才说明有没有稳态偏置。5 Hz 在 50 Hz 下正好 10 拍一个周期，末 20 拍是两个
+    # 周期；实测该均值为 10.0000 度（λ=0.65 与 0.40 都一样）。
+    assert sum(series[-20:]) / 20 == pytest.approx(10.0, abs=0.03)
+    # 幅度在这个频段**不会**被这一级抹平：实测末 20 拍峰峰 0.305 度，与输入自身
+    # 的 0.30 度同量级，所以这里只守住"不放大"。整条链的衰减由下一条用例覆盖。
+    assert max(series[-20:]) - min(series[-20:]) < 0.35
+
+
+def test_the_full_chain_attenuates_hand_tremor(monkeypatch):
+    # 手抖集中在 8~12 Hz，这一档才是"整条链压掉多少"要看的频段。这里把平滑级按
+    # 真机默认打开（_options 默认关闭它，原因见上一条用例的说明）。
+    # 实测末 20 拍峰峰值：10 Hz、±0.3 度 -> 0.054 度（λ=0.65 时 0.043 度）；
+    # 5 Hz、±0.15 度 -> 0.153 度（λ=0.65 时 0.121 度）。换了参数后残差上升约
+    # 四分之一，仍与机械臂自身本底（0.011~0.041 度）同量级。
+    for hz, amp, step, bound in ((10.0, 0.3, 1.2566, 0.1),
+                                 (5.0, 0.15, 0.6283, 0.2)):
+        monkeypatch.setattr(piper_teleop, 'time', FakeClock())
+        monkeypatch.setattr(piper_teleop, 'rclpy', FakeRclpy())
+        node = FakeNode()
+
+        def on_spin(count, amp=amp, step=step):
+            if count >= 6:
+                node.master = _pose(10.0)
+            if count >= 8:
+                node.master = _pose(10.0 + amp * math.sin(count * step))
+
+        node.on_spin = on_spin
+        options = _options(
+            align_seconds=0.1, duration=1.2, deadband_deg=0.2,
+            smooth_bandwidth=piper_teleop.DEFAULT_SMOOTH_BANDWIDTH_RAD_S)
+        piper_teleop._run_teleop(node, options)
+        series = [math.degrees(command[0]) for command in node.publisher.sent]
+        tail = series[-20:]
+        assert sum(tail) / 20 == pytest.approx(10.0, abs=0.03), hz
+        assert max(tail) - min(tail) < bound, (hz, max(tail) - min(tail))
 
 
 def test_the_follow_pipeline_is_deadband_then_filter_then_smoother(
@@ -452,9 +484,10 @@ def test_follow_phase_uses_alpha_beta_by_default(monkeypatch):
     assert piper_teleop.DEFAULT_FILTER == 'alpha-beta'
     summary, after_step = _follow_run(monkeypatch)
     assert summary.mode == 'follow'
-    # λ=0.65 导出的 α=0.5775：从 0 到 10 度的第一拍走到 5.775 度；之后
-    # 位置与速度状态共同收敛。这里关掉后级平滑，单独验证 α-β 的行为。
-    assert after_step[0] == pytest.approx(5.775, abs=1e-6)
+    # λ=0.40 导出的 α=0.84：从 0 到 10 度的第一拍走到 8.4 度；之后位置与速度
+    # 状态共同收敛（峰值 10.51 度，不越过下面的 11）。这里关掉后级平滑，
+    # 单独验证 α-β 的行为。
+    assert after_step[0] == pytest.approx(8.4, abs=1e-6)
     assert max(after_step) < 11.0
     assert after_step[-1] > 9.99
 

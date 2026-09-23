@@ -18,7 +18,7 @@ def _mapping():
         }
         for role, interface, usb_port in zip(
             ROLES,
-            ('can_fl', 'can_mr', 'can_fr', 'can_ml'),
+            ('can_ml', 'can_mr', 'can_fl', 'can_fr'),
             ('1-11:1.0', '1-4:1.0', '1-13:1.0', '1-2:1.0'),
         )
     }
@@ -33,7 +33,7 @@ def _write(tmp_path: Path, data) -> Path:
 def test_loads_complete_mapping(tmp_path):
     result = load_config(_write(tmp_path, _mapping()))
     assert tuple(result) == ROLES
-    assert result['follower_right'].interface == 'can_ml'
+    assert result['follower_right'].interface == 'can_fr'
     assert result['follower_right'].usb_port == '1-2:1.0'
 
 

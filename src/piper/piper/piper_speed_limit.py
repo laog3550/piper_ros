@@ -56,11 +56,11 @@ EXIT_OK = 0
 EXIT_REFUSED = 1
 EXIT_FAILED = 3
 
-# 各接口的失能提示。can_fl/can_mr 是 master，通常用 start_single_piper.launch.py
+# 各接口的失能提示。can_ml/can_mr 是 master，通常用 start_single_piper.launch.py
 # 启动，enable 服务没被重映射；两条从臂在 start_two_piper.launch.py 里重映射过。
 ENABLE_HINTS = {
-    'can_fr': '/enable_srv_left',
-    'can_ml': '/enable_srv_right',
+    'can_fl': '/enable_srv_left',
+    'can_fr': '/enable_srv_right',
 }
 DEFAULT_ENABLE_HINT = '/enable_srv'
 

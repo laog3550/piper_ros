@@ -36,8 +36,8 @@ import numpy as np
 
 from piper.piper_feedback import JOINT_ANGLE_IDS, JOINT_COUNT, decode_joint_angles
 
-# 记录的是哪两台臂：默认 master_left(can_fl) 与 follower_left(can_fr)。
-DEFAULT_PORTS = (('master', 'can_fl'), ('follower', 'can_fr'))
+# 记录的是哪两台臂：默认 master_left(can_ml) 与 follower_left(can_fl)。
+DEFAULT_PORTS = (('master', 'can_ml'), ('follower', 'can_fl'))
 DEFAULT_SECONDS = 70.0
 SAMPLE_HZ = 50.0
 WOBBLE_BAND = (5.0, 15.0)

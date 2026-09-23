@@ -16,7 +16,7 @@
 ## 架构：为什么需要主机桥接
 
 Piper 的固件级主从联动要求 master 臂在 CAN 总线上**直接发送**关节控制指令。但本
-系统四台臂各自挂在独立接口上（`can_fl`/`can_mr`/`can_fr`/`can_ml`），master 发的帧
+系统四台臂各自挂在独立接口上（`can_ml`/`can_mr`/`can_fl`/`can_fr`），master 发的帧
 **不会**出现在 follower 的总线上。
 
 因此遥操作由主机桥接：`piper_teleop` 读 master 的关节角度，计算 follower 目标，发到
@@ -25,7 +25,7 @@ follower 的指令话题。
 ```bash
 # 1. master 侧节点（必须显式关掉 auto_enable，见下方陷阱）
 ros2 launch piper start_single_piper.launch.py \
-  can_port:=can_fl auto_enable:=false gripper_exist:=false
+  can_port:=can_ml auto_enable:=false gripper_exist:=false
 
 # 2. follower 侧节点
 ros2 launch piper start_two_piper.launch.py \
@@ -138,25 +138,44 @@ trace(A) = 2 - α - β
 det(A)   = 1 - α
 ```
 
-为了不让两个误差模态一快一慢，默认把两个极点都放在 `λ=0.65`。令
+为了不让两个误差模态一快一慢，默认把两个极点都放在 `λ=0.40`。令
 `trace(A)=2λ`、`det(A)=λ²`，直接得到：
 
 ```text
-α = 1 - λ²     = 1 - 0.65² = 0.5775
-β = (1 - λ)²  = 0.35²      = 0.1225
+α = 1 - λ²     = 1 - 0.40² = 0.84
+β = (1 - λ)²  = 0.60²      = 0.36
 ```
 
 两极点都严格位于单位圆内，所以无噪声下估计误差稳定收敛。50 Hz 时 `dt=0.02s`，
 离散极点对应的连续时间常数为：
 
 ```text
-τ = -dt / ln(λ) = -0.02 / ln(0.65) ≈ 0.0464s
+τ = -dt / ln(λ) = -0.02 / ln(0.40) ≈ 0.0218s
 ```
 
-单一模态经过约 `3τ≈0.139s` 衰减到约 5%；重复极点会带来额外的多项式项，因此真机
-应以记录数据验证最终整定，但这组参数给出了明确、稳定且可重复的起点。若需要更平滑，
-应增大 `λ` 并按上式同时重算 α、β；若需要更快响应，则减小 `λ`。不要只独立放大 β，
-否则速度估计容易把编码器量化噪声放大到前馈通路。
+单一模态经过约 `3τ≈0.065s` 衰减到约 5%；重复极点会带来额外的多项式项，因此真机
+应以记录数据验证最终整定。
+
+**λ 的选取有实测依据（2026-09-24 真机反馈「抖动已可接受、但迟滞明显」后重定）。**
+匀速段的滞后与 α、β **无关**：速度估计收敛后前馈把稳态滞后补成 0（离线实测：任何
+α-β 组合在 1~150 deg/s 的稳态滞后都是 0 度；对照组去掉前馈后 100 deg/s 滞后 11.3 度）。
+这两个增益只影响**起步、变速与反向的暂态**，所以按实测表选：
+
+| λ | α | β | 静止残留抖动 | 变速 20→100 | 反向 +60→−60 | 急停 100→0 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0.65（原默认） | 0.5775 | 0.1225 | 0.021° | 5.12° | 9.48° | 8.90° |
+| 0.50 | 0.75 | 0.25 | 0.039° | 3.96° | 7.73° | 7.45° |
+| **0.40（当前默认）** | **0.84** | **0.36** | **0.052°** | **3.39°** | **6.89°** | **6.74°** |
+| 0.30 | 0.91 | 0.49 | 0.071° | 3.01° | 6.31° | 6.26° |
+
+（单位均为度；抖动为 10 Hz、±0.3 度手抖下输出的峰峰值，三列暂态为 100 deg/s 动作
+下与 master 的峰值偏差，数据来自同一条流水线（死区→α-β→平滑级）的离线扫描。）
+
+当前默认取 λ=0.40：暂态比原值降约 1/3，残留抖动 0.052° 仍在机械臂自身本底
+（0.011~0.041°）量级；再快到 λ=0.30 只多降约 10%，抖动却上升四成。换暂态的是 **β**
+（速度估计的收敛速度），α 只决定位置平滑程度——把 β 单独从 0.1225 提到 0.36 能得到
+与 λ=0.40 几乎相同的收益，但抖动同样上升，所以仍按极点公式成对改，不要单独放大 β
+去追响应。
 
 `--alpha-beta-max-dt=0.1` 来自 50 Hz 标称周期的 5 倍：出现这么长的调度空洞时，
 匀速模型已经不可信，程序会以最新测量重新锚定并把速度清零，不把旧速度外推过整段
@@ -181,7 +200,9 @@ det(A)   = 1 - α
 `none`（不滤波，同步优先）。
 
 α-β 调参优先保持两个极点相等：选一个 `0<λ<1`，再用
-`α=1-λ²`、`β=(1-λ)²` 计算。One Euro 对照方案的调参经验：
+`α=1-λ²`、`β=(1-λ)²` 计算（λ 越小越快、抖动越大，上节有实测的四档）。
+留意：**它只改暂态**——匀速跟随的滞后在驱动器执行侧，调这两个值不会改善。
+One Euro 对照方案的调参经验：
 
 - 静止时还在抖 → 调小 `--one-euro-min-cutoff`（0.5 会更狠，代价是起停更"粘"）；
 - 拖动时觉得跟不上 → 调大 `--one-euro-beta`（0.5 时 100 deg/s 的滞后降到 0.27 度）；
@@ -209,7 +230,7 @@ One Euro 压的是快抖（5~15 Hz），但它的截止频率在静止时是 1 H
 | 手停着（慢晃 ±0.15 度、速度约 0.3~0.5 deg/s） | **输出一动不动** |
 | 慢拖（≥ 0.8 deg/s，含 1 deg/s 的精细定位） | 连续跟随，**速度不归零** |
 | 快速拖动 | 死区完全不参与 |
-| 5 Hz 以上的快抖 | 速度门限会放行（它"在动"），由 α-β 与平滑级压掉 |
+| 5 Hz 以上的快抖 | 速度门限会放行（它"在动"）。压它靠的是整条链的频率响应，而且是**分频段**的：10 Hz 处残差约为输入的 1/12，5 Hz 处只压到一半（速度前馈在这个频段几乎是透明的，见「α-β 默认参数」一节）。所以死区管的是"停着不动"，快抖靠平滑级，两者不重叠 |
 
 代价与边界：
 
@@ -425,7 +446,7 @@ ros2 run piper piper_speed_limit
 ros2 run piper piper_speed_limit --send
 
 # 只处理一台
-ros2 run piper piper_speed_limit --port can_fr --send
+ros2 run piper piper_speed_limit --port can_fl --send
 ```
 
 ### 前置条件：该臂必须失能
@@ -454,18 +475,18 @@ ros2 service call /enable_srv_right piper_msgs/srv/Enable "{enable_request: fals
 
 | 接口 | 角色 | j2 | j3 | 其余关节 | max_joint_spd |
 | --- | --- | --- | --- | --- | --- |
-| `can_fl` | master_left | [−2.0, 180] | [−170, 2.0] | 出厂值 | 300 |
+| `can_ml` | master_left | [−2.0, 180] | [−170, 2.0] | 出厂值 | 300 |
 | `can_mr` | master_right | [−2.0, 180] | [−170, 2.0] | 出厂值 | 300 |
-| `can_fr` | follower_left | [−2.0, 180] | [−170, 2.0] | 出厂值 | 300 |
-| `can_ml` | follower_right | [−2.0, 180] | [−170, 2.0] | 出厂值 | 300 |
+| `can_fl` | follower_left | [−2.0, 180] | [−170, 2.0] | 出厂值 | 300 |
+| `can_fr` | follower_right | [−2.0, 180] | [−170, 2.0] | 出厂值 | 300 |
 
 ### 回滚命令
 
 ```bash
-ros2 run piper piper_speed_limit --port can_fl --spd 300 --send
-ros2 run piper piper_speed_limit --port can_mr --spd 300 --send
-ros2 run piper piper_speed_limit --port can_fr --spd 300 --send
 ros2 run piper piper_speed_limit --port can_ml --spd 300 --send
+ros2 run piper piper_speed_limit --port can_mr --spd 300 --send
+ros2 run piper piper_speed_limit --port can_fl --spd 300 --send
+ros2 run piper piper_speed_limit --port can_fr --spd 300 --send
 ```
 
 **每台都要用该台自己读到的原值**，不要照抄另一台——四台恰好出厂一致只是这次的运气。
@@ -475,7 +496,7 @@ ros2 run piper piper_speed_limit --port can_ml --spd 300 --send
 
 ### 驱动查询行为（实测，2026-09-23）
 
-**驱动一次只答一条限位查询**。在 `can_fl` 上实测：
+**驱动一次只答一条限位查询**。在 `can_ml` 上实测：
 
 | 查询方式 | 结果 |
 | --- | --- |
@@ -569,6 +590,11 @@ Piper 没有重力补偿/零力模式。实测：
 
 ### CAN 掉线会让节点自己退出、机械臂随后失能（2026-09-23 实测）
 
+> **本节引用的接口名是 2026-09-23 当时的命名**（当天左从臂叫 `can_fr`、今天叫 `can_fl`；
+> 当天主臂叫 `can_fl`、今天叫 `can_ml`）。日志原文与统计数字按当时记录保留、未改写；
+> 要对应到今天的实体，按序列号／USB 端口查 [`PI05_CAN_MAPPING.md`](PI05_CAN_MAPPING.md)
+> 的「接口命名」一节。
+
 现场跑一次性 50 秒验证时，左从臂突然不动了。事后查明：
 
 1. **控制节点检测到掉线后主动退出**，它自己的日志末尾是
@@ -615,7 +641,7 @@ Ctrl-C，或者在启动时加 `--no-return-home`。
 
 ```bash
 ros2 service call /enable_srv_left piper_msgs/srv/Enable "{enable_request: false}"
-ros2 run piper piper_enable_check --port can_fr --expect disabled
+ros2 run piper piper_enable_check --port can_fl --expect disabled
 ```
 
 ## 完整 50 秒验证流程
@@ -662,7 +688,7 @@ cd ~/piper_ros && colcon build --symlink-install
 ros2 run piper piper_bus_probe
 
 # 接口错误计数应当是 0（这一项曾抓到过一次 USB 适配器掉线：error-pass 3224）
-ip -s -d link show can_fl; ip -s -d link show can_fr
+ip -s -d link show can_ml; ip -s -d link show can_fl
 
 # 节点在跑、从臂使能
 ros2 node list
@@ -675,12 +701,21 @@ ros2 topic echo /arm_enable_status_left --once      # 期望 all_enabled: true
 cd /home/mips/piper_ros && sudo bash can_muti_activate.sh
 ```
 
+注意名字有**两个来源**：这个脚本按 USB 端口分配名字，而系统里的
+`/etc/systemd/network/20-piper-can-*.link` 按适配器序列号分配。两者不一致时会出现
+「名字都在、但对应错了臂」——2026-09-24 就是这么发现的。改完（或换过 USB 口 /
+重插过适配器之后）用这条只读命令验收，四条都必须 `[OK]`：
+
+```bash
+ros2 run piper piper_pi05_can verify all
+```
+
 ### 1. 起记录（第一个终端）
 
 ```bash
 source /opt/ros/humble/setup.bash && source ~/piper_ros/install/setup.bash
 ros2 run piper piper_teleop_verify --duration 70
-# 默认记录 can_fl(master_left) 与 can_fr(follower_left) 到 /tmp/piper_teleop_verify.csv
+# 默认记录 can_ml(master_left) 与 can_fl(follower_left) 到 /tmp/piper_teleop_verify.csv
 # 记录时长要比遥操作长（遥操作 50 秒 + 启动 3 秒 + 对齐 4 秒 + 回位约 10 秒）
 ```
 
@@ -753,8 +788,8 @@ ros2 run piper piper_teleop_verify --analyze /tmp/piper_teleop_verify.csv
 | `--speed` | 100 | follower 速度百分比 1–100；节点把它转发给 `MotionCtrl_2`，是**对整臂最大速度（3 rad/s ≈ 172 deg/s）的缩放**。100 = 不额外限速，改小它等于加一道软件限速 |
 | `--rate` | 50 | 发布频率 Hz（跟随与回位共用） |
 | `--filter` | `alpha-beta` | 跟随阶段滤波方案：`alpha-beta` / `one-euro` / `lowpass`（对照）/ `none` |
-| `--alpha-beta-alpha` | 0.5775 | α-β 位置残差增益；由重复误差极点 λ=0.65 推导 |
-| `--alpha-beta-beta` | 0.1225 | α-β 速度残差增益；由重复误差极点 λ=0.65 推导 |
+| `--alpha-beta-alpha` | 0.84 | α-β 位置残差增益；由重复误差极点 λ=0.40 推导 |
+| `--alpha-beta-beta` | 0.36 | α-β 速度残差增益；由重复误差极点 λ=0.40 推导 |
 | `--alpha-beta-max-dt` | 0.1 | 采样间隔超过此值时清零旧速度并以新测量重新锚定，秒 |
 | `--deadband-deg` | 0.2 | 死区幅度阈值，度；0 关闭死区 |
 | `--deadband-speed` | 0.8 | 死区速度门限 deg/s：低于它才认为手停着；0 表示只按幅度保持 |

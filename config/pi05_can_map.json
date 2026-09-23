@@ -1,6 +1,6 @@
 {
   "master_left": {
-    "interface": "can_fl",
+    "interface": "can_ml",
     "usb_port": "1-11:1.0",
     "serial": "0040002E4148570C20343133",
     "bitrate": 1000000
@@ -12,13 +12,13 @@
     "bitrate": 1000000
   },
   "follower_left": {
-    "interface": "can_fr",
+    "interface": "can_fl",
     "usb_port": "1-13:1.0",
     "serial": "004B00395443570F20393433",
     "bitrate": 1000000
   },
   "follower_right": {
-    "interface": "can_ml",
+    "interface": "can_fr",
     "usb_port": "1-2:1.0",
     "serial": "004C003B5443570F20393433",
     "bitrate": 1000000

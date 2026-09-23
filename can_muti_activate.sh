@@ -2,14 +2,16 @@
 declare -A USB_PORTS 
 
 # Pi05 four-arm mapping confirmed from physical arm identification.
+# 名字按接口的用途直读：can_<f|m><l|r>（f= follower、m= master）。
+# 与 config/pi05_can_map.json、/etc/systemd/network/20-piper-can-*.link 一致。
 # left master
-USB_PORTS["1-11:1.0"]="can_fl:1000000"
+USB_PORTS["1-11:1.0"]="can_ml:1000000"
 # left follower
-USB_PORTS["1-13:1.0"]="can_fr:1000000"
+USB_PORTS["1-13:1.0"]="can_fl:1000000"
 # right master
 USB_PORTS["1-4:1.0"]="can_mr:1000000"
 # right follower
-USB_PORTS["1-2:1.0"]="can_ml:1000000"
+USB_PORTS["1-2:1.0"]="can_fr:1000000"
 
 # Whether to ignore CAN quantity check (default false)
 IGNORE_CHECK=false

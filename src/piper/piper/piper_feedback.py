@@ -467,7 +467,8 @@ DEFAULT_RETURN_MAX_PEAK_DEG_S = 15.0
 RETURN_PATH_SAMPLES = 64
 # 实测的持续跟随速度上限，单位 deg/s，用于提示回位计划是否超出机械臂能力。
 #
-# 2026-09-23 实测（左从臂 can_fr，`max_joint_spd` 保持出厂 300 未改）：遥操作把
+# 2026-09-23 实测（左从臂 `follower_left`，当天其接口名叫 `can_fr`；
+# `max_joint_spd` 保持出厂 300 未改）：遥操作把
 # 速度百分比从 10% 提到 100% 后，follower 的持续速度达到 45.6~86.2 deg/s，并且
 # 跟着拖动速度走（j1 45.6 / master 44.1，j3 82.7 / 83.7），因此**驱动器的
 # `max_joint_spd` 在「CAN 流式位置指令 + MotionCtrl_2 百分比」这条控制路径上
@@ -567,12 +568,21 @@ DEFAULT_ONE_EURO_BETA = 0.3
 DEFAULT_ONE_EURO_D_CUTOFF_HZ = 1.0
 # α-β filter defaults.  They are pole-placed rather than hand-tuned.  For the
 # constant-velocity observer, a repeated discrete error pole λ gives
-# α=1-λ² and β=(1-λ)².  λ=0.65 at the 50 Hz teleop rate corresponds to a
-# 46.4 ms continuous-time constant: quick enough for deliberate hand motion,
-# while both error modes remain well inside the unit circle.
-DEFAULT_ALPHA_BETA_POLE = 0.65
-DEFAULT_ALPHA_BETA_ALPHA = 1.0 - DEFAULT_ALPHA_BETA_POLE ** 2  # 0.5775
-DEFAULT_ALPHA_BETA_BETA = (1.0 - DEFAULT_ALPHA_BETA_POLE) ** 2  # 0.1225
+# α=1-λ² and β=(1-λ)².  λ=0.40 at the 50 Hz teleop rate is a 21.8 ms
+# continuous-time constant.
+#
+# 2026-09-24 真机反馈"抖动已可接受、但迟滞明显"后按离线扫描改到 0.40（原 0.65，
+# 46.4 ms）。实测（同一条流水线，50 Hz）：
+#   静止残留抖动（10 Hz、±0.3 度）  0.021° → 0.052°，仍在机械臂自身本底
+#     （0.011~0.041°）量级，肉眼不可见；
+#   暂态峰值（100 deg/s）            起步 5.14°→3.50°、变速 5.12°→3.39°、
+#     反向 9.48°→6.89°、急停 8.90°→6.74°，约降 1/3。
+# **匀速段的滞后与 α、β 无关**：速度估计收敛后前馈把稳态滞后补成 0，改这两个
+# 只影响起步与变速的暂态。要再压暂态就得同时开大平滑级带宽，代价更大
+# （15→20 rad/s 抖动 0.052°→0.115°，而暂态只再降约两成）。
+DEFAULT_ALPHA_BETA_POLE = 0.40
+DEFAULT_ALPHA_BETA_ALPHA = 1.0 - DEFAULT_ALPHA_BETA_POLE ** 2  # 0.84
+DEFAULT_ALPHA_BETA_BETA = (1.0 - DEFAULT_ALPHA_BETA_POLE) ** 2  # 0.36
 # A sample gap this large means the constant-velocity model is no longer a
 # trustworthy description of what happened between observations.  Re-anchor
 # on the measurement instead of extrapolating stale velocity through the gap.

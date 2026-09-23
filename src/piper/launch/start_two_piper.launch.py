@@ -15,12 +15,12 @@ def generate_launch_description():
     # Declare the launch arguments
     can_left_port_arg = DeclareLaunchArgument(
         'can_left_port',
-        default_value='can_fr',
+        default_value='can_fl',
         description='Left follower CAN port for the Pi05 mapping.'
     )
     can_right_port_arg = DeclareLaunchArgument(
         'can_right_port',
-        default_value='can_ml',
+        default_value='can_fr',
         description='Right follower CAN port for the Pi05 mapping.'
     )
 
