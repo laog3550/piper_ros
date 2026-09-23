@@ -11,12 +11,25 @@ import argparse
 import math
 from piper_sdk import *
 from piper_sdk import C_PiperInterface
-from piper_msgs.msg import PiperStatusMsg, PosCmd
+from piper_msgs.msg import PiperEnableStatusMsg, PiperStatusMsg, PosCmd
 from piper_msgs.srv import Enable
+from piper.piper_enable_status import (
+    EnableState,
+    aggregate,
+    describe,
+    fill_enable_status,
+    is_fully_enabled,
+    read_joints,
+)
 from geometry_msgs.msg import Pose, PoseStamped
 from scipy.spatial.transform import Rotation as R  # For Euler angle to quaternion conversion
 from numpy import clip
 from builtin_interfaces.msg import Time
+
+# The enable observation is a diagnostic, so it is published far less often
+# than the 200 Hz joint feedback.
+ENABLE_STATUS_PERIOD = 0.1
+
 
 class PiperRosNode(Node):
     """ROS2 node for the robotic arm"""
@@ -44,6 +57,8 @@ class PiperRosNode(Node):
         self.joint_feedback_pub = self.create_publisher(JointState, 'joint_states_feedback', 1)
         self.joint_ctrl_pub = self.create_publisher(JointState, 'joint_ctrl', 1)
         self.arm_status_pub = self.create_publisher(PiperStatusMsg, 'arm_status', 1)
+        self.enable_status_pub = self.create_publisher(
+            PiperEnableStatusMsg, 'arm_enable_status', 1)
         self.end_pose_pub = self.create_publisher(Pose, 'end_pose', 1)
         self.end_pose_stamped_pub = self.create_publisher(PoseStamped, 'end_pose_stamped', 1)
         # Service
@@ -68,6 +83,11 @@ class PiperRosNode(Node):
         self.joint_ctrl.effort = [0.0] * 7
         # Enable flag
         self.__enable_flag = False
+        # Read-only six-joint enable observation, updated by the publish loop
+        self._enable_state = None
+        self._enable_next_publish = 0.0
+        # Latches the motion gate warning so it is logged once per block
+        self._motion_gate_blocked = False
         # Create piper class and open CAN interface
         self.piper = C_PiperInterface(can_name=self.can_port)
         self.piper.ConnectPort()
@@ -77,7 +97,11 @@ class PiperRosNode(Node):
         self.create_subscription(JointState, 'joint_ctrl_single', self.joint_callback, 1)
         self.create_subscription(Bool, 'enable_flag', self.enable_callback, 1)
 
-        self.publisher_thread = threading.Thread(target=self.publish_thread)
+        self._stop_event = threading.Event()
+        self.publisher_thread = threading.Thread(
+            target=self.publish_thread,
+            daemon=True,
+        )
         self.publisher_thread.start()
 
     def GetEnableFlag(self):
@@ -86,6 +110,15 @@ class PiperRosNode(Node):
     def publish_thread(self):
         """Publish messages from the robotic arm
         """
+        try:
+            self._publish_loop()
+        except Exception:
+            # ROS may invalidate the context while this background thread is
+            # publishing during SIGINT.  That is a normal shutdown condition.
+            if rclpy.ok():
+                raise
+
+    def _publish_loop(self):
         rate = self.create_rate(200)  # 200 Hz
         enable_flag = False
         # Set timeout (seconds)
@@ -93,7 +126,7 @@ class PiperRosNode(Node):
         # Record the time before entering the loop
         start_time = time.time()
         elapsed_time_flag = False
-        while rclpy.ok():
+        while rclpy.ok() and not self._stop_event.is_set():
             if(self.auto_enable):
                 while not (enable_flag):
                     elapsed_time = time.time() - start_time
@@ -124,6 +157,7 @@ class PiperRosNode(Node):
             
             if self.piper.isOk():
                 self.PublishArmState()
+                self.PublishArmEnableStatus()
                 self.PublishArmJointAndGripper()
                 self.PublishArmCtrlAndGripper()
                 self.PublishArmEndPose()
@@ -133,6 +167,47 @@ class PiperRosNode(Node):
                 rclpy.shutdown() 
 
             rate.sleep()
+
+    def ArmFullyEnabled(self) -> bool:
+        """Re-read the six driver enable bits before letting motion through.
+
+        The enable flag records what the enable service confirmed earlier.  A
+        joint that dropped out since then would otherwise still let motion
+        reach the arm, so motion is gated on a live reading instead.
+        """
+        if is_fully_enabled(read_joints(self.piper)):
+            self._motion_gate_blocked = False
+            return True
+        if not self._motion_gate_blocked:
+            self._motion_gate_blocked = True
+            self.get_logger().warn(
+                f"{self.can_port}: motion refused, the six joints are not all "
+                f"enabled ({describe(read_joints(self.piper))})")
+        return False
+
+    def PublishArmEnableStatus(self):
+        """Publish the read-only six-joint enable observation.
+
+        The joint drivers already broadcast this feedback, so sampling it puts
+        nothing on the CAN bus and cannot enable, disable or move the arm.
+        """
+        joints = read_joints(self.piper)
+        state = aggregate(joints)
+        if state is not self._enable_state:
+            self._enable_state = state
+            report = f"{self.can_port}: {EnableState(state).name} ({describe(joints)})"
+            if state is EnableState.PARTIAL:
+                self.get_logger().warn(
+                    f"Arm partially enabled, do not treat as enabled: {report}")
+            else:
+                self.get_logger().info(f"Six-joint enable state: {report}")
+        now = time.monotonic()
+        if now < self._enable_next_publish:
+            return
+        self._enable_next_publish = now + ENABLE_STATUS_PERIOD
+        enable_status = PiperEnableStatusMsg()
+        fill_enable_status(enable_status, joints, state, self.can_port)
+        self.enable_status_pub.publish(enable_status)
 
     def PublishArmState(self):
         arm_status = PiperStatusMsg()
@@ -271,7 +346,7 @@ class PiperRosNode(Node):
         rx = round(pos_data.roll*1000*factor)
         ry = round(pos_data.pitch*1000*factor)
         rz = round(pos_data.yaw*1000*factor)
-        if(self.GetEnableFlag()):
+        if(self.GetEnableFlag() and self.ArmFullyEnabled()):
             self.piper.MotionCtrl_2(0x01, 0x00, 50)
             self.piper.EndPoseCtrl(x, y, z, rx, ry, rz)
             gripper = round(pos_data.gripper * 1000 * 1000)
@@ -307,7 +382,7 @@ class PiperRosNode(Node):
             joint_6 = joint_6 * self.gripper_val_mutiple
 
         # 控制电机速度
-        if self.GetEnableFlag():
+        if self.GetEnableFlag() and self.ArmFullyEnabled():
             if joint_data.velocity != []:
                 all_zeros = all(v == 0 for v in joint_data.velocity)
             else:
@@ -430,5 +505,8 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        piper_single_node._stop_event.set()
+        piper_single_node.publisher_thread.join(timeout=1.0)
         piper_single_node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

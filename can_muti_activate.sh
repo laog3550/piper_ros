@@ -1,10 +1,15 @@
 #!/bin/bash
 declare -A USB_PORTS 
 
-# USB_PORTS["3-1.3:1.0"]="can_arm:1000000"
-USB_PORTS["3-1.1:1.0"]="can_arm1:1000000"
-USB_PORTS["3-1.2:1.0"]="can_arm2:1000000"
-# USB_PORTS["3-1.5:1.0"]="can_arm1:1000000"
+# Pi05 four-arm mapping confirmed from physical arm identification.
+# left master
+USB_PORTS["1-11:1.0"]="can_fl:1000000"
+# left follower
+USB_PORTS["1-13:1.0"]="can_fr:1000000"
+# right master
+USB_PORTS["1-4:1.0"]="can_mr:1000000"
+# right follower
+USB_PORTS["1-2:1.0"]="can_ml:1000000"
 
 # Whether to ignore CAN quantity check (default false)
 IGNORE_CHECK=false

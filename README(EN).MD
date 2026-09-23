@@ -6,6 +6,10 @@
 
 python_version >= "3.10"
 
+> This repository includes the confirmed Pi05 four-arm CAN mapping. See
+> [docs/PI05_CAN_MAPPING.md](docs/PI05_CAN_MAPPING.md) for interfaces, USB
+> ports, adapter identities, and the Python verification utility.
+
 Test:
 
 |PYTHON |STATE|

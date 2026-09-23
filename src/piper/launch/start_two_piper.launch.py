@@ -15,29 +15,23 @@ def generate_launch_description():
     # Declare the launch arguments
     can_left_port_arg = DeclareLaunchArgument(
         'can_left_port',
-        default_value='can0',
-        description='CAN left port to be used by the Piper node.'
+        default_value='can_fr',
+        description='Left follower CAN port for the Pi05 mapping.'
     )
     can_right_port_arg = DeclareLaunchArgument(
         'can_right_port',
-        default_value='can0',
-        description='CAN right port to be used by the Piper node.'
+        default_value='can_ml',
+        description='Right follower CAN port for the Pi05 mapping.'
     )
 
     auto_enable_arg = DeclareLaunchArgument(
         'auto_enable',
-        default_value='true',
+        default_value='false',
         description='Automatically enable the Piper node.'
     )
-    
-    rviz_ctrl_flag_arg = DeclareLaunchArgument(
-        'rviz_ctrl_flag',
-        default_value='false',
-        description='Start rviz flag.'
-    )
-    
-    girpper_exist_arg = DeclareLaunchArgument(
-        'girpper_exist',
+
+    gripper_exist_arg = DeclareLaunchArgument(
+        'gripper_exist',
         default_value='true',
         description='gripper'
     )
@@ -58,19 +52,21 @@ def generate_launch_description():
         parameters=[{
             'can_port': LaunchConfiguration('can_left_port'),
             'auto_enable': LaunchConfiguration('auto_enable'),
-            'rviz_ctrl_flag': LaunchConfiguration('rviz_ctrl_flag'),
-            'girpper_exist': LaunchConfiguration('girpper_exist'),
+            'gripper_exist': LaunchConfiguration('gripper_exist'),
             'gripper_val_mutiple': LaunchConfiguration('gripper_val_mutiple'),
         }],
         remappings=[
             # 控制
             ('pos_cmd', '/pos_cmd_left'),
             ('joint_ctrl_single', '/joint_ctrl_cmd_left'),
+            ('enable_flag', '/enable_flag_left'),
+            ('enable_srv', '/enable_srv_left'),
             # 反馈
             ('joint_states_single', '/joint_states_left'),
             ('joint_states_feedback', '/joint_left'),
             ('joint_ctrl', '/joint_states_ctrl_left'),
             ('arm_status', '/arm_status_left'),
+            ('arm_enable_status', '/arm_enable_status_left'),
             ('end_pose', '/end_pose_left'),
             ('end_pose_stamped', '/end_pose_stamped_left'),
         ]
@@ -85,19 +81,21 @@ def generate_launch_description():
         parameters=[{
             'can_port': LaunchConfiguration('can_right_port'),
             'auto_enable': LaunchConfiguration('auto_enable'),
-            'rviz_ctrl_flag': LaunchConfiguration('rviz_ctrl_flag'),
-            'girpper_exist': LaunchConfiguration('girpper_exist'),
+            'gripper_exist': LaunchConfiguration('gripper_exist'),
             'gripper_val_mutiple': LaunchConfiguration('gripper_val_mutiple'),
         }],
         remappings=[
             # 控制
             ('pos_cmd', '/pos_cmd_right'),
             ('joint_ctrl_single', '/joint_ctrl_cmd_right'),
+            ('enable_flag', '/enable_flag_right'),
+            ('enable_srv', '/enable_srv_right'),
             # 反馈
             ('joint_states_single', '/joint_states_right'),
             ('joint_states_feedback', '/joint_right'),
             ('joint_ctrl', '/joint_states_ctrl_right'),
             ('arm_status', '/arm_status_right'),
+            ('arm_enable_status', '/arm_enable_status_right'),
             ('end_pose', '/end_pose_right'),
             ('end_pose_stamped', '/end_pose_stamped_right'),
         ]
@@ -109,8 +107,7 @@ def generate_launch_description():
         can_left_port_arg,
         can_right_port_arg,
         auto_enable_arg,
-        rviz_ctrl_flag_arg,
-        girpper_exist_arg,
+        gripper_exist_arg,
         gripper_val_mutiple_arg,
         piper_left_node,
         piper_right_node,

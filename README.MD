@@ -7,6 +7,9 @@
 
 python_version >= "3.10"
 
+> 本仓库已配置 Pi05 四臂 CAN 映射。接口、USB 端口、适配器序列号及
+> Python 校验工具见 [docs/PI05_CAN_MAPPING.md](docs/PI05_CAN_MAPPING.md)。
+
 Test:
 
 |PYTHON |STATE|
