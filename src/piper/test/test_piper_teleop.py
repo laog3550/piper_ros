@@ -83,6 +83,9 @@ def _options(**overrides):
     options = types.SimpleNamespace(
         side='left', rate=50.0, speed=10, enable=True,
         filter=piper_teleop.DEFAULT_FILTER, filter_tau=0.02,
+        alpha_beta_alpha=piper_teleop.DEFAULT_ALPHA_BETA_ALPHA,
+        alpha_beta_beta=piper_teleop.DEFAULT_ALPHA_BETA_BETA,
+        alpha_beta_max_dt=0.10,
         one_euro_min_cutoff=1.0, one_euro_beta=0.3, one_euro_d_cutoff=1.0,
         deadband_deg=0.0,
         deadband_speed=piper_teleop.DEFAULT_DEADBAND_SPEED_DEG_S,
@@ -393,16 +396,14 @@ def test_a_small_hand_wobble_moves_nothing(monkeypatch):
     series = [math.degrees(command[0]) for command in node.publisher.sent]
     tail = series[-5:]
     # 5 Hz 手抖"在动"，速度门限会放行（这是为了慢拖不被切成台阶）；压掉它的是
-    # One Euro 与平滑级。残留约 0.03 度（输入的 1/5），来源是前馈通路——One Euro
-    # 的速度估计在 1 Hz 处仍留着 20% 的手抖导数，被前馈注了回来。这个量级已经
-    # 落到 follower 自身的机械本底（0.011~0.041 度），再压就要拿跟手性去换。
+    # α-β 状态估计与平滑级继续压制速度门限放行的高频分量。
     assert series[-1] == pytest.approx(10.0, abs=0.05)
     assert max(tail) - min(tail) < 0.15, '整条链应把 ±0.15 度的手抖压到 1/3 以下'
 
 
 def test_the_follow_pipeline_is_deadband_then_filter_then_smoother(
         monkeypatch, capsys):
-    # 顺序是用户定的：deadband -> one euro -> 五次插值平滑。流水线跑完后目标
+    # 顺序是：deadband -> α-β -> 五次插值平滑。流水线跑完后目标
     # 应当贴近 master，且带宽一行要如实打印出来。
     clock = FakeClock()
     monkeypatch.setattr(piper_teleop, 'time', clock)
@@ -425,8 +426,8 @@ def test_the_follow_pipeline_is_deadband_then_filter_then_smoother(
     # 平滑级限制加速度，所以它需要几个周期才能走完 20 度；末值应当已经到位。
     assert series[-1] == pytest.approx(20.0, abs=0.5)
     # 这里用的是"一个周期内跳 20 度"这种非物理的参考（真实拖动每周期最多
-    # 3.6 度），阶跃会让 One Euro 的速度估计出现尖峰并被前馈进去，从而过冲
-    # 约 30%；真实拖动下过冲在 2% 以内。
+    # 3.6 度），阶跃会让速度估计出现尖峰并被前馈进去；真实拖动必须再用
+    # piper_teleop_verify 核对过冲。
     assert max(series) < 20.0 * 1.4
 
 
@@ -447,16 +448,21 @@ def test_a_large_move_still_goes_through_the_deadband(monkeypatch):
     assert series[-1] > 29.9
 
 
-def test_follow_phase_uses_one_euro_by_default(monkeypatch):
-    # 用户报告：--speed 100 之后 follower 把 8~12 Hz 的手抖也复现了出来，而固定
-    # 截止的一阶低通做不到"既压手抖又不滞后"。默认方案因此换成 One Euro。
-    assert piper_teleop.DEFAULT_FILTER == 'one-euro'
+def test_follow_phase_uses_alpha_beta_by_default(monkeypatch):
+    assert piper_teleop.DEFAULT_FILTER == 'alpha-beta'
     summary, after_step = _follow_run(monkeypatch)
     assert summary.mode == 'follow'
-    # 阶跃会立刻把截止频率顶开，所以第一拍走得比固定低通更远（滞后更小），
-    # 但仍不是原值——静止时它压掉的手抖是后者的四倍（见 test_piper_feedback）。
+    # λ=0.65 导出的 α=0.5775：从 0 到 10 度的第一拍走到 5.775 度；之后
+    # 位置与速度状态共同收敛。这里关掉后级平滑，单独验证 α-β 的行为。
+    assert after_step[0] == pytest.approx(5.775, abs=1e-6)
+    assert max(after_step) < 11.0
+    assert after_step[-1] > 9.99
+
+
+def test_follow_phase_one_euro_remains_selectable(monkeypatch):
+    summary, after_step = _follow_run(monkeypatch, filter='one-euro')
+    assert summary.mode == 'follow'
     assert 5.0 < after_step[0] < 10.0
-    assert all(a <= b + 1e-9 for a, b in zip(after_step, after_step[1:]))
     assert after_step[-1] > 9.99
 
 
@@ -473,3 +479,4 @@ def test_follow_phase_without_filter_passes_the_master_through(monkeypatch):
     assert summary.mode == 'follow'
     # 不滤波：同步优先，第一拍就是 master 的原值。
     assert after_step[0] == pytest.approx(10.0)
+

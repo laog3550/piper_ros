@@ -7,6 +7,7 @@ import pytest
 import numpy as np
 
 from piper.piper_feedback import (
+    AlphaBetaFilter,
     DEFAULT_FILTER_TAU_S,
     DEFAULT_SMOOTH_MAX_ACCELERATION_DEG_S2,
     DEFAULT_SMOOTH_MAX_JERK_DEG_S3,
@@ -39,6 +40,41 @@ from piper.piper_feedback import (
 
 ALL_ON = (True,) * JOINT_COUNT
 ALL_OFF = (False,) * JOINT_COUNT
+
+
+def test_alpha_beta_tracks_a_constant_velocity_without_steady_lag():
+    flt = AlphaBetaFilter(alpha=0.5775, beta=0.1225)
+    flt.reset({1: 0.0})
+    outputs = []
+    for index in range(1, 201):
+        outputs.append(flt.update({1: index * 0.2}, 0.02)[1])
+    assert outputs[-1] == pytest.approx(40.0, abs=0.02)
+    assert flt.velocities()[1] == pytest.approx(10.0, abs=0.05)
+
+
+def test_alpha_beta_smooths_position_noise_and_keeps_velocity_bounded():
+    flt = AlphaBetaFilter(alpha=0.5775, beta=0.1225)
+    flt.reset({1: 5.0})
+    measurements = [5.0 + 0.1 * (-1) ** index for index in range(100)]
+    outputs = [flt.update({1: value}, 0.02)[1] for value in measurements]
+    assert max(outputs[-20:]) - min(outputs[-20:]) < 0.2
+    assert abs(flt.velocities()[1]) < 1.0
+
+
+def test_alpha_beta_reanchors_after_a_long_sample_gap():
+    flt = AlphaBetaFilter(alpha=0.5775, beta=0.1225, max_dt=0.1)
+    flt.reset({1: 0.0})
+    flt.update({1: 1.0}, 0.02)
+    assert flt.velocities()[1] > 0.0
+    assert flt.update({1: 4.0}, 0.2)[1] == pytest.approx(4.0)
+    assert flt.velocities()[1] == pytest.approx(0.0)
+
+
+def test_alpha_beta_rejects_invalid_parameters():
+    for kwargs in ({'alpha': 0.0}, {'alpha': 1.1}, {'beta': -0.1},
+                   {'beta': 1.1}, {'max_dt': 0.0}):
+        with pytest.raises(ValueError):
+            AlphaBetaFilter(**kwargs)
 
 
 def _frame(enabled, joint=1, voltage=240, foc_temp=30):
@@ -894,3 +930,4 @@ def test_one_euro_never_overshoots_a_ramp():
     clean = _tremor(speed_deg_s=30.0)
     filtered = _run_signals(OneEuroFilter(), clean)
     assert all(f <= c + 1e-9 for f, c in zip(filtered, clean))
+

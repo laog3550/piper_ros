@@ -22,8 +22,8 @@
 # 所以回位开始时必须打印醒目提示（见 _run_return_home）。--no-return-home 可以
 # 完全关掉回位。
 #
-# 跟随阶段默认带一道低通滤波（--filter-tau），它只平滑形状、不限制幅度；关节速度
-# 上限由驱动器的 max_joint_spd 决定，不在这里。
+# 跟随阶段默认用 α-β 状态估计同时获得平滑位置和速度；速度供后级前馈使用，
+# 关节速度上限仍由驱动器和运动平滑级共同约束。
 #
 # 默认是干跑：打印两臂姿态、所需对齐位移、回位计划，不发送任何内容。必须显式加
 # --enable 才真正发布运动指令。
@@ -41,6 +41,9 @@ from sensor_msgs.msg import JointState
 from piper_msgs.msg import PiperEnableStatusMsg
 from piper.piper_feedback import (
     CUBIC_PEAK_FACTOR,
+    DEFAULT_ALPHA_BETA_ALPHA,
+    DEFAULT_ALPHA_BETA_BETA,
+    DEFAULT_ALPHA_BETA_MAX_DT_S,
     DEFAULT_DEADBAND_DEG,
     DEFAULT_DEADBAND_SPEED_DEG_S,
     DEFAULT_FILTER_TAU_S,
@@ -55,6 +58,7 @@ from piper.piper_feedback import (
     DEFAULT_SMOOTH_MAX_VELOCITY_DEG_S,
     JOINT_COUNT,
     MEASURED_MAX_JOINT_SPD_DEG_S,
+    AlphaBetaFilter,
     DeadbandGate,
     LowPassFilter,
     MotionSmoother,
@@ -89,8 +93,8 @@ DEFAULT_MAX_STEP_DEG = 0.0
 # 原值，所以默认不给它再加一道软件限速。
 DEFAULT_SPEED = 100
 DEFAULT_RATE_HZ = 50.0
-FILTERS = ('one-euro', 'lowpass', 'none')
-DEFAULT_FILTER = 'one-euro'
+FILTERS = ('alpha-beta', 'one-euro', 'lowpass', 'none')
+DEFAULT_FILTER = 'alpha-beta'
 MIN_ALIGN_SECONDS = 1.0
 # 对齐期间 master 若被移动超过这个量，且**已经停下**，就以新姿态重新对齐。
 REALIGN_THRESHOLD_DEG = 2.0
@@ -207,6 +211,10 @@ def _make_filter(options):
         return None
     if options.filter == 'lowpass':
         return LowPassFilter(options.filter_tau)
+    if options.filter == 'alpha-beta':
+        return AlphaBetaFilter(options.alpha_beta_alpha,
+                               options.alpha_beta_beta,
+                               options.alpha_beta_max_dt)
     return OneEuroFilter(options.one_euro_min_cutoff, options.one_euro_beta,
                          options.one_euro_d_cutoff)
 
@@ -227,6 +235,11 @@ def _filter_note(options, prefix='跟随处理：越界钳制（始终启用）�
         note = '无滤波'
     elif options.filter == 'lowpass':
         note = f'一阶低通 τ={options.filter_tau:g}s'
+    elif options.filter == 'alpha-beta':
+        note = ('α-β 状态估计（'
+                f'α={options.alpha_beta_alpha:g}、'
+                f'β={options.alpha_beta_beta:g}、'
+                f'最大间隔={options.alpha_beta_max_dt:g}s）')
     else:
         note = ('One Euro 滤波（'
                 f'min_cutoff={options.one_euro_min_cutoff:g}Hz、'
@@ -331,10 +344,10 @@ def _run_teleop(node, options):
                     print('  对齐完成 -> 进入绝对跟随'
                           + _filter_note(options, prefix='，'))
             else:
-                # 跟随阶段的处理顺序：死区 -> One Euro -> 五次插值平滑。
-                # 死区丢掉小于阈值的输入变化（静止时目标完全不动）；One Euro
+                # 跟随阶段的处理顺序：死区 -> 状态估计 -> 五次插值平滑。
+                # 死区丢掉小于阈值的输入变化（静止时目标完全不动）；状态估计
                 # 压掉高频手抖；平滑级用固定带宽的三阶级联环限制加速度跳变，
-                # 并用 One Euro 的速度估计做前馈，保证跟手不滞后。dt 一律传实测
+                # 并用滤波器的速度估计做前馈，保证跟手不滞后。dt 一律传实测
                 # 循环间隔而不是设定周期：实际周期会波动，用设定值会让截止频率
                 # 跟着它一起变。
                 cycle = 0.0 if dt is None else dt
@@ -569,8 +582,19 @@ def _parser():
                              '0 表示关闭（默认 %(default)s）')
     parser.add_argument('--filter', choices=FILTERS, default=DEFAULT_FILTER,
                         help='跟随阶段的滤波方案（默认 %(default)s）：'
+                             'alpha-beta 同时估计平滑位置与速度；'
                              'one-euro 自适应低通，压手抖且快拖不滞后；'
                              'lowpass 固定截止的一阶低通（对照用）；none 不滤波')
+    parser.add_argument('--alpha-beta-alpha', type=float,
+                        default=DEFAULT_ALPHA_BETA_ALPHA,
+                        help='α-β：位置残差增益，范围 (0, 1]（默认 %(default)s）')
+    parser.add_argument('--alpha-beta-beta', type=float,
+                        default=DEFAULT_ALPHA_BETA_BETA,
+                        help='α-β：速度残差增益，范围 [0, 1]（默认 %(default)s）')
+    parser.add_argument('--alpha-beta-max-dt', type=float,
+                        default=DEFAULT_ALPHA_BETA_MAX_DT_S,
+                        help='α-β：超过该采样间隔就清零速度并重新锚定，秒'
+                             '（默认 %(default)s）')
     parser.add_argument('--one-euro-min-cutoff', type=float,
                         default=DEFAULT_ONE_EURO_MIN_CUTOFF_HZ,
                         help='One Euro：静止时的截止频率 Hz（默认 %(default)s）')
@@ -607,6 +631,15 @@ def main(args=None):
         return EXIT_REFUSED
     if options.filter_tau < 0.0:
         print('拒绝：--filter-tau 不得为负（0 表示不滤波）')
+        return EXIT_REFUSED
+    if not 0.0 < options.alpha_beta_alpha <= 1.0:
+        print('拒绝：--alpha-beta-alpha 必须在 (0, 1]')
+        return EXIT_REFUSED
+    if not 0.0 <= options.alpha_beta_beta <= 1.0:
+        print('拒绝：--alpha-beta-beta 必须在 [0, 1]')
+        return EXIT_REFUSED
+    if options.alpha_beta_max_dt <= 0.0:
+        print('拒绝：--alpha-beta-max-dt 必须为正')
         return EXIT_REFUSED
     if options.deadband_deg < 0.0:
         print('拒绝：--deadband-deg 不得为负（0 表示关闭死区）')
@@ -691,3 +724,4 @@ def main(args=None):
 
 if __name__ == '__main__':
     raise SystemExit(main())
+

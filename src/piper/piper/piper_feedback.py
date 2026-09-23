@@ -565,12 +565,87 @@ DEFAULT_DEADBAND_SPEED_DEG_S = 0.8
 DEFAULT_ONE_EURO_MIN_CUTOFF_HZ = 1.0
 DEFAULT_ONE_EURO_BETA = 0.3
 DEFAULT_ONE_EURO_D_CUTOFF_HZ = 1.0
+# α-β filter defaults.  They are pole-placed rather than hand-tuned.  For the
+# constant-velocity observer, a repeated discrete error pole λ gives
+# α=1-λ² and β=(1-λ)².  λ=0.65 at the 50 Hz teleop rate corresponds to a
+# 46.4 ms continuous-time constant: quick enough for deliberate hand motion,
+# while both error modes remain well inside the unit circle.
+DEFAULT_ALPHA_BETA_POLE = 0.65
+DEFAULT_ALPHA_BETA_ALPHA = 1.0 - DEFAULT_ALPHA_BETA_POLE ** 2  # 0.5775
+DEFAULT_ALPHA_BETA_BETA = (1.0 - DEFAULT_ALPHA_BETA_POLE) ** 2  # 0.1225
+# A sample gap this large means the constant-velocity model is no longer a
+# trustworthy description of what happened between observations.  Re-anchor
+# on the measurement instead of extrapolating stale velocity through the gap.
+DEFAULT_ALPHA_BETA_MAX_DT_S = 0.10
 
 
 def _smoothing_factor(dt: float, cutoff_hz: float) -> float:
     """First-order low-pass coefficient for one interval and cutoff."""
     rate = 2.0 * math.pi * cutoff_hz * dt
     return rate / (rate + 1.0)
+
+
+class AlphaBetaFilter:
+    """Constant-velocity position and velocity estimator, one per joint.
+
+    Each update first predicts position from the previous velocity and then
+    applies a fixed-gain correction from the measured position residual.  The
+    result is a smoothed position plus a velocity estimate suitable for the
+    follow-phase feed-forward path.  Unlike differentiating a low-pass output,
+    the residual explicitly accounts for the motion predicted during ``dt``.
+    """
+
+    def __init__(self, alpha: float = DEFAULT_ALPHA_BETA_ALPHA,
+                 beta: float = DEFAULT_ALPHA_BETA_BETA,
+                 max_dt: float = DEFAULT_ALPHA_BETA_MAX_DT_S):
+        if not 0.0 < alpha <= 1.0:
+            raise ValueError('alpha must be in (0, 1]')
+        if not 0.0 <= beta <= 1.0:
+            raise ValueError('beta must be in [0, 1]')
+        if max_dt <= 0.0:
+            raise ValueError('max_dt must be positive')
+        self.alpha = float(alpha)
+        self.beta = float(beta)
+        self.max_dt = float(max_dt)
+        self._state: Dict[int, Tuple[float, float]] = {}
+
+    def reset(self, values):
+        """Seed every joint at rest on the last published target."""
+        self._state = {
+            joint: (float(value), 0.0) for joint, value in values.items()
+        }
+        return dict(values)
+
+    def velocities(self):
+        """Return the newest estimated velocity in degrees per second."""
+        return {joint: state[1] for joint, state in self._state.items()}
+
+    def update(self, values, dt: float):
+        """Predict and correct every observed joint for one sample interval."""
+        estimated = {}
+        for joint, measurement in values.items():
+            state = self._state.get(joint)
+            if state is None:
+                self._state[joint] = (float(measurement), 0.0)
+                estimated[joint] = float(measurement)
+                continue
+            position, velocity = state
+            if dt <= 0.0:
+                estimated[joint] = position
+                continue
+            if dt > self.max_dt:
+                # A scheduler pause must not project the old velocity through
+                # the whole gap.  Start a new estimate at the fresh sample.
+                self._state[joint] = (float(measurement), 0.0)
+                estimated[joint] = float(measurement)
+                continue
+            predicted = position + velocity * dt
+            residual = float(measurement) - predicted
+            position = predicted + self.alpha * residual
+            velocity = velocity + self.beta * residual / dt
+            self._state[joint] = (position, velocity)
+            estimated[joint] = position
+        return estimated
 
 
 class OneEuroFilter:
@@ -875,3 +950,4 @@ class LowPassFilter:
             self._state[joint] = value
             smoothed[joint] = value
         return smoothed
+
