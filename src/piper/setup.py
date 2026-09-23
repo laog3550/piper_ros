@@ -31,6 +31,12 @@ setup(
             'piper_read_slave_joint = piper.piper_read_slave_joint:main',
             'piper_pi05_can = piper.pi05_can:main',
             'piper_enable_check = piper.piper_enable_check:main',
+            'piper_bus_probe = piper.piper_bus_probe:main',
+            'piper_joint_watch = piper.piper_joint_watch:main',
+            'piper_joint_move = piper.piper_joint_move:main',
+            'piper_teleop = piper.piper_teleop:main',
+            'piper_speed_limit = piper.piper_speed_limit:main',
+            'piper_teleop_verify = piper.piper_teleop_verify:main',
         ],
     },
 )

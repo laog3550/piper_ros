@@ -1,0 +1,693 @@
+#!/usr/bin/env python3
+"""Drive a follower arm to match a master arm's pose, then follow it live."""
+
+# 用途：主从遥操作。以 master 臂的物理姿态为准——follower 先平滑移动到与 master
+# 相同的姿态，随后持续跟随 master 的实时姿态，结束时自动回到启动时的姿态。
+#
+# 三个关键设计：
+#
+# 1. 绝对映射，不是增量映射。follower 的目标就是 master 当前的关节角度，所以两臂
+#    最终处于同一物理姿态。代价是初始姿态不同时 follower 要做一次较大的移动
+#    （实测左臂 j6 差 66.7 度、j4 差 10.4 度），所以对齐阶段是必需的。
+#
+# 2. 对齐阶段用三次插值过渡。取 3t^2-2t^3，它在两端速度为零，因此起始和结束都
+#    没有速度突变。对齐期间 master 的姿态被冻结为轨迹终点；若 master 被移动超过
+#    阈值，会自动以新姿态重新对齐，避免对齐结束时突然跳过去。
+#
+# 3. 结束回位（默认开启）。home 是本程序启动时 follower 的姿态，自动记录、没有
+#    配置参数。--duration 到时和 Ctrl-C 都会触发回位；回位用同一套三次插值，时长
+#    由位移和回位速度算出，不设固定时长。回位期间再按一次 Ctrl-C 会立即停在原地。
+#
+# 安全提醒：Ctrl-C 之后机械臂仍在运动，这是本工具唯一「按了键还在动」的行为，
+# 所以回位开始时必须打印醒目提示（见 _run_return_home）。--no-return-home 可以
+# 完全关掉回位。
+#
+# 跟随阶段默认带一道低通滤波（--filter-tau），它只平滑形状、不限制幅度；关节速度
+# 上限由驱动器的 max_joint_spd 决定，不在这里。
+#
+# 默认是干跑：打印两臂姿态、所需对齐位移、回位计划，不发送任何内容。必须显式加
+# --enable 才真正发布运动指令。
+
+from argparse import ArgumentParser
+from dataclasses import dataclass
+import math
+import time
+from typing import Dict, Optional
+
+import rclpy
+from rclpy.node import Node
+from rclpy.signals import SignalHandlerOptions
+from sensor_msgs.msg import JointState
+from piper_msgs.msg import PiperEnableStatusMsg
+from piper.piper_feedback import (
+    CUBIC_PEAK_FACTOR,
+    DEFAULT_DEADBAND_DEG,
+    DEFAULT_DEADBAND_SPEED_DEG_S,
+    DEFAULT_FILTER_TAU_S,
+    DEFAULT_ONE_EURO_BETA,
+    DEFAULT_ONE_EURO_D_CUTOFF_HZ,
+    DEFAULT_ONE_EURO_MIN_CUTOFF_HZ,
+    DEFAULT_RETURN_MAX_PEAK_DEG_S,
+    DEFAULT_RETURN_SPEED_DEG_S,
+    DEFAULT_SMOOTH_BANDWIDTH_RAD_S,
+    DEFAULT_SMOOTH_MAX_ACCELERATION_DEG_S2,
+    DEFAULT_SMOOTH_MAX_JERK_DEG_S3,
+    DEFAULT_SMOOTH_MAX_VELOCITY_DEG_S,
+    JOINT_COUNT,
+    MEASURED_MAX_JOINT_SPD_DEG_S,
+    DeadbandGate,
+    LowPassFilter,
+    MotionSmoother,
+    OneEuroFilter,
+    align_targets,
+    clamp_targets,
+    limit_step,
+    plan_return,
+)
+
+JOINT_NAMES = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6',
+               'gripper']
+SIDES = {
+    'left': ('/joint_ctrl_cmd_left', '/joint_states_left',
+             '/arm_enable_status_left', 'follower_left (can_fr)'),
+    'right': ('/joint_ctrl_cmd_right', '/joint_states_right',
+              '/arm_enable_status_right', 'follower_right (can_ml)'),
+}
+ENABLE_SERVICES = {'left': '/enable_srv_left', 'right': '/enable_srv_right'}
+DEFAULT_MASTER_TOPIC = '/joint_states_single'
+DEFAULT_SIDE = 'left'
+# 对齐时长。位移不变时它直接决定速度：默认 4.0 秒是原先 8.0 秒的两倍速
+# （实测 37 度的对齐位移峰值约 14 deg/s，仍低于实测跟随能力 86 deg/s）。
+DEFAULT_ALIGN_SECONDS = 4.0
+# 0 表示不做跳变限制。同步优先：任何对目标值的改动都会让 follower 与
+# master 不同步，所以默认关闭；需要防异常跳变时才设非零值。
+DEFAULT_MAX_STEP_DEG = 0.0
+# 速度百分比：节点把它转发给 MotionCtrl_2，是「对整臂最大速度（3 rad/s ≈
+# 172 deg/s）的缩放」，不是模式开关。100 = 不额外限速——2026-09-23 实测，
+# 10% 时 follower 的持续速度被压到 17.2 deg/s 且必然跟不上快速拖动；
+# 100% 时达到 45.6~86.2 deg/s 并跟着拖动速度走。遥操作要的就是跟随 master
+# 原值，所以默认不给它再加一道软件限速。
+DEFAULT_SPEED = 100
+DEFAULT_RATE_HZ = 50.0
+FILTERS = ('one-euro', 'lowpass', 'none')
+DEFAULT_FILTER = 'one-euro'
+MIN_ALIGN_SECONDS = 1.0
+# 对齐期间 master 若被移动超过这个量，且**已经停下**，就以新姿态重新对齐。
+REALIGN_THRESHOLD_DEG = 2.0
+# 重新对齐的次数上限。对齐的目标是启动时冻结的 master 快照，操作者一直握着
+# master 拖动时它永远追不上——2026-09-23 实测：25 秒的会话里重新对齐 3 次，
+# 最终模式仍是 align，follower 全程只在慢速追一个过时的快照，看起来就是
+# "几乎不跟随"。所以：只有"碰了一下又停下"才重新对齐，而且有次数上限。
+MAX_REALIGNS = 2
+# 判定 master 仍在被拖动的速度阈值，deg/s。
+MASTER_MOVING_DEG_S = 1.0
+STATUS_PERIOD = 1.0
+# 使能状态话题以 10 Hz 发布；比这更旧的状态不再能支撑「整臂使能」这个结论。
+STATUS_TIMEOUT_S = 1.0
+
+EXIT_OK = 0
+EXIT_REFUSED = 1
+
+
+class TeleopBridge(Node):
+    """Read both arms and optionally publish aligned follower commands."""
+
+    def __init__(self, side, master_topic):
+        super().__init__('piper_teleop')
+        self.cmd_topic, self.follower_topic, self.status_topic, self.arm = (
+            SIDES[side])
+        self.master_topic = master_topic
+        self.master = None
+        self.follower = None
+        self.status = None
+        self.status_time = None
+        self.create_subscription(JointState, master_topic,
+                                 self._on_master, 10)
+        self.create_subscription(JointState, self.follower_topic,
+                                 self._on_follower, 10)
+        self.create_subscription(PiperEnableStatusMsg, self.status_topic,
+                                 self._on_status, 10)
+        self.publisher = self.create_publisher(JointState, self.cmd_topic, 10)
+
+    def _angles(self, msg):
+        if len(msg.position) < JOINT_COUNT:
+            return None
+        values = [float(v) for v in msg.position[:JOINT_COUNT]]
+        if not all(math.isfinite(v) for v in values):
+            return None
+        return {i + 1: math.degrees(v) for i, v in enumerate(values)}
+
+    def _on_master(self, msg):
+        angles = self._angles(msg)
+        if angles is not None:
+            self.master = angles
+
+    def _on_follower(self, msg):
+        angles = self._angles(msg)
+        if angles is not None:
+            self.follower = angles
+
+    def _on_status(self, msg):
+        self.status = msg
+        self.status_time = time.monotonic()
+
+    def enable_error(self):
+        """Return None when the arm is confirmed enabled, else why not."""
+        if self.status is None:
+            return f'{self.status_topic} 上没有收到使能状态'
+        age = time.monotonic() - self.status_time
+        if age > STATUS_TIMEOUT_S:
+            # 使能状态自己也是反馈：话题停了就说明这一路已经掉线，此时
+            # 不能把最后一条「已使能」当成现在的结论。
+            return f'使能状态已过期（{age:.1f}s 没有更新）'
+        if not self.status.all_enabled:
+            return (f'整臂未确认使能（state={self.status.state} '
+                    f'all_enabled={self.status.all_enabled}）')
+        return None
+
+    def spin_for(self, seconds):
+        """Pump callbacks for a while."""
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            rclpy.spin_once(self, timeout_sec=0.02)
+
+
+def _publish_targets(node, targets_deg, speed):
+    """Publish one absolute joint target for all six joints."""
+    command = JointState()
+    command.name = list(JOINT_NAMES)
+    command.position = [math.radians(targets_deg[joint])
+                        for joint in range(1, JOINT_COUNT + 1)] + [0.0]
+    # 第 7 项是速度百分比；非零才会走低速分支而不是 100%。
+    command.velocity = [0.0] * JOINT_COUNT + [float(speed)]
+    command.effort = [0.0] * (JOINT_COUNT + 1)
+    node.publisher.publish(command)
+
+
+def _print_alignment_plan(master, follower, align_seconds):
+    """Print the pose difference and the implied peak joint speeds."""
+    print('两臂当前姿态与所需对齐位移（度）：')
+    print(f'  {"joint":<7}{"master":>10}{"follower":>10}{"move":>10}'
+          f'{"peak":>12}')
+    worst = 0.0
+    for joint in range(1, JOINT_COUNT + 1):
+        delta = master[joint] - follower[joint]
+        worst = max(worst, abs(delta))
+        peak = abs(delta) / align_seconds * CUBIC_PEAK_FACTOR
+        print(f'  j{joint:<6}{master[joint]:>10.3f}{follower[joint]:>10.3f}'
+              f'{delta:>+10.3f}{peak:>10.2f} deg/s')
+    print(f'  最大位移 {worst:.3f} 度，在 {align_seconds:g}s 内完成，'
+          f'插值峰值速度约 {worst / align_seconds * CUBIC_PEAK_FACTOR:.2f} deg/s')
+    return worst
+
+
+def _make_filter(options):
+    """Build the follow-phase filter the operator asked for."""
+    if options.filter == 'none':
+        return None
+    if options.filter == 'lowpass':
+        return LowPassFilter(options.filter_tau)
+    return OneEuroFilter(options.one_euro_min_cutoff, options.one_euro_beta,
+                         options.one_euro_d_cutoff)
+
+
+def _make_smoother(options):
+    """Build the jerk-limited smoothing stage, or None when it is off."""
+    if options.smooth_bandwidth <= 0.0:
+        return None
+    return MotionSmoother(options.smooth_bandwidth,
+                          options.smooth_max_velocity,
+                          options.smooth_max_acceleration,
+                          options.smooth_max_jerk)
+
+
+def _filter_note(options, prefix='跟随处理：越界钳制（始终启用），'):
+    """Describe the follow-phase filtering in use."""
+    if options.filter == 'none':
+        note = '无滤波'
+    elif options.filter == 'lowpass':
+        note = f'一阶低通 τ={options.filter_tau:g}s'
+    else:
+        note = ('One Euro 滤波（'
+                f'min_cutoff={options.one_euro_min_cutoff:g}Hz、'
+                f'beta={options.one_euro_beta:g}、'
+                f'd_cutoff={options.one_euro_d_cutoff:g}Hz）')
+    if options.deadband_deg > 0.0:
+        note += (f'，死区 {options.deadband_deg:g} 度'
+                 f'（速度门限 {options.deadband_speed:g} deg/s）')
+    if options.smooth_bandwidth > 0.0:
+        note += (f'，五次插值平滑（带宽 '
+                 f'{options.smooth_bandwidth:g}rad/s、加速度上限 '
+                 f'{options.smooth_max_acceleration:g}deg/s²）')
+    return prefix + note
+
+
+@dataclass
+class RunSummary:
+    """How the following phase ended, for the closing report."""
+
+    elapsed: float
+    stopped_by: str
+    mode: str
+    realigns: int
+    limit_hits: Dict[int, int]
+    last_targets: Optional[Dict[int, float]]
+
+
+def _run_teleop(node, options):
+    """Align the follower to the master, then follow it until told to stop."""
+    period = 1.0 / options.rate
+    mode = 'align'
+    started = time.monotonic()
+    align_started = started
+    align_from = dict(node.follower)
+    align_goal = dict(node.master)
+    previous = dict(align_from)
+    limit_hits: Dict[int, int] = {}
+    realigns = 0
+    loop_count = 0
+    last_report = started
+    next_deadline = started
+    last_cycle = None
+    last_targets = None
+    last_master = None
+    last_master_time = None
+    smoother = _make_filter(options)
+    deadband = DeadbandGate(options.deadband_deg, options.deadband_speed)
+    fine = _make_smoother(options)
+    stopped_by = 'ROS 上下文已结束'
+
+    try:
+        while rclpy.ok():
+            now = time.monotonic()
+            loop_count += 1
+            rclpy.spin_once(node, timeout_sec=0.0)
+            if node.master is None or node.follower is None:
+                time.sleep(period)
+                continue
+            dt = None if last_cycle is None else now - last_cycle
+            last_cycle = now
+            master_speed = 0.0
+            if last_master is not None and last_master_time is not None:
+                span = now - last_master_time
+                if span > 0.0:
+                    master_speed = max(
+                        abs(node.master[joint] - last_master[joint])
+                        for joint in range(1, JOINT_COUNT + 1)) / span
+            last_master = dict(node.master)
+            last_master_time = now
+
+            if mode == 'align':
+                progress = (now - align_started) / options.align_seconds
+                targets = align_targets(align_from, align_goal, progress)
+                if progress >= 1.0:
+                    # 对齐期间 master 若被动过，目标已经过时。
+                    drift = max(
+                        abs(node.master[j] - align_goal[j])
+                        for j in range(1, JOINT_COUNT + 1))
+                    if drift > REALIGN_THRESHOLD_DEG:
+                        if (master_speed < MASTER_MOVING_DEG_S
+                                and realigns < MAX_REALIGNS):
+                            realigns += 1
+                            print(f'  master 在对齐期间移动了 {drift:.2f} 度、'
+                                  f'现在已静止，以新姿态重新对齐'
+                                  f'（第 {realigns} 次）')
+                            align_started = now
+                            align_from = dict(node.follower)
+                            align_goal = dict(node.master)
+                            continue
+                        print(f'  master 仍在被拖动（{master_speed:.1f} deg/s、'
+                              f'已偏离对齐目标 {drift:.2f} 度）：不再重新对齐，'
+                              f'直接进入跟随')
+                    mode = 'follow'
+                    # 用最后一次发布的目标给滤波器做种子，而不是 master 的当前
+                    # 值：命令流保持连续，剩下的偏差交给跟随自己收敛掉（若用
+                    # master 当前值做种子，两者差多少就会当场跳多少）。
+                    if smoother is not None:
+                        smoother.reset(dict(previous))
+                    deadband.reset(dict(node.master))
+                    if fine is not None:
+                        fine.reset(dict(previous))
+                    print('  对齐完成 -> 进入绝对跟随'
+                          + _filter_note(options, prefix='，'))
+            else:
+                # 跟随阶段的处理顺序：死区 -> One Euro -> 五次插值平滑。
+                # 死区丢掉小于阈值的输入变化（静止时目标完全不动）；One Euro
+                # 压掉高频手抖；平滑级用固定带宽的三阶级联环限制加速度跳变，
+                # 并用 One Euro 的速度估计做前馈，保证跟手不滞后。dt 一律传实测
+                # 循环间隔而不是设定周期：实际周期会波动，用设定值会让截止频率
+                # 跟着它一起变。
+                cycle = 0.0 if dt is None else dt
+                sample = deadband.update(node.master, cycle)
+                if smoother is not None:
+                    sample = smoother.update(sample, cycle)
+                if fine is not None:
+                    sample = fine.update(sample, smoother.velocities()
+                                         if smoother is not None else {}, cycle)
+                targets = dict(sample)
+
+            # 越界钳制是必需的：含越界目标的指令行为未定义。除此之外不再
+            # 改动目标——同步只允许保留 master 的原值（外加默认开启的低通滤波）。
+            targets, clamped = clamp_targets(targets)
+            if options.max_step_deg > 0.0:
+                targets, _ = limit_step(targets, previous,
+                                        options.max_step_deg)
+            for joint in clamped:
+                limit_hits[joint] = limit_hits.get(joint, 0) + 1
+            previous = targets
+            last_targets = targets
+
+            if options.enable:
+                _publish_targets(node, targets, options.speed)
+
+            if now - last_report >= STATUS_PERIOD:
+                # 实际频率直接决定跟随延迟。它低于 --rate 说明单次循环
+                # 的处理耗时超过了周期，需要提高 --rate 或降低负载。
+                actual_hz = loop_count / max(now - last_report, 1e-9)
+                loop_count = 0
+                last_report = now
+                if mode == 'align':
+                    headline = ('  [对齐] 进度 '
+                                f'{(now - align_started) / options.align_seconds * 100:5.1f}%'
+                                f'  {actual_hz:5.1f}Hz')
+                else:
+                    headline = f'  [跟随] {actual_hz:5.1f}Hz'
+                print(headline + ' follower 目标：' + ' '.join(
+                    f'j{j}={targets[j]:+8.3f}'
+                    for j in range(1, JOINT_COUNT + 1)))
+                if limit_hits:
+                    print('    !! 已触限位的关节：' + '、'.join(
+                        f'j{j}({limit_hits[j]})'
+                        for j in sorted(limit_hits)))
+                if node.status is not None:
+                    error = node.enable_error()
+                    if error:
+                        print(f'    !! follower 使能异常：{error}')
+
+            if (options.duration is not None
+                    and now - started >= options.duration):
+                stopped_by = f'运行到 --duration {options.duration:g}s'
+                break
+            # 按累积截止时间休眠并扣除处理耗时，否则实际频率会低于设定，
+            # 直接表现为跟随延迟。
+            next_deadline += period
+            left = next_deadline - time.monotonic()
+            if left > 0:
+                time.sleep(left)
+            else:
+                next_deadline = time.monotonic()
+    except KeyboardInterrupt:
+        stopped_by = 'Ctrl-C 中断'
+
+    return RunSummary(
+        elapsed=time.monotonic() - started,
+        stopped_by=stopped_by,
+        mode=mode,
+        realigns=realigns,
+        limit_hits=limit_hits,
+        last_targets=last_targets,
+    )
+
+
+def _print_return_plan(start, home, plan):
+    """Print what the return move will do, before any of it happens."""
+    print(f'  {"joint":<7}{"start":>10}{"home":>10}{"move":>10}{"peak":>10}')
+    for joint in range(1, JOINT_COUNT + 1):
+        delta = plan.deltas_deg[joint]
+        peak = (CUBIC_PEAK_FACTOR * abs(delta) / plan.duration
+                if plan.duration > 0.0 else 0.0)
+        mark = '  !!' if joint in plan.clamped_deg else ''
+        print(f'  j{joint:<6}{start[joint]:>10.3f}{home[joint]:>10.3f}'
+              f'{delta:>+10.3f}{peak:>10.2f}{mark}')
+    if plan.duration <= 0.0:
+        print('  起点与 home 已经相同，无需移动')
+        return
+    worst = max(plan.deltas_deg, key=lambda j: abs(plan.deltas_deg[j]))
+    print(f'  最大位移 {plan.max_delta_deg:.3f} 度（j{worst}）→ 回位时长 '
+          f'{plan.duration:.2f}s，平均 {plan.max_delta_deg / plan.duration:.2f} '
+          f'deg/s，峰值 {plan.peak_deg_s:.2f} deg/s')
+    if plan.clamped_deg:
+        # 钳制意味着这一段指令偏离了计划路径，必须在使用前说清楚。
+        print('  !! 会触及限位的关节：' + '、'.join(
+            f'j{joint}(路径上最多被钳 {amount:.3f} 度)'
+            for joint, amount in sorted(plan.clamped_deg.items())))
+    if plan.peak_deg_s > MEASURED_MAX_JOINT_SPD_DEG_S:
+        print(f'  注意：峰值 {plan.peak_deg_s:.2f} deg/s 高于实测跟随能力 '
+              f'{MEASURED_MAX_JOINT_SPD_DEG_S:g} deg/s，'
+              f'follower 会滞后于这条轨迹（终点仍会到达）')
+
+
+def _follow_return_path(node, options, start, home, plan):
+    """Publish the cubic path home; returns False if it had to stop early."""
+    period = 1.0 / options.rate
+    started = time.monotonic()
+    loop_count = 0
+    last_report = started
+    next_deadline = started
+    while True:
+        now = time.monotonic()
+        loop_count += 1
+        if rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.0)
+        # 回位前和回位中都要确认整臂使能：掉线之后继续发指令是盲目动作。
+        error = node.enable_error()
+        if error:
+            print()
+            print(f'  !! 回位中止：{error}；机械臂停在当前姿态，不再发指令')
+            return False
+        progress = (now - started) / plan.duration
+        targets, clamped = clamp_targets(align_targets(start, home, progress))
+        _publish_targets(node, targets, options.speed)
+        if now - last_report >= STATUS_PERIOD:
+            actual_hz = loop_count / max(now - last_report, 1e-9)
+            loop_count = 0
+            last_report = now
+            print(f'  [回位] {min(progress, 1.0) * 100:5.1f}% {actual_hz:5.1f}Hz '
+                  'follower 目标：' + ' '.join(
+                      f'j{j}={targets[j]:+8.3f}'
+                      for j in range(1, JOINT_COUNT + 1)))
+            if clamped:
+                print('    !! 回位目标被钳制：' + '、'.join(
+                    f'j{j}({clamped[j]:+.3f})' for j in sorted(clamped)))
+        if progress >= 1.0:
+            return True
+        # 与跟随阶段一致：按累积截止时间休眠并扣除处理耗时。
+        next_deadline += period
+        left = next_deadline - time.monotonic()
+        if left > 0:
+            time.sleep(left)
+        else:
+            next_deadline = time.monotonic()
+
+
+def _run_return_home(node, options, home, summary):
+    """Bring the follower back to the pose this run started from."""
+    start = (summary.last_targets if summary.last_targets is not None
+             else node.follower)
+    if start is None:
+        print('  回位中止：没有可用的 follower 姿态，不发送任何指令')
+        return
+    plan = plan_return(start, home, options.return_speed,
+                       options.return_max_peak)
+    print()
+    print('=' * 72)
+    if options.enable:
+        print(f'遥操作结束（{summary.stopped_by}）：正在回到初始位置，'
+              f'预计 {plan.duration:.1f} 秒；再按一次 Ctrl-C 可立即停下')
+    else:
+        print(f'遥操作结束（{summary.stopped_by}）：干跑，以下是回位计划，'
+              '不发送任何内容')
+    print('=' * 72)
+    if summary.last_targets is not None:
+        print('  回位起点：最后一次发布的跟随目标'
+              + ('（干跑时 follower 不会真的移动，用它预览回位计划）'
+                 if not options.enable else ''))
+    else:
+        print('  回位起点：follower 的实测姿态')
+    _print_return_plan(start, home, plan)
+
+    if not options.enable:
+        return
+    error = node.enable_error()
+    if error:
+        print(f'  回位中止：{error}，不发送任何指令')
+        return
+    if plan.duration <= 0.0:
+        print('  回位结束：follower 已经在初始姿态上，无需移动')
+        return
+    try:
+        if _follow_return_path(node, options, start, home, plan):
+            print(f'  回位完成：{plan.duration:.1f}s 内走完轨迹，'
+                  'follower 保持使能停在初始姿态')
+            print('  如需失能：ros2 service call '
+                  f'{ENABLE_SERVICES[options.side]} piper_msgs/srv/Enable '
+                  '"{enable_request: false}"')
+    except KeyboardInterrupt:
+        print()
+        print('  再次 Ctrl-C：已中止回位，机械臂停在原地（仍使能）')
+
+
+def _parser():
+    parser = ArgumentParser(description=__doc__)
+    parser.add_argument('--side', choices=tuple(SIDES), default=DEFAULT_SIDE,
+                        help='要驱动的 follower（默认 %(default)s）')
+    parser.add_argument('--master-topic', default=DEFAULT_MASTER_TOPIC,
+                        help='master 臂关节角度话题（默认 %(default)s）')
+    parser.add_argument('--align-seconds', type=float,
+                        default=DEFAULT_ALIGN_SECONDS,
+                        help='对齐阶段时长，秒（默认 %(default)s）')
+    parser.add_argument('--max-step-deg', type=float,
+                        default=DEFAULT_MAX_STEP_DEG,
+                        help='可选：每周期目标最大变化，0 表示不限制（默认 %(default)s）')
+    parser.add_argument('--speed', type=int, default=DEFAULT_SPEED,
+                        help='follower 速度百分比 1-100，100 表示不额外限速'
+                             '（默认 %(default)s）')
+    parser.add_argument('--rate', type=float, default=DEFAULT_RATE_HZ,
+                        help='发布频率 Hz（默认 %(default)s）')
+    parser.add_argument('--duration', type=float, default=None,
+                        help='可选：运行指定秒数后自动结束（随后回位）')
+    parser.add_argument('--smooth-bandwidth', type=float,
+                        default=DEFAULT_SMOOTH_BANDWIDTH_RAD_S,
+                        help='五次插值平滑的带宽 rad/s；0 表示关掉这一级'
+                             '（默认 %(default)s）')
+    parser.add_argument('--smooth-max-velocity', type=float,
+                        default=DEFAULT_SMOOTH_MAX_VELOCITY_DEG_S,
+                        help='平滑级的速度上限 deg/s（默认 %(default)s）')
+    parser.add_argument('--smooth-max-acceleration', type=float,
+                        default=DEFAULT_SMOOTH_MAX_ACCELERATION_DEG_S2,
+                        help='平滑级的加速度上限 deg/s²（默认 %(default)s）')
+    parser.add_argument('--smooth-max-jerk', type=float,
+                        default=DEFAULT_SMOOTH_MAX_JERK_DEG_S3,
+                        help='平滑级的 jerk 上限 deg/s³（默认 %(default)s）')
+    parser.add_argument('--deadband-speed', type=float,
+                        default=DEFAULT_DEADBAND_SPEED_DEG_S,
+                        help='死区的速度门限 deg/s：低于它才认为手停着；'
+                             '0 表示只按幅度保持（默认 %(default)s）')
+    parser.add_argument('--deadband-deg', type=float,
+                        default=DEFAULT_DEADBAND_DEG,
+                        help='跟随阶段的死区，度：小于它的输入变化不传递，'
+                             '0 表示关闭（默认 %(default)s）')
+    parser.add_argument('--filter', choices=FILTERS, default=DEFAULT_FILTER,
+                        help='跟随阶段的滤波方案（默认 %(default)s）：'
+                             'one-euro 自适应低通，压手抖且快拖不滞后；'
+                             'lowpass 固定截止的一阶低通（对照用）；none 不滤波')
+    parser.add_argument('--one-euro-min-cutoff', type=float,
+                        default=DEFAULT_ONE_EURO_MIN_CUTOFF_HZ,
+                        help='One Euro：静止时的截止频率 Hz（默认 %(default)s）')
+    parser.add_argument('--one-euro-beta', type=float,
+                        default=DEFAULT_ONE_EURO_BETA,
+                        help='One Euro：截止频率随速度的增长，Hz per deg/s'
+                             '（默认 %(default)s）')
+    parser.add_argument('--one-euro-d-cutoff', type=float,
+                        default=DEFAULT_ONE_EURO_D_CUTOFF_HZ,
+                        help='One Euro：速度估计自身的截止频率 Hz（默认 %(default)s）')
+    parser.add_argument('--filter-tau', type=float, default=DEFAULT_FILTER_TAU_S,
+                        help='仅 --filter lowpass 使用：时间常数，秒（默认 %(default)s）')
+    parser.add_argument('--return-speed', type=float,
+                        default=DEFAULT_RETURN_SPEED_DEG_S,
+                        help='回位平均速度 deg/s（默认 %(default)s）')
+    parser.add_argument('--return-max-peak', type=float,
+                        default=DEFAULT_RETURN_MAX_PEAK_DEG_S,
+                        help='回位峰值速度上限 deg/s（默认 %(default)s）')
+    parser.add_argument('--no-return-home', action='store_true',
+                        help='结束时停在原地，不回到初始位置')
+    parser.add_argument('--enable', action='store_true',
+                        help='真正发布运动指令；不加此参数只做干跑')
+    return parser
+
+
+def main(args=None):
+    """Dry-run, or align the follower to the master and then follow it."""
+    options = _parser().parse_args(args)
+    if options.align_seconds < MIN_ALIGN_SECONDS:
+        print(f'拒绝：--align-seconds 不得小于 {MIN_ALIGN_SECONDS}')
+        return EXIT_REFUSED
+    if not 1 <= options.speed <= 100:
+        print('拒绝：--speed 必须在 1..100')
+        return EXIT_REFUSED
+    if options.filter_tau < 0.0:
+        print('拒绝：--filter-tau 不得为负（0 表示不滤波）')
+        return EXIT_REFUSED
+    if options.deadband_deg < 0.0:
+        print('拒绝：--deadband-deg 不得为负（0 表示关闭死区）')
+        return EXIT_REFUSED
+    if options.deadband_speed < 0.0:
+        print('拒绝：--deadband-speed 不得为负（0 表示只按幅度保持）')
+        return EXIT_REFUSED
+    if options.smooth_bandwidth < 0.0:
+        print('拒绝：--smooth-bandwidth 不得为负（0 表示关闭平滑级）')
+        return EXIT_REFUSED
+    if options.smooth_max_velocity <= 0.0 \
+            or options.smooth_max_acceleration <= 0.0 \
+            or options.smooth_max_jerk <= 0.0:
+        print('拒绝：平滑级的三个上限都必须为正')
+        return EXIT_REFUSED
+    if options.return_speed <= 0.0 or options.return_max_peak <= 0.0:
+        print('拒绝：--return-speed 与 --return-max-peak 必须为正')
+        return EXIT_REFUSED
+
+    # 自己接管 SIGINT（SignalHandlerOptions.NO → Python 默认行为：抛
+    # KeyboardInterrupt）。rclpy 默认的 SIGINT 处理会在 Ctrl-C 时立刻关闭上下文，
+    # 之后发布和订阅都不再工作——而回位恰恰发生在 Ctrl-C 之后，必须还能发指令、
+    # 还能读使能状态。代价是 SIGTERM(kill) 不再触发回位，它是立即终止。
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+    node = TeleopBridge(options.side, options.master_topic)
+    try:
+        node.spin_for(3.0)
+        print(f'follower 目标话题：{node.cmd_topic}（{node.arm}）')
+        print(f'master 角度话题  ：{node.master_topic}')
+        if node.master is None:
+            print(f'拒绝：{node.master_topic} 上没有收到 master 的关节角度')
+            return EXIT_REFUSED
+        if node.follower is None:
+            print(f'拒绝：{node.follower_topic} 上没有收到 follower 的角度')
+            return EXIT_REFUSED
+        error = node.enable_error()
+        if options.enable and error:
+            print(f'拒绝：{error}，拒绝发布运动指令')
+            return EXIT_REFUSED
+        # home 就是本程序启动时 follower 的姿态，自动记录，不需要配置参数。
+        home = dict(node.follower)
+
+        print()
+        _print_alignment_plan(node.master, node.follower,
+                              options.align_seconds)
+        print()
+        print(f'模式：先在 {options.align_seconds:g}s 内三次插值对齐，'
+              f'再绝对跟随 master；{options.rate:g} Hz，速度 {options.speed}%'
+              + ('' if options.enable else '（干跑，不发送任何内容）'))
+        print(_filter_note(options))
+        if options.no_return_home:
+            return_note = '不回位，停在原地（--no-return-home）'
+        else:
+            return_note = (f'回到启动姿态 home，平均 {options.return_speed:g} '
+                           f'deg/s、峰值上限 {options.return_max_peak:g} deg/s'
+                           f'（时长由位移算出）')
+        print('结束时  ：' + return_note)
+        print('注意：对齐期间请不要触碰 master，否则会自动重新对齐。')
+
+        summary = _run_teleop(node, options)
+
+        print()
+        print(f'结束：运行 {summary.elapsed:.1f}s（{summary.stopped_by}），'
+              f'最终模式 {summary.mode}，重新对齐 {summary.realigns} 次'
+              + ('，未发送任何内容（干跑）' if not options.enable else ''))
+        if summary.limit_hits:
+            print('  触限位统计：' + '、'.join(
+                f'j{j} {summary.limit_hits[j]} 次'
+                for j in sorted(summary.limit_hits)))
+        else:
+            print('  触限位统计：无')
+
+        if options.no_return_home:
+            print('  回位：已禁用（--no-return-home），follower 停在原地')
+        else:
+            _run_return_home(node, options, home, summary)
+        return EXIT_OK
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
