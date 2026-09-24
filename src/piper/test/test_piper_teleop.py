@@ -39,12 +39,14 @@ class FakePublisher:
 
     def __init__(self, fail_at=None):
         self.sent = []
+        self.efforts = []
         self.fail_at = fail_at
 
     def publish(self, msg):
         if self.fail_at is not None and len(self.sent) + 1 == self.fail_at:
             raise KeyboardInterrupt
-        self.sent.append([float(v) for v in msg.position[:JOINT_COUNT]])
+        self.sent.append([float(v) for v in msg.position[:JOINT_COUNT + 1]])
+        self.efforts.append(float(msg.effort[JOINT_COUNT]))
 
 
 class FakeRclpy:
@@ -70,6 +72,9 @@ class FakeNode:
         self.publisher = FakePublisher()
         self.follower = dict(follower) if follower else _pose(0.0)
         self.master = dict(master) if master else _pose(0.0)
+        # 夹爪开口（米）。保持 None 表示这一路没有夹爪信息，遥操作不会镜像它。
+        self.master_gripper = None
+        self.follower_gripper = None
         self.status = object()
         self.error = None if enabled else '整臂未确认使能（state=1 all_enabled=False）'
         self.on_spin = None
@@ -89,6 +94,10 @@ def _options(**overrides):
         one_euro_min_cutoff=1.0, one_euro_beta=0.3, one_euro_d_cutoff=1.0,
         deadband_deg=0.0,
         deadband_speed=piper_teleop.DEFAULT_DEADBAND_SPEED_DEG_S,
+        gripper=True,
+        gripper_effort=piper_teleop.DEFAULT_GRIPPER_EFFORT_NM,
+        gripper_deadband=piper_teleop.DEFAULT_GRIPPER_DEADBAND_M,
+        gripper_scale=piper_teleop.DEFAULT_GRIPPER_SCALE,
         # 默认关掉平滑级：滤波/死区的单元用例要单独断言它们自己的行为，
         # 整条流水线由 test_the_follow_pipeline_... 覆盖。
         smooth_bandwidth=0.0,
@@ -490,6 +499,122 @@ def test_follow_phase_uses_alpha_beta_by_default(monkeypatch):
     assert after_step[0] == pytest.approx(8.4, abs=1e-6)
     assert max(after_step) < 11.0
     assert after_step[-1] > 9.99
+
+
+def test_gripper_follows_the_master_without_a_jump(monkeypatch):
+    """夹爪并入同一条链：开局就是自身开口，收敛到 master 的开口，没有一步跳变。"""
+    clock = FakeClock()
+    monkeypatch.setattr(piper_teleop, 'time', clock)
+    monkeypatch.setattr(piper_teleop, 'rclpy', FakeRclpy())
+    node = FakeNode()
+    node.follower_gripper = 0.005            # 从臂夹爪 5mm
+    node.master_gripper = 0.005
+
+    def on_spin(count):
+        node.master = _pose(6.0)
+        if count >= 3:
+            node.master_gripper = 0.050      # 对齐期间 master 张开到 50mm
+
+    node.on_spin = on_spin
+    options = _options(align_seconds=0.2, duration=1.0, gripper_scale=1.0)
+    summary = piper_teleop._run_teleop(node, options)
+    assert summary.mode == 'follow'
+    grips = [command[JOINT_COUNT] for command in node.publisher.sent]
+    assert grips[0] == pytest.approx(0.005, abs=1e-9)
+    assert all(0.0 <= grip <= 0.08 for grip in grips)
+    # 45mm 的位移分很多拍走完（单拍最大 15mm 以内），不是一次跳过去
+    assert max(abs(b - a) for a, b in zip(grips, grips[1:])) < 0.015
+    assert grips[-1] == pytest.approx(0.050, abs=0.002)
+    # 夹持力随指令发出（节点会钳到 [0.5, 3] N·m）
+    assert node.publisher.efforts[-1] == pytest.approx(options.gripper_effort)
+    assert summary.last_gripper == pytest.approx(grips[-1], abs=1e-9)
+
+
+def test_gripper_command_is_clamped_into_the_commandable_range(monkeypatch):
+    """master 报出越界开口时，指令被钳到 0~80mm，不会原样转发。"""
+    clock = FakeClock()
+    monkeypatch.setattr(piper_teleop, 'time', clock)
+    monkeypatch.setattr(piper_teleop, 'rclpy', FakeRclpy())
+    node = FakeNode()
+    node.follower_gripper = 0.0
+    node.master_gripper = 0.0
+
+    def on_spin(count):
+        node.master = _pose(0.0)
+        if count >= 3:
+            node.master_gripper = 0.5        # 0.5m：远超 80mm 行程
+
+    node.on_spin = on_spin
+    piper_teleop._run_teleop(node, _options(align_seconds=0.2, duration=0.8,
+                                            gripper_scale=1.0))
+    grips = [command[JOINT_COUNT] for command in node.publisher.sent]
+    assert all(0.0 <= grip <= 0.08 for grip in grips)
+    assert grips[-1] == pytest.approx(0.08, abs=1e-9)
+
+
+def test_no_gripper_keeps_the_old_command_shape(monkeypatch):
+    """--no-gripper 时第 7 项与夹持力都保持 0，即加入夹爪之前的指令形状。"""
+    clock = FakeClock()
+    monkeypatch.setattr(piper_teleop, 'time', clock)
+    monkeypatch.setattr(piper_teleop, 'rclpy', FakeRclpy())
+    node = FakeNode()
+    node.follower_gripper = 0.01
+    node.master_gripper = 0.05
+    node.on_spin = lambda count: setattr(node, 'master', _pose(4.0))
+    options = _options(align_seconds=0.2, duration=0.6, gripper=False)
+    piper_teleop._run_teleop(node, options)
+    assert all(command[JOINT_COUNT] == 0.0 for command in node.publisher.sent)
+    assert all(effort == 0.0 for effort in node.publisher.efforts)
+
+
+def test_gripper_scale_multiplies_the_master_opening(monkeypatch):
+    """默认按 1.3 倍换算：主臂夹爪行程只有从臂的约 1/1.3，走满行程正好到 80mm。"""
+    clock = FakeClock()
+    monkeypatch.setattr(piper_teleop, 'time', clock)
+    monkeypatch.setattr(piper_teleop, 'rclpy', FakeRclpy())
+    node = FakeNode()
+    node.follower_gripper = 0.0
+    node.master_gripper = 0.0
+
+    def on_spin(count):
+        node.master = _pose(0.0)
+        if count >= 3:
+            node.master_gripper = 0.030      # 主臂 30mm
+        if count >= 40:
+            node.master_gripper = 0.080      # 拖到主臂行程尽头
+
+    node.on_spin = on_spin
+    options = _options(align_seconds=0.2, duration=1.2)
+    assert options.gripper_scale == pytest.approx(1.3)
+    piper_teleop._run_teleop(node, options)
+    grips = [command[JOINT_COUNT] for command in node.publisher.sent]
+    # 30mm × 1.3 = 39mm
+    assert max(grips) >= 0.039
+    assert any(abs(grip - 0.039) < 0.002 for grip in grips)
+    # 主臂 80mm × 1.3 = 104mm，被从臂行程钳到 80mm
+    assert grips[-1] == pytest.approx(piper_teleop.GRIPPER_OPEN_MAX_M, abs=1e-6)
+    assert all(0.0 <= grip <= 0.08 for grip in grips)
+
+
+def test_gripper_scale_one_is_a_pure_mirror(monkeypatch):
+    """--gripper-scale 1.0 时目标就等于 master 的读数（两台夹爪相同时用）。"""
+    clock = FakeClock()
+    monkeypatch.setattr(piper_teleop, 'time', clock)
+    monkeypatch.setattr(piper_teleop, 'rclpy', FakeRclpy())
+    node = FakeNode()
+    node.follower_gripper = 0.0
+    node.master_gripper = 0.0
+
+    def on_spin(count):
+        node.master = _pose(0.0)
+        if count >= 3:
+            node.master_gripper = 0.040
+
+    node.on_spin = on_spin
+    options = _options(align_seconds=0.2, duration=1.0, gripper_scale=1.0)
+    piper_teleop._run_teleop(node, options)
+    assert node.publisher.sent[-1][JOINT_COUNT] == pytest.approx(
+        0.040, abs=0.001)
 
 
 def test_follow_phase_one_euro_remains_selectable(monkeypatch):

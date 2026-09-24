@@ -25,11 +25,11 @@ follower 的指令话题。
 ```bash
 # 1. master 侧节点（必须显式关掉 auto_enable，见下方陷阱）
 ros2 launch piper start_single_piper.launch.py \
-  can_port:=can_ml auto_enable:=false gripper_exist:=false
+  can_port:=can_ml auto_enable:=false gripper_exist:=true
 
-# 2. follower 侧节点
+# 2. follower 侧节点（gripper_exist 决定夹爪指令是否下发，见「夹爪」一节）
 ros2 launch piper start_two_piper.launch.py \
-  auto_enable:=false gripper_exist:=false
+  auto_enable:=false gripper_exist:=true
 
 # 3. 使能 follower（master 保持失能，否则拖不动）
 ros2 service call /enable_srv_left piper_msgs/srv/Enable "{enable_request: true}"
@@ -84,7 +84,7 @@ ros2 run piper piper_teleop --side left --enable
 | 五次插值平滑 | **默认启用**（`--smooth-bandwidth 15`，0 关闭） | 固定带宽的三阶 jerk 受限环，压掉大幅度移动时的 5~15 Hz 抖动；见下节 |
 | 跳变限制（`--max-step-deg`） | **默认关闭**（值为 0） | 它会削掉 master 的快速动作，让 follower 追不上 |
 
-## 跟随阶段的处理链：死区 → One Euro → 五次插值平滑
+## 跟随阶段的处理链：死区 → α-β 状态估计 → 五次插值平滑
 
 ### 为什么换掉一阶低通
 
@@ -312,6 +312,40 @@ One Euro 压的是快抖（5~15 Hz），但它的截止频率在静止时是 1 H
 以及一条与滤波无关的事实：**滤波只平滑形状，不限制幅度**。速度上限由 `--speed`
 与机械能力决定（见「跟随速度」一节），滤波器不参与限速。
 
+## 夹爪：第 7 项的镜像（2026-09-24 新增）
+
+关节话题的第 7 项就是夹爪，两侧同单位（**米**，行程 0~0.08 m），所以遥操作直接把
+master 的第 7 项镜像给 follower：
+
+- **对齐与回位**：夹爪走与关节同一条三次插值曲线（两端速度为零），所以它不会在
+  "对齐 → 跟随"切换或回位时跳一下；
+- **跟随**：夹爪并入同一条链（死区 → α-β → 平滑），但**死区阈值单独设**
+  （`--gripper-deadband`，默认 0.5 mm）。链上其余阈值都是按"度"定的：0.08 m 的
+  行程上套 0.2 度的幅度阈值等于让夹爪永远不动。0.5 mm 的门限用来挡掉反馈里
+  0.1 mm 量级的抖动，否则从臂夹爪会一直追着噪声响；
+- **夹持力**：`--gripper-effort`（N·m，默认 1.0），节点会把它钳到 [0.5, 3]；
+- **行程倍数**：`--gripper-scale`（默认 **1.3**）——follower 的目标 = master 开口
+  × 该值。本机构上主臂夹爪的有效行程只有从臂的约 1/1.3（从臂 0~80mm），所以
+  默认 1.3 让"主臂走满行程"正好对应"从臂走满行程"；两台夹爪完全相同时设 1.0
+  就是纯镜像。**换算后再限幅**，所以主臂拖过行程尽头不会把从臂顶出 80mm；
+- **限幅**：指令钳在 0~80 mm，master 报出越界值不会原样转发；
+- **关掉**：`--no-gripper` 让第 7 项恒为 0，即加入夹爪之前的指令形状。
+
+**要让夹爪指令真正生效，从臂节点必须以 `gripper_exist:=true` 启动**（该参数只影响
+节点是否下发 `GripperCtrl`）；master 节点的该参数不影响遥操作——master 从不使能，
+也不会下发夹持指令。
+
+**先确认 master 的夹爪通道是活的**：程序启动时会打印一行
+`夹爪 ：镜像 master 第 7 项 × 1.3……当前 master=X.XXmm（→目标 Z.ZZmm）、
+follower=Y.YYmm`，用手开合 master
+的夹爪看这个数变不变；也可以直接 `ros2 topic echo /joint_states_single --field
+position` 看第 7 项。**2026-09-24 现场实测四台臂的夹爪反馈都在 −0.3~0.0 mm**
+（闭环，或那台臂上没有装夹爪）。如果开合 master 时这个数不动，说明那台臂上没有夹爪
+可读，镜像会一直输出 0——要么装上夹爪，要么用 `--no-gripper` 明确关掉。
+
+**安全**：对齐阶段夹爪同样会动（与关节同一条曲线、同样的对齐时长），所以启动前
+也要确认夹爪行程里没有东西；夹爪闭合会夹伤手指，这不是"小动作"。
+
 ## 结束回位
 
 home 就是**本程序启动时 follower 的姿态**，自动记录，没有配置参数。
@@ -431,6 +465,33 @@ j5 超 ±70），follower 停在边界上（本次 j3 670 次、j4 142 次、j5 
 
 **抖动**：操作者松手的那段里 master 无抖动（未持握）、follower 自身 0.011~0.041 度
 （5~15 Hz），即 follower 不自生可见抖动；持握手抖的抑制见「跟随阶段的滤波」一节。
+
+### 2026-09-24 复核：短促爆发的差距在加速度，且已无参数余量
+
+用 `piper_teleop_verify` 的原始记录（每关节 200 Hz、整臂约 1200 帧/秒）做三级分解：
+真实 master 轨迹 → 同一条流水线重建的指令 → follower 实测。
+
+| 环节 | 结果 |
+| --- | --- |
+| 指令链路 | 峰值速度达 master 的 103~130%；平滑级三个限幅在 3505 拍里各关节只触发 0~6 次 → **不限速** |
+| follower 峰值速度 | 只有 master 的 66~93%，而且**晚 0.46~0.76 s** 出现 |
+| follower 峰值加速度 | 只有 master 的 **36~87%**（多数约 50%）：需要 750~1830 deg/s²，实际交付 370~820 |
+
+也就是说：记录里拖动的都是**不到 1 秒的爆发**，follower 还在加速爬坡、手已经停了。
+三条可试的路都已关闭——
+
+1. **指令侧**（α/β、前向预测、平滑级带宽、死区）：改的都是暂态形状，改不了驱动器
+   能给出的加速度上限；前向预测补的是纯时延，对"斜坡受限"无效（真机实测滞后指标
+   降了 26~45%，但急停/反向的过冲变大，操作者判定手感更差，当天已回滚）。
+2. **固件的最大关节加速度**（SDK `GetAllMotorMaxAccLimit`／写入 `JointMaxAccConfig`，
+   CAN 0x475）：2026-09-24 只读读出四台臂六轴全为 **500**，即可写范围 0~500
+   （对应 0~5 rad/s²）的**最大值**，没有放大余量；而且实测 follower 已跑出
+   6.5~14.3 rad/s²，超过这个可设上限——说明该限值作用于固件内部规划，对 CAN 流式
+   位置指令不生效（与 `max_joint_spd = 300` 同规律）。
+3. **`--speed`**：已经是 100。
+
+结论：短促爆发的跟随差距是**臂的物理极限**（力矩/惯量/伺服），不是参数问题。操作上
+避免亚秒级满速爆发，跟随会显得紧得多。
 
 ## 备用：`max_joint_spd` 的读写工具（**未在真机写入，判定不需要**）
 
@@ -793,6 +854,10 @@ ros2 run piper piper_teleop_verify --analyze /tmp/piper_teleop_verify.csv
 | `--alpha-beta-max-dt` | 0.1 | 采样间隔超过此值时清零旧速度并以新测量重新锚定，秒 |
 | `--deadband-deg` | 0.2 | 死区幅度阈值，度；0 关闭死区 |
 | `--deadband-speed` | 0.8 | 死区速度门限 deg/s：低于它才认为手停着；0 表示只按幅度保持 |
+| `--no-gripper` | 关 | 不镜像夹爪：指令第 7 项恒为 0（加入夹爪之前的行为） |
+| `--gripper-effort` | 1.0 | 从臂夹爪的夹持力 N·m；节点会把它钳到 [0.5, 3] |
+| `--gripper-scale` | 1.3 | 夹爪行程倍数：follower 目标 = master 开口 × 该值；1.0 为纯镜像 |
+| `--gripper-deadband` | 0.0005 | 夹爪的幅度死区，米（默认 0.5mm）；0 表示不设死区 |
 | `--smooth-bandwidth` | 15 | 五次插值平滑的带宽 rad/s；0 关闭这一级 |
 | `--smooth-max-velocity` | 172 | 平滑级的速度上限 deg/s |
 | `--smooth-max-acceleration` | 6000 | 平滑级的加速度上限 deg/s² |

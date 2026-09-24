@@ -47,6 +47,9 @@ from piper.piper_feedback import (
     DEFAULT_DEADBAND_DEG,
     DEFAULT_DEADBAND_SPEED_DEG_S,
     DEFAULT_FILTER_TAU_S,
+    DEFAULT_GRIPPER_DEADBAND_M,
+    DEFAULT_GRIPPER_EFFORT_NM,
+    DEFAULT_GRIPPER_SCALE,
     DEFAULT_ONE_EURO_BETA,
     DEFAULT_ONE_EURO_D_CUTOFF_HZ,
     DEFAULT_ONE_EURO_MIN_CUTOFF_HZ,
@@ -56,6 +59,7 @@ from piper.piper_feedback import (
     DEFAULT_SMOOTH_MAX_ACCELERATION_DEG_S2,
     DEFAULT_SMOOTH_MAX_JERK_DEG_S3,
     DEFAULT_SMOOTH_MAX_VELOCITY_DEG_S,
+    GRIPPER_OPEN_MAX_M,
     JOINT_COUNT,
     MEASURED_MAX_JOINT_SPD_DEG_S,
     AlphaBetaFilter,
@@ -64,9 +68,11 @@ from piper.piper_feedback import (
     MotionSmoother,
     OneEuroFilter,
     align_targets,
+    clamp_gripper,
     clamp_targets,
     limit_step,
     plan_return,
+    scale_gripper,
 )
 
 JOINT_NAMES = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6',
@@ -123,6 +129,10 @@ class TeleopBridge(Node):
         self.master_topic = master_topic
         self.master = None
         self.follower = None
+        # 夹爪开口（米），来自各自消息的第 7 项；消息不足 7 项时保持 None，
+        # 遥操作据此判断这一路能不能镜像。
+        self.master_gripper = None
+        self.follower_gripper = None
         self.status = None
         self.status_time = None
         self.create_subscription(JointState, master_topic,
@@ -141,15 +151,28 @@ class TeleopBridge(Node):
             return None
         return {i + 1: math.degrees(v) for i, v in enumerate(values)}
 
+    def _gripper(self, msg):
+        """Read the gripper opening in metres, or None when it is absent."""
+        if len(msg.position) < JOINT_COUNT + 1:
+            return None
+        value = float(msg.position[JOINT_COUNT])
+        return value if math.isfinite(value) else None
+
     def _on_master(self, msg):
         angles = self._angles(msg)
         if angles is not None:
             self.master = angles
+        gripper = self._gripper(msg)
+        if gripper is not None:
+            self.master_gripper = gripper
 
     def _on_follower(self, msg):
         angles = self._angles(msg)
         if angles is not None:
             self.follower = angles
+        gripper = self._gripper(msg)
+        if gripper is not None:
+            self.follower_gripper = gripper
 
     def _on_status(self, msg):
         self.status = msg
@@ -176,19 +199,27 @@ class TeleopBridge(Node):
             rclpy.spin_once(self, timeout_sec=0.02)
 
 
-def _publish_targets(node, targets_deg, speed):
-    """Publish one absolute joint target for all six joints."""
+def _publish_targets(node, targets_deg, speed, gripper=None, gripper_effort=0.0):
+    """Publish one absolute joint target for all six joints (plus the gripper).
+
+    ``gripper`` is the opening in metres, or None to keep the old behaviour of
+    commanding 0 (which the node turns into a fully closed gripper).
+    """
     command = JointState()
     command.name = list(JOINT_NAMES)
     command.position = [math.radians(targets_deg[joint])
-                        for joint in range(1, JOINT_COUNT + 1)] + [0.0]
+                        for joint in range(1, JOINT_COUNT + 1)] + [
+                            float(gripper) if gripper is not None else 0.0]
     # 第 7 项是速度百分比；非零才会走低速分支而不是 100%。
     command.velocity = [0.0] * JOINT_COUNT + [float(speed)]
-    command.effort = [0.0] * (JOINT_COUNT + 1)
+    command.effort = [0.0] * JOINT_COUNT + [
+        float(gripper_effort) if gripper is not None else 0.0]
     node.publisher.publish(command)
 
 
-def _print_alignment_plan(master, follower, align_seconds):
+def _print_alignment_plan(master, follower, align_seconds,
+                          master_gripper=None, follower_gripper=None,
+                          gripper_scale=1.0):
     """Print the pose difference and the implied peak joint speeds."""
     print('两臂当前姿态与所需对齐位移（度）：')
     print(f'  {"joint":<7}{"master":>10}{"follower":>10}{"move":>10}'
@@ -200,6 +231,17 @@ def _print_alignment_plan(master, follower, align_seconds):
         peak = abs(delta) / align_seconds * CUBIC_PEAK_FACTOR
         print(f'  j{joint:<6}{master[joint]:>10.3f}{follower[joint]:>10.3f}'
               f'{delta:>+10.3f}{peak:>10.2f} deg/s')
+    if master_gripper is not None and follower_gripper is not None:
+        # 夹爪单列一行，单位是毫米（它与关节的"度"不是一回事）。move 是 follower
+        # 真正要走的量，所以按换算后的目标算。
+        goal = scale_gripper(master_gripper, gripper_scale)
+        print(f'  {"gripper":<7}{master_gripper * 1000:>10.2f}'
+              f'{follower_gripper * 1000:>10.2f}'
+              f'{(goal - follower_gripper) * 1000:>+10.2f}{"mm":>12}')
+        if abs(gripper_scale - 1.0) > 1e-9:
+            print(f'    （夹爪按 master × {gripper_scale:g} 换算：'
+                  f'{master_gripper * 1000:.2f}mm → 目标 {goal * 1000:.2f}mm；'
+                  f'从臂行程 0~{GRIPPER_OPEN_MAX_M * 1000:g}mm）')
     print(f'  最大位移 {worst:.3f} 度，在 {align_seconds:g}s 内完成，'
           f'插值峰值速度约 {worst / align_seconds * CUBIC_PEAK_FACTOR:.2f} deg/s')
     return worst
@@ -265,6 +307,7 @@ class RunSummary:
     realigns: int
     limit_hits: Dict[int, int]
     last_targets: Optional[Dict[int, float]]
+    last_gripper: Optional[float] = None
 
 
 def _run_teleop(node, options):
@@ -283,11 +326,29 @@ def _run_teleop(node, options):
     next_deadline = started
     last_cycle = None
     last_targets = None
+    last_gripper = None
     last_master = None
     last_master_time = None
     smoother = _make_filter(options)
     deadband = DeadbandGate(options.deadband_deg, options.deadband_speed)
     fine = _make_smoother(options)
+    # 夹爪走一条独立的轻通道：读 master 的第 7 项（米），限幅后作为 follower 的
+    # 第 7 项。关节那一套滤波/平滑级不参与——它们的阈值与限幅都是按"度"定的，
+    # 直接套到 0.08 m 量级的开口上会把它整段按住。跟随阶段只过一道幅度死区，
+    # 用来挡掉夹爪反馈里 0.1 mm 量级的抖动。
+    gripper_on = (bool(getattr(options, 'gripper', False))
+                  and getattr(node, 'master_gripper', None) is not None
+                  and getattr(node, 'follower_gripper', None) is not None)
+    grip_gate = (DeadbandGate(options.gripper_deadband, 0.0)
+                 if gripper_on else None)
+    grip_scale = getattr(options, 'gripper_scale', DEFAULT_GRIPPER_SCALE)
+    # master 的开口乘上比例、限幅之后才是 follower 的目标（比例是机构参数：本机上
+    # 主臂夹爪行程只有从臂的约 1/1.3）。follower 自己的开口本来就是从臂单位，
+    # 不参与换算——对齐的起点取它。
+    grip_from = getattr(node, 'follower_gripper', None)
+    grip_goal = (scale_gripper(node.master_gripper, grip_scale)
+                 if gripper_on else None)
+    grip_target = scale_gripper(grip_from) if gripper_on else None
     stopped_by = 'ROS 上下文已结束'
 
     try:
@@ -313,6 +374,11 @@ def _run_teleop(node, options):
             if mode == 'align':
                 progress = (now - align_started) / options.align_seconds
                 targets = align_targets(align_from, align_goal, progress)
+                if gripper_on:
+                    # 与关节同一条三次曲线：两端速度为零，所以夹爪不会先跳一下。
+                    grip_target = clamp_gripper(
+                        align_targets({7: grip_from}, {7: grip_goal},
+                                      progress)[7])
                 if progress >= 1.0:
                     # 对齐期间 master 若被动过，目标已经过时。
                     drift = max(
@@ -328,6 +394,10 @@ def _run_teleop(node, options):
                             align_started = now
                             align_from = dict(node.follower)
                             align_goal = dict(node.master)
+                            if gripper_on:
+                                grip_from = node.follower_gripper
+                                grip_goal = scale_gripper(node.master_gripper,
+                                                          grip_scale)
                             continue
                         print(f'  master 仍在被拖动（{master_speed:.1f} deg/s、'
                               f'已偏离对齐目标 {drift:.2f} 度）：不再重新对齐，'
@@ -335,12 +405,21 @@ def _run_teleop(node, options):
                     mode = 'follow'
                     # 用最后一次发布的目标给滤波器做种子，而不是 master 的当前
                     # 值：命令流保持连续，剩下的偏差交给跟随自己收敛掉（若用
-                    # master 当前值做种子，两者差多少就会当场跳多少）。
+                    # master 当前值做种子，两者差多少就会当场跳多少）。夹爪同理，
+                    # 种子取最后一次发布的开口。
+                    seed = dict(previous)
+                    if grip_gate is not None:
+                        seed[7] = (grip_target if grip_target is not None
+                                   else node.master_gripper)
                     if smoother is not None:
-                        smoother.reset(dict(previous))
+                        smoother.reset(seed)
                     deadband.reset(dict(node.master))
+                    if grip_gate is not None:
+                        grip_gate.reset(
+                            {7: scale_gripper(node.master_gripper,
+                                              grip_scale)})
                     if fine is not None:
-                        fine.reset(dict(previous))
+                        fine.reset(seed)
                     print('  对齐完成 -> 进入绝对跟随'
                           + _filter_note(options, prefix='，'))
             else:
@@ -352,12 +431,23 @@ def _run_teleop(node, options):
                 # 跟着它一起变。
                 cycle = 0.0 if dt is None else dt
                 sample = deadband.update(node.master, cycle)
+                if grip_gate is not None:
+                    # 夹爪作为第 7 项并入同一条链，这样"对齐 → 跟随"切换与重新
+                    # 对齐都不会让它跳变；只有死区阈值换成了米（0.08 m 的行程上
+                    # 套 0.2 度的阈值等于永远不动）。
+                    sample = dict(sample)
+                    sample[7] = grip_gate.update(
+                        {7: scale_gripper(node.master_gripper, grip_scale)},
+                        cycle)[7]
                 if smoother is not None:
                     sample = smoother.update(sample, cycle)
                 if fine is not None:
                     sample = fine.update(sample, smoother.velocities()
                                          if smoother is not None else {}, cycle)
-                targets = dict(sample)
+                targets = {joint: sample[joint]
+                           for joint in range(1, JOINT_COUNT + 1)}
+                if grip_gate is not None:
+                    grip_target = clamp_gripper(sample[7])
 
             # 越界钳制是必需的：含越界目标的指令行为未定义。除此之外不再
             # 改动目标——同步只允许保留 master 的原值（外加默认开启的低通滤波）。
@@ -369,9 +459,12 @@ def _run_teleop(node, options):
                 limit_hits[joint] = limit_hits.get(joint, 0) + 1
             previous = targets
             last_targets = targets
+            last_gripper = grip_target
 
             if options.enable:
-                _publish_targets(node, targets, options.speed)
+                _publish_targets(node, targets, options.speed,
+                                 gripper=grip_target,
+                                 gripper_effort=options.gripper_effort)
 
             if now - last_report >= STATUS_PERIOD:
                 # 实际频率直接决定跟随延迟。它低于 --rate 说明单次循环
@@ -387,7 +480,9 @@ def _run_teleop(node, options):
                     headline = f'  [跟随] {actual_hz:5.1f}Hz'
                 print(headline + ' follower 目标：' + ' '.join(
                     f'j{j}={targets[j]:+8.3f}'
-                    for j in range(1, JOINT_COUNT + 1)))
+                    for j in range(1, JOINT_COUNT + 1))
+                    + (f' 夹爪={grip_target * 1000:+8.2f}mm'
+                       if grip_target is not None else ''))
                 if limit_hits:
                     print('    !! 已触限位的关节：' + '、'.join(
                         f'j{j}({limit_hits[j]})'
@@ -419,10 +514,12 @@ def _run_teleop(node, options):
         realigns=realigns,
         limit_hits=limit_hits,
         last_targets=last_targets,
+        last_gripper=last_gripper,
     )
 
 
-def _print_return_plan(start, home, plan):
+def _print_return_plan(start, home, plan, start_gripper=None,
+                       home_gripper=None):
     """Print what the return move will do, before any of it happens."""
     print(f'  {"joint":<7}{"start":>10}{"home":>10}{"move":>10}{"peak":>10}')
     for joint in range(1, JOINT_COUNT + 1):
@@ -432,6 +529,10 @@ def _print_return_plan(start, home, plan):
         mark = '  !!' if joint in plan.clamped_deg else ''
         print(f'  j{joint:<6}{start[joint]:>10.3f}{home[joint]:>10.3f}'
               f'{delta:>+10.3f}{peak:>10.2f}{mark}')
+    if start_gripper is not None and home_gripper is not None:
+        # 夹爪跟着同一条三次曲线回去，它的移动量比关节小得多，不参与时长推导。
+        print(f'  {"gripper":<7}{start_gripper * 1000:>10.2f}{home_gripper * 1000:>10.2f}'
+              f'{(home_gripper - start_gripper) * 1000:>+10.2f}{"mm":>10}')
     if plan.duration <= 0.0:
         print('  起点与 home 已经相同，无需移动')
         return
@@ -450,13 +551,16 @@ def _print_return_plan(start, home, plan):
               f'follower 会滞后于这条轨迹（终点仍会到达）')
 
 
-def _follow_return_path(node, options, start, home, plan):
+def _follow_return_path(node, options, start, home, plan,
+                        start_gripper=None, home_gripper=None):
     """Publish the cubic path home; returns False if it had to stop early."""
     period = 1.0 / options.rate
     started = time.monotonic()
     loop_count = 0
     last_report = started
     next_deadline = started
+    return_gripper = (start_gripper is not None and home_gripper is not None
+                      and getattr(options, 'gripper', False))
     while True:
         now = time.monotonic()
         loop_count += 1
@@ -470,7 +574,13 @@ def _follow_return_path(node, options, start, home, plan):
             return False
         progress = (now - started) / plan.duration
         targets, clamped = clamp_targets(align_targets(start, home, progress))
-        _publish_targets(node, targets, options.speed)
+        grip_target = None
+        if return_gripper:
+            grip_target = clamp_gripper(
+                align_targets({7: start_gripper}, {7: home_gripper},
+                              progress)[7])
+        _publish_targets(node, targets, options.speed, gripper=grip_target,
+                         gripper_effort=getattr(options, 'gripper_effort', 0.0))
         if now - last_report >= STATUS_PERIOD:
             actual_hz = loop_count / max(now - last_report, 1e-9)
             loop_count = 0
@@ -478,7 +588,9 @@ def _follow_return_path(node, options, start, home, plan):
             print(f'  [回位] {min(progress, 1.0) * 100:5.1f}% {actual_hz:5.1f}Hz '
                   'follower 目标：' + ' '.join(
                       f'j{j}={targets[j]:+8.3f}'
-                      for j in range(1, JOINT_COUNT + 1)))
+                      for j in range(1, JOINT_COUNT + 1))
+                  + (f' 夹爪={grip_target * 1000:+8.2f}mm'
+                     if grip_target is not None else ''))
             if clamped:
                 print('    !! 回位目标被钳制：' + '、'.join(
                     f'j{j}({clamped[j]:+.3f})' for j in sorted(clamped)))
@@ -493,13 +605,17 @@ def _follow_return_path(node, options, start, home, plan):
             next_deadline = time.monotonic()
 
 
-def _run_return_home(node, options, home, summary):
+def _run_return_home(node, options, home, summary, home_gripper=None):
     """Bring the follower back to the pose this run started from."""
     start = (summary.last_targets if summary.last_targets is not None
              else node.follower)
     if start is None:
         print('  回位中止：没有可用的 follower 姿态，不发送任何指令')
         return
+    start_gripper = (summary.last_gripper if summary.last_gripper is not None
+                     else getattr(node, 'follower_gripper', None))
+    if not getattr(options, 'gripper', False):
+        start_gripper = home_gripper = None
     plan = plan_return(start, home, options.return_speed,
                        options.return_max_peak)
     print()
@@ -517,7 +633,7 @@ def _run_return_home(node, options, home, summary):
                  if not options.enable else ''))
     else:
         print('  回位起点：follower 的实测姿态')
-    _print_return_plan(start, home, plan)
+    _print_return_plan(start, home, plan, start_gripper, home_gripper)
 
     if not options.enable:
         return
@@ -529,7 +645,8 @@ def _run_return_home(node, options, home, summary):
         print('  回位结束：follower 已经在初始姿态上，无需移动')
         return
     try:
-        if _follow_return_path(node, options, start, home, plan):
+        if _follow_return_path(node, options, start, home, plan,
+                               start_gripper, home_gripper):
             print(f'  回位完成：{plan.duration:.1f}s 内走完轨迹，'
                   'follower 保持使能停在初始姿态')
             print('  如需失能：ros2 service call '
@@ -580,6 +697,21 @@ def _parser():
                         default=DEFAULT_DEADBAND_DEG,
                         help='跟随阶段的死区，度：小于它的输入变化不传递，'
                              '0 表示关闭（默认 %(default)s）')
+    parser.add_argument('--no-gripper', dest='gripper', action='store_false',
+                        help='不镜像夹爪：指令的第 7 项恒为 0（旧行为）。'
+                             '默认镜像 master 的第 7 项')
+    parser.add_argument('--gripper-scale', type=float,
+                        default=DEFAULT_GRIPPER_SCALE,
+                        help='夹爪行程倍数：follower 目标 = master 开口 × 该值，'
+                             '1.0 表示纯镜像（默认 %(default)s）')
+    parser.add_argument('--gripper-effort', type=float,
+                        default=DEFAULT_GRIPPER_EFFORT_NM,
+                        help='从臂夹爪的夹持力 N·m；节点会把它钳到 [0.5, 3]'
+                             '（默认 %(default)s）')
+    parser.add_argument('--gripper-deadband', type=float,
+                        default=DEFAULT_GRIPPER_DEADBAND_M,
+                        help='夹爪的幅度死区，米：小于它的变化不传递，'
+                             '0 表示不设死区（默认 %(default)s，即 0.5mm）')
     parser.add_argument('--filter', choices=FILTERS, default=DEFAULT_FILTER,
                         help='跟随阶段的滤波方案（默认 %(default)s）：'
                              'alpha-beta 同时估计平滑位置与速度；'
@@ -647,6 +779,15 @@ def main(args=None):
     if options.deadband_speed < 0.0:
         print('拒绝：--deadband-speed 不得为负（0 表示只按幅度保持）')
         return EXIT_REFUSED
+    if options.gripper_scale <= 0.0:
+        print('拒绝：--gripper-scale 必须为正（1.0 表示纯镜像）')
+        return EXIT_REFUSED
+    if options.gripper_effort < 0.0:
+        print('拒绝：--gripper-effort 不得为负（0 表示最弱夹持）')
+        return EXIT_REFUSED
+    if options.gripper_deadband < 0.0:
+        print('拒绝：--gripper-deadband 不得为负（0 表示不设死区）')
+        return EXIT_REFUSED
     if options.smooth_bandwidth < 0.0:
         print('拒绝：--smooth-bandwidth 不得为负（0 表示关闭平滑级）')
         return EXIT_REFUSED
@@ -681,15 +822,34 @@ def main(args=None):
             return EXIT_REFUSED
         # home 就是本程序启动时 follower 的姿态，自动记录，不需要配置参数。
         home = dict(node.follower)
+        home_gripper = node.follower_gripper
 
         print()
         _print_alignment_plan(node.master, node.follower,
-                              options.align_seconds)
+                              options.align_seconds,
+                              node.master_gripper, node.follower_gripper,
+                              options.gripper_scale)
         print()
         print(f'模式：先在 {options.align_seconds:g}s 内三次插值对齐，'
               f'再绝对跟随 master；{options.rate:g} Hz，速度 {options.speed}%'
               + ('' if options.enable else '（干跑，不发送任何内容）'))
         print(_filter_note(options))
+        if options.gripper:
+            if node.master_gripper is None or node.follower_gripper is None:
+                print('夹爪      ：话题里没有第 7 项，本次不镜像夹爪')
+            else:
+                print(f'夹爪      ：镜像 master 第 7 项 × {options.gripper_scale:g}'
+                      f'——限幅 0~{GRIPPER_OPEN_MAX_M * 1000:g}mm、死区 '
+                      f'{options.gripper_deadband * 1000:g}mm、夹持力 '
+                      f'{options.gripper_effort:g}N·m')
+                print(f'            当前 master={node.master_gripper * 1000:.2f}mm'
+                      f'（→目标 '
+                      f'{scale_gripper(node.master_gripper, options.gripper_scale) * 1000:.2f}mm）'
+                      f'、follower={node.follower_gripper * 1000:.2f}mm')
+            print('            要让夹爪指令真正生效，从臂节点需以 '
+                  'gripper_exist:=true 启动')
+        else:
+            print('夹爪      ：不镜像（--no-gripper），指令第 7 项恒为 0')
         if options.no_return_home:
             return_note = '不回位，停在原地（--no-return-home）'
         else:
@@ -715,7 +875,7 @@ def main(args=None):
         if options.no_return_home:
             print('  回位：已禁用（--no-return-home），follower 停在原地')
         else:
-            _run_return_home(node, options, home, summary)
+            _run_return_home(node, options, home, summary, home_gripper)
         return EXIT_OK
     finally:
         node.destroy_node()

@@ -15,11 +15,16 @@ from piper.piper_feedback import (
     DEFAULT_DEADBAND_DEG,
     DEFAULT_DEADBAND_SPEED_DEG_S,
     DEFAULT_FILTER_TAU_S,
+    DEFAULT_GRIPPER_DEADBAND_M,
+    DEFAULT_GRIPPER_EFFORT_NM,
+    DEFAULT_GRIPPER_SCALE,
     DEFAULT_SMOOTH_BANDWIDTH_RAD_S,
     DEFAULT_SMOOTH_MAX_ACCELERATION_DEG_S2,
     DEFAULT_SMOOTH_MAX_JERK_DEG_S3,
     DEFAULT_SMOOTH_MAX_VELOCITY_DEG_S,
     FEEDBACK_FIRST_CAN_ID,
+    GRIPPER_OPEN_MAX_M,
+    GRIPPER_OPEN_MIN_M,
     JOINT_COMMAND_LIMITS_DEG,
     JOINT_COUNT,
     LIMIT_FEEDBACK_CAN_ID,
@@ -33,6 +38,7 @@ from piper.piper_feedback import (
     OneEuroFilter,
     decode,
     align_targets,
+    clamp_gripper,
     clamp_targets,
     cubic_step,
     decode_joint_limit,
@@ -43,6 +49,7 @@ from piper.piper_feedback import (
     out_of_limits,
     plan_return,
     return_duration,
+    scale_gripper,
 )
 
 ALL_ON = (True,) * JOINT_COUNT
@@ -82,6 +89,28 @@ def test_alpha_beta_rejects_invalid_parameters():
                    {'beta': 1.1}, {'max_dt': 0.0}):
         with pytest.raises(ValueError):
             AlphaBetaFilter(**kwargs)
+
+
+def test_gripper_opening_is_clamped_to_the_commandable_range():
+    """夹爪的可指令范围是 0~80mm：越界的 master 读数不会被原样转发。"""
+    assert clamp_gripper(-0.01) == GRIPPER_OPEN_MIN_M
+    assert clamp_gripper(0.5) == GRIPPER_OPEN_MAX_M
+    assert clamp_gripper(0.032) == pytest.approx(0.032)
+    # 死区与夹持力的默认值都要落在节点会接受/钳制的范围内
+    assert DEFAULT_GRIPPER_DEADBAND_M > 0.0
+    assert 0.5 <= DEFAULT_GRIPPER_EFFORT_NM <= 3.0
+
+
+def test_gripper_scale_converts_master_travel_to_follower_travel():
+    """行程倍数先乘后钳：主臂走满行程正好对应从臂走满行程。"""
+    # 本机构：主臂全程 80/1.3 ≈ 61.5mm 映射到从臂 80mm
+    assert scale_gripper(GRIPPER_OPEN_MAX_M / DEFAULT_GRIPPER_SCALE) == \
+        pytest.approx(GRIPPER_OPEN_MAX_M)
+    # 超出主臂行程的部分被钳在从臂上限，不会溢出
+    assert scale_gripper(0.08) == GRIPPER_OPEN_MAX_M
+    assert scale_gripper(-0.02) == GRIPPER_OPEN_MIN_M
+    # 两台夹爪相同时用 1.0，就是纯镜像
+    assert scale_gripper(0.035, 1.0) == pytest.approx(0.035)
 
 
 def test_alpha_beta_defaults_sit_on_a_repeated_error_pole():

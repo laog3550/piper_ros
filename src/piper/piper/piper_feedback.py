@@ -452,6 +452,34 @@ def limit_step(targets_deg, previous_deg, max_step_deg):
     return stepped, limited
 
 
+# 夹爪不是关节：它的可指令量是"开口"，单位是**米**，范围 0~0.08 m。
+# joint_states 的第 7 项就是米（节点把驱动的 1e-6 m 计数除以 1e6），主从两侧同
+# 单位，所以遥操作只需限幅、不需要换算。驱动侧真正关心的两个量是开口和夹持力：
+# 开口在节点的 joint_callback 里乘 1e6 交给 GripperCtrl，夹持力取自 effort[6]。
+GRIPPER_OPEN_MIN_M = 0.0
+GRIPPER_OPEN_MAX_M = 0.08
+# 手捏主臂夹爪时反馈带着 0.1 mm 量级的抖动；小于这个幅度的变化不传递，否则从臂
+# 夹爪会一直追着噪声跑（听起来是"嗡嗡"响）。
+DEFAULT_GRIPPER_DEADBAND_M = 0.0005
+# 从臂夹爪的夹持力，单位 N·m；节点的 joint_callback 会把它钳到 [0.5, 3]。
+DEFAULT_GRIPPER_EFFORT_NM = 1.0
+# 主从夹爪的行程倍数：master 的开口乘上它才是 follower 的开口。本机构上主臂夹爪
+# 的有效行程只有从臂的约 1/1.3（从臂 0~80mm），所以默认 1.3——主臂走满行程正好
+# 对应从臂走满行程，中间按比例跟随。两台夹爪完全相同时把它设成 1.0 就是纯镜像。
+DEFAULT_GRIPPER_SCALE = 1.3
+
+
+def clamp_gripper(open_m: float) -> float:
+    """Clamp a gripper opening into the commandable range, in metres."""
+    return max(GRIPPER_OPEN_MIN_M, min(float(open_m), GRIPPER_OPEN_MAX_M))
+
+
+def scale_gripper(open_m: float,
+                  scale: float = DEFAULT_GRIPPER_SCALE) -> float:
+    """Turn a master opening into the follower opening: multiply, then clamp."""
+    return clamp_gripper(float(open_m) * float(scale))
+
+
 # The cubic S-curve used for the alignment move peaks at 1.5 times the average
 # speed of the same displacement (the derivative of 3t^2-2t^3 reaches 1.5 at
 # t=0.5), so a move of D degrees spread over T seconds never exceeds 1.5*D/T.
