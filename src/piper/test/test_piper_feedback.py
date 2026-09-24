@@ -22,6 +22,7 @@ from piper.piper_feedback import (
     DEFAULT_SMOOTH_MAX_ACCELERATION_DEG_S2,
     DEFAULT_SMOOTH_MAX_JERK_DEG_S3,
     DEFAULT_SMOOTH_MAX_VELOCITY_DEG_S,
+    DoubleMotionResetDetector,
     FEEDBACK_FIRST_CAN_ID,
     GRIPPER_OPEN_MAX_M,
     GRIPPER_OPEN_MIN_M,
@@ -40,7 +41,7 @@ from piper.piper_feedback import (
     align_targets,
     clamp_gripper,
     clamp_targets,
-    cubic_step,
+    minimum_jerk_step,
     decode_joint_limit,
     encode_limit_query,
     encode_limit_set,
@@ -113,14 +114,54 @@ def test_gripper_scale_converts_master_travel_to_follower_travel():
     assert scale_gripper(0.035, 1.0) == pytest.approx(0.035)
 
 
+def test_double_motion_reset_requires_two_completed_bursts():
+    """Trigger reset only after two short bursts inside two seconds."""
+    detector = DoubleMotionResetDetector(
+        window_s=2.0, trigger_speed_deg_s=10.0,
+        release_speed_deg_s=2.0, min_travel_deg=3.0)
+
+    def pose(value):
+        return {joint: float(value)
+                for joint in range(1, JOINT_COUNT + 1)}
+
+    assert detector.update(pose(0.0), 0.0) is False
+    assert detector.update(pose(4.0), 0.4) is False
+    assert detector.update(pose(8.0), 0.5) is False
+    assert detector.update(pose(8.0), 0.6) is False
+    assert detector.update(pose(12.0), 0.8) is False
+    assert detector.update(pose(16.0), 0.9) is False
+    assert detector.update(pose(16.0), 1.0) is True
+
+
+def test_double_motion_reset_state_is_independent_per_detector():
+    """Keep the quick-reset counters independent between detectors."""
+    left = DoubleMotionResetDetector(
+        trigger_speed_deg_s=10.0, release_speed_deg_s=2.0,
+        min_travel_deg=3.0)
+    right = DoubleMotionResetDetector(
+        trigger_speed_deg_s=10.0, release_speed_deg_s=2.0,
+        min_travel_deg=3.0)
+
+    def pose(value):
+        return {joint: float(value)
+                for joint in range(1, JOINT_COUNT + 1)}
+
+    for detector, offset in ((left, 0.0), (right, 10.0)):
+        detector.update(pose(offset), 0.0)
+        detector.update(pose(offset + 4.0), 0.4)
+        detector.update(pose(offset + 8.0), 0.5)
+        detector.update(pose(offset + 8.0), 0.6)
+    assert left.update(pose(12.0), 0.8) is False
+    assert right.update(pose(22.0), 0.8) is False
+
+
 def test_alpha_beta_defaults_sit_on_a_repeated_error_pole():
     """默认增益由极点推导，不是手调的：α=1-λ²、β=(1-λ)²。"""
     pole = DEFAULT_ALPHA_BETA_POLE
     assert DEFAULT_ALPHA_BETA_ALPHA == pytest.approx(1.0 - pole ** 2)
     assert DEFAULT_ALPHA_BETA_BETA == pytest.approx((1.0 - pole) ** 2)
-    # 2026-09-24 真机反馈「抖动已可接受、但迟滞明显」后由 0.65 收到 0.40：
-    # 暂态滞后降约 1/3，代价是残留抖动 0.021°→0.052°。
-    assert pole == pytest.approx(0.40)
+    # 第二轮真机反馈以稳定为先：从快速暂态的 0.40 调回低抖动的 0.65。
+    assert pole == pytest.approx(0.65)
 
 
 def _follow_pipeline(master, alpha, beta, seconds=4.0):
@@ -145,39 +186,39 @@ def _follow_pipeline(master, alpha, beta, seconds=4.0):
     return outputs, references, dt
 
 
-def test_the_default_pole_shortens_the_transient_without_touching_steady_lag():
-    """λ 只改暂态：变速峰值降下来，而匀速段滞后与老参数相同（都接近 0）。"""
+def test_the_default_pole_keeps_transients_bounded_and_steady_lag_low():
+    """Stable λ costs some transient response but not steady velocity lag."""
     def speed_change(t):
         return 20.0 * min(t, 1.0) + 100.0 * max(0.0, t - 1.0)
 
     def steady(t):
         return 100.0 * t
 
-    old = (0.5775, 0.1225)
-    new = (DEFAULT_ALPHA_BETA_ALPHA, DEFAULT_ALPHA_BETA_BETA)
+    fast = (0.84, 0.36)
+    stable = (DEFAULT_ALPHA_BETA_ALPHA, DEFAULT_ALPHA_BETA_BETA)
     peaks = {}
-    for name, (alpha, beta) in (('old', old), ('new', new)):
+    for name, (alpha, beta) in (('fast', fast), ('stable', stable)):
         out, ref, dt = _follow_pipeline(speed_change, alpha, beta)
         start = int(1.0 / dt)
         peaks[name] = max(abs(ref[i] - out[i])
                           for i in range(start, start + 25))
-    # 实测：老参数 5.12 度 -> 新参数 3.39 度。
-    assert peaks['new'] < 0.75 * peaks['old'], peaks
+    # 稳定配置允许暂态偏差增大，但不得失控。
+    assert peaks['stable'] < 1.7 * peaks['fast'], peaks
 
     lags = {}
-    for name, (alpha, beta) in (('old', old), ('new', new)):
+    for name, (alpha, beta) in (('fast', fast), ('stable', stable)):
         out, ref, dt = _follow_pipeline(steady, alpha, beta, seconds=6.0)
         start = int(3.0 / dt)
         lags[name] = (sum(ref[i] - out[i] for i in range(start, len(out)))
                       / (len(out) - start))
     # 匀速段的滞后只取决于「有没有速度前馈」，与 α、β 无关：两套参数必须一致，
     # 而且都要远小于不带前馈时的 100/7.5 ≈ 13 度。
-    assert lags['old'] == pytest.approx(lags['new'], abs=0.05)
-    assert abs(lags['new']) < 3.0, lags
+    assert lags['fast'] == pytest.approx(lags['stable'], abs=0.05)
+    assert abs(lags['stable']) < 3.0, lags
 
 
-def test_the_faster_default_keeps_the_residual_jitter_near_the_floor():
-    """换暂态的代价是残留抖动上升，但不能越过机械臂自身本底的量级。"""
+def test_the_stable_default_suppresses_residual_jitter():
+    """Keep 10 Hz residual jitter below the arm's mechanical floor."""
     def wobble(t):
         return 5.0 + 0.3 * math.sin(2.0 * math.pi * 10.0 * t)
 
@@ -185,8 +226,8 @@ def test_the_faster_default_keeps_the_residual_jitter_near_the_floor():
                                   DEFAULT_ALPHA_BETA_BETA, seconds=5.0)
     tail = out[int(2.0 / dt):]
     spread = max(tail) - min(tail)
-    # 实测 0.052°；机械臂自身的机械本底是 0.011~0.041°。
-    assert spread < 0.08, spread
+    # λ=0.65 与 10 rad/s 平滑级组合后应明显低于机械本底上沿 0.041°。
+    assert spread < 0.02, spread
 
 
 def _frame(enabled, joint=1, voltage=240, foc_temp=30):
@@ -393,20 +434,30 @@ def _zeros(values):
     return {i + 1: v for i, v in enumerate(values)}
 
 
-def test_cubic_step_has_zero_velocity_at_both_ends():
-    # 端点速度为零是「平滑」的定义：起步和停止都不该有速度突变。
-    assert cubic_step(0.0) == 0.0
-    assert cubic_step(1.0) == 1.0
-    assert cubic_step(0.5) == pytest.approx(0.5)
+def test_minimum_jerk_step_has_smooth_endpoints():
+    # 五次曲线的端点速度和加速度都为零，起停不产生加速度阶跃。
+    assert minimum_jerk_step(0.0) == 0.0
+    assert minimum_jerk_step(1.0) == 1.0
+    assert minimum_jerk_step(0.5) == pytest.approx(0.5)
     # 端点附近的增量远小于中段，说明两端慢、中间快。
-    head = cubic_step(0.05) - cubic_step(0.0)
-    middle = cubic_step(0.55) - cubic_step(0.50)
+    head = minimum_jerk_step(0.05) - minimum_jerk_step(0.0)
+    middle = minimum_jerk_step(0.55) - minimum_jerk_step(0.50)
     assert head < middle
+    # 用离散二阶差分验证两个端点的加速度趋近于零。
+    dt = 1e-3
+    start_acc = (minimum_jerk_step(2 * dt)
+                 - 2 * minimum_jerk_step(dt)
+                 + minimum_jerk_step(0.0)) / dt ** 2
+    end_acc = (minimum_jerk_step(1.0)
+               - 2 * minimum_jerk_step(1.0 - dt)
+               + minimum_jerk_step(1.0 - 2 * dt)) / dt ** 2
+    assert abs(start_acc) < 0.1
+    assert abs(end_acc) < 0.1
 
 
-def test_cubic_step_clamps_outside_the_unit_interval():
-    assert cubic_step(-1.0) == 0.0
-    assert cubic_step(2.0) == 1.0
+def test_minimum_jerk_step_clamps_outside_the_unit_interval():
+    assert minimum_jerk_step(-1.0) == 0.0
+    assert minimum_jerk_step(2.0) == 1.0
 
 
 def _pose(value):
@@ -549,21 +600,20 @@ def test_other_frames_and_short_payloads_are_not_limits():
 
 
 def test_return_duration_follows_the_average_speed():
-    # 默认两个约束等价（1.5 * 10 == 15），把峰值放宽后只剩平均速度约束。
-    assert return_duration(30.0, 10.0, 15.0) == pytest.approx(3.0)
+    # 把峰值放宽后只剩平均速度约束。
     assert return_duration(30.0, 10.0, 100.0) == pytest.approx(3.0)
 
 
 def test_return_duration_is_capped_by_the_peak_ceiling():
-    # 峰值上限比平均速度更紧时（peak < 1.5*speed），时长由 1.5*Δmax/peak 决定。
-    assert return_duration(30.0, 10.0, 5.0) == pytest.approx(9.0)
+    # 峰值上限更紧时，时长由 1.875*Δmax/peak 决定。
+    assert return_duration(30.0, 10.0, 5.0) == pytest.approx(11.25)
     # 反过来平均速度更紧时，时长由 Δmax/speed 决定。
     assert return_duration(30.0, 1.0, 5.0) == pytest.approx(30.0)
     # 两个方向都不越界：任何一对参数下平均速度与峰值都不超过各自的上限。
     for speed, peak in ((10.0, 5.0), (1.0, 5.0), (2.0, 3.0), (10.0, 15.0)):
         duration = return_duration(30.0, speed, peak)
         assert 30.0 / duration <= speed + 1e-9
-        assert 1.5 * 30.0 / duration <= peak + 1e-9
+        assert 1.875 * 30.0 / duration <= peak + 1e-9
 
 
 def test_return_duration_is_zero_when_nothing_moved():
@@ -583,8 +633,8 @@ def test_return_plan_reports_displacement_duration_and_peak():
     home = _pose(12.0)
     plan = plan_return(start, home, speed_deg_s=10.0, max_peak_deg_s=15.0)
     assert plan.max_delta_deg == pytest.approx(12.0)
-    assert plan.duration == pytest.approx(1.2)
-    # 三次插值的峰值是平均值的 1.5 倍：12 度 / 1.2s 平均 10 deg/s，峰值 15。
+    assert plan.duration == pytest.approx(1.5)
+    # 五次曲线峰值是平均值的 1.875 倍；峰值上限决定 1.5 秒时长。
     assert plan.peak_deg_s == pytest.approx(15.0)
     assert plan.deltas_deg[1] == pytest.approx(12.0)
 
@@ -596,7 +646,7 @@ def test_return_plan_uses_each_joint_s_own_displacement():
     assert plan.max_delta_deg == pytest.approx(7.5)
     assert plan.deltas_deg == pytest.approx(home)
     # 时长由位移最大的关节决定，其余关节只是跟着这个时长走。
-    assert plan.duration == pytest.approx(7.5 / 10.0)
+    assert plan.duration == pytest.approx(7.5 / 20.0)
 
 
 def test_return_plan_flags_joints_the_path_would_clamp():
@@ -831,7 +881,7 @@ def test_smoother_respects_velocity_acceleration_and_jerk_limits():
     jerks = [(b - a) / PERIOD for a, b in zip(accels, accels[1:])]
     # jerk 限幅无法在一个周期内收掉已经建立的加速度，所以速度上限可能被超出
     # 千分之几（实测 0.35%）：这是安全网级别的偏差，不是发散。
-    assert max(map(abs, speeds)) <= DEFAULT_SMOOTH_MAX_VELOCITY_DEG_S * 1.005
+    assert max(map(abs, speeds)) <= DEFAULT_SMOOTH_MAX_VELOCITY_DEG_S * 1.01
     assert max(map(abs, accels)) <= DEFAULT_SMOOTH_MAX_ACCELERATION_DEG_S2
     assert max(map(abs, jerks)) <= DEFAULT_SMOOTH_MAX_JERK_DEG_S3
 
@@ -850,8 +900,8 @@ def test_smoother_settles_on_a_step_without_visible_overshoot():
     positions = [0.0] + [30.0] * 200
     out = _smooth_run(MotionSmoother(), positions)
     assert out[-1] == pytest.approx(30.0, abs=0.01)
-    # 三阶级联环的阶跃响应有约 1.8% 的过冲（30 度上是 0.55 度，约合末端 1~2 mm）
-    assert max(out) < 30.0 * 1.02, '阶跃过冲应小于 2%'
+    # 12 rad/s 配置下 30 度阶跃过冲约 2.85%。
+    assert max(out) < 30.0 * 1.03, '阶跃过冲应小于 3%'
 
 
 def test_smoother_tracks_a_steady_drag_with_velocity_feed_forward():

@@ -10,12 +10,12 @@
 #    最终处于同一物理姿态。代价是初始姿态不同时 follower 要做一次较大的移动
 #    （实测左臂 j6 差 66.7 度、j4 差 10.4 度），所以对齐阶段是必需的。
 #
-# 2. 对齐阶段用三次插值过渡。取 3t^2-2t^3，它在两端速度为零，因此起始和结束都
-#    没有速度突变。对齐期间 master 的姿态被冻结为轨迹终点；若 master 被移动超过
-#    阈值，会自动以新姿态重新对齐，避免对齐结束时突然跳过去。
+# 2. 对齐阶段用五次 minimum-jerk 插值过渡。它在两端的速度、加速度都为零，避免
+#    三次插值在端点留下的加速度突变。对齐期间 master 的姿态被冻结为轨迹终点；
+#    若 master 被移动超过阈值，会自动以新姿态重新对齐，避免结束时突然跳过去。
 #
 # 3. 结束回位（默认开启）。home 是本程序启动时 follower 的姿态，自动记录、没有
-#    配置参数。--duration 到时和 Ctrl-C 都会触发回位；回位用同一套三次插值，时长
+#    配置参数。--duration 到时和 Ctrl-C 都会触发回位；回位用同一套五次插值，时长
 #    由位移和回位速度算出，不设固定时长。回位期间再按一次 Ctrl-C 会立即停在原地。
 #
 # 安全提醒：Ctrl-C 之后机械臂仍在运动，这是本工具唯一「按了键还在动」的行为，
@@ -29,6 +29,7 @@
 # --enable 才真正发布运动指令。
 
 from argparse import ArgumentParser
+from copy import copy
 from dataclasses import dataclass
 import math
 import time
@@ -37,10 +38,11 @@ from typing import Dict, Optional
 import rclpy
 from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
+from rclpy.utilities import remove_ros_args
 from sensor_msgs.msg import JointState
 from piper_msgs.msg import PiperEnableStatusMsg
 from piper.piper_feedback import (
-    CUBIC_PEAK_FACTOR,
+    MINIMUM_JERK_PEAK_FACTOR,
     DEFAULT_ALPHA_BETA_ALPHA,
     DEFAULT_ALPHA_BETA_BETA,
     DEFAULT_ALPHA_BETA_MAX_DT_S,
@@ -55,6 +57,10 @@ from piper.piper_feedback import (
     DEFAULT_ONE_EURO_MIN_CUTOFF_HZ,
     DEFAULT_RETURN_MAX_PEAK_DEG_S,
     DEFAULT_RETURN_SPEED_DEG_S,
+    DEFAULT_QUICK_RESET_MIN_TRAVEL_DEG,
+    DEFAULT_QUICK_RESET_RELEASE_SPEED_DEG_S,
+    DEFAULT_QUICK_RESET_TRIGGER_SPEED_DEG_S,
+    DEFAULT_QUICK_RESET_WINDOW_S,
     DEFAULT_SMOOTH_BANDWIDTH_RAD_S,
     DEFAULT_SMOOTH_MAX_ACCELERATION_DEG_S2,
     DEFAULT_SMOOTH_MAX_JERK_DEG_S3,
@@ -64,6 +70,7 @@ from piper.piper_feedback import (
     MEASURED_MAX_JOINT_SPD_DEG_S,
     AlphaBetaFilter,
     DeadbandGate,
+    DoubleMotionResetDetector,
     LowPassFilter,
     MotionSmoother,
     OneEuroFilter,
@@ -86,9 +93,9 @@ SIDES = {
 ENABLE_SERVICES = {'left': '/enable_srv_left', 'right': '/enable_srv_right'}
 DEFAULT_MASTER_TOPIC = '/joint_states_single'
 DEFAULT_SIDE = 'left'
-# 对齐时长。位移不变时它直接决定速度：默认 4.0 秒是原先 8.0 秒的两倍速
-# （实测 37 度的对齐位移峰值约 14 deg/s，仍低于实测跟随能力 86 deg/s）。
-DEFAULT_ALIGN_SECONDS = 4.0
+# 对齐时长。点到点轨迹的两端已知，默认 2 秒可直接完成对齐；以实测最大约 55 度
+# 位移计算，minimum-jerk 峰值约 52 deg/s，仍低于实测持续能力 86 deg/s。
+DEFAULT_ALIGN_SECONDS = 2.0
 # 0 表示不做跳变限制。同步优先：任何对目标值的改动都会让 follower 与
 # master 不同步，所以默认关闭；需要防异常跳变时才设非零值。
 DEFAULT_MAX_STEP_DEG = 0.0
@@ -117,13 +124,14 @@ STATUS_TIMEOUT_S = 1.0
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
+QUICK_RESET_STOP = '快速复位触发'
 
 
 class TeleopBridge(Node):
     """Read both arms and optionally publish aligned follower commands."""
 
     def __init__(self, side, master_topic):
-        super().__init__('piper_teleop')
+        super().__init__(f'piper_teleop_{side}')
         self.cmd_topic, self.follower_topic, self.status_topic, self.arm = (
             SIDES[side])
         self.master_topic = master_topic
@@ -228,7 +236,7 @@ def _print_alignment_plan(master, follower, align_seconds,
     for joint in range(1, JOINT_COUNT + 1):
         delta = master[joint] - follower[joint]
         worst = max(worst, abs(delta))
-        peak = abs(delta) / align_seconds * CUBIC_PEAK_FACTOR
+        peak = abs(delta) / align_seconds * MINIMUM_JERK_PEAK_FACTOR
         print(f'  j{joint:<6}{master[joint]:>10.3f}{follower[joint]:>10.3f}'
               f'{delta:>+10.3f}{peak:>10.2f} deg/s')
     if master_gripper is not None and follower_gripper is not None:
@@ -243,7 +251,8 @@ def _print_alignment_plan(master, follower, align_seconds,
                   f'{master_gripper * 1000:.2f}mm → 目标 {goal * 1000:.2f}mm；'
                   f'从臂行程 0~{GRIPPER_OPEN_MAX_M * 1000:g}mm）')
     print(f'  最大位移 {worst:.3f} 度，在 {align_seconds:g}s 内完成，'
-          f'插值峰值速度约 {worst / align_seconds * CUBIC_PEAK_FACTOR:.2f} deg/s')
+          'minimum-jerk 峰值速度约 '
+          f'{worst / align_seconds * MINIMUM_JERK_PEAK_FACTOR:.2f} deg/s')
     return worst
 
 
@@ -329,6 +338,12 @@ def _run_teleop(node, options):
     last_gripper = None
     last_master = None
     last_master_time = None
+    reset_detector = (DoubleMotionResetDetector(
+        options.quick_reset_window,
+        options.quick_reset_speed,
+        options.quick_reset_release_speed,
+        options.quick_reset_min_travel)
+                      if getattr(options, 'quick_reset', False) else None)
     smoother = _make_filter(options)
     deadband = DeadbandGate(options.deadband_deg, options.deadband_speed)
     fine = _make_smoother(options)
@@ -359,6 +374,11 @@ def _run_teleop(node, options):
             if node.master is None or node.follower is None:
                 time.sleep(period)
                 continue
+            if (reset_detector is not None
+                    and reset_detector.update(node.master, now)):
+                stopped_by = QUICK_RESET_STOP
+                print('  检测到 master 两次快速开合，开始快速复位')
+                break
             dt = None if last_cycle is None else now - last_cycle
             last_cycle = now
             master_speed = 0.0
@@ -375,7 +395,7 @@ def _run_teleop(node, options):
                 progress = (now - align_started) / options.align_seconds
                 targets = align_targets(align_from, align_goal, progress)
                 if gripper_on:
-                    # 与关节同一条三次曲线：两端速度为零，所以夹爪不会先跳一下。
+                    # 与关节同一条 minimum-jerk 曲线：两端速度、加速度均为零。
                     grip_target = clamp_gripper(
                         align_targets({7: grip_from}, {7: grip_goal},
                                       progress)[7])
@@ -524,13 +544,13 @@ def _print_return_plan(start, home, plan, start_gripper=None,
     print(f'  {"joint":<7}{"start":>10}{"home":>10}{"move":>10}{"peak":>10}')
     for joint in range(1, JOINT_COUNT + 1):
         delta = plan.deltas_deg[joint]
-        peak = (CUBIC_PEAK_FACTOR * abs(delta) / plan.duration
+        peak = (MINIMUM_JERK_PEAK_FACTOR * abs(delta) / plan.duration
                 if plan.duration > 0.0 else 0.0)
         mark = '  !!' if joint in plan.clamped_deg else ''
         print(f'  j{joint:<6}{start[joint]:>10.3f}{home[joint]:>10.3f}'
               f'{delta:>+10.3f}{peak:>10.2f}{mark}')
     if start_gripper is not None and home_gripper is not None:
-        # 夹爪跟着同一条三次曲线回去，它的移动量比关节小得多，不参与时长推导。
+        # 夹爪走同一条 minimum-jerk 曲线；移动量小，不参与时长推导。
         print(f'  {"gripper":<7}{start_gripper * 1000:>10.2f}{home_gripper * 1000:>10.2f}'
               f'{(home_gripper - start_gripper) * 1000:>+10.2f}{"mm":>10}')
     if plan.duration <= 0.0:
@@ -553,7 +573,7 @@ def _print_return_plan(start, home, plan, start_gripper=None,
 
 def _follow_return_path(node, options, start, home, plan,
                         start_gripper=None, home_gripper=None):
-    """Publish the cubic path home; returns False if it had to stop early."""
+    """Publish the minimum-jerk path home; false if it stops early."""
     period = 1.0 / options.rate
     started = time.monotonic()
     loop_count = 0
@@ -605,7 +625,8 @@ def _follow_return_path(node, options, start, home, plan,
             next_deadline = time.monotonic()
 
 
-def _run_return_home(node, options, home, summary, home_gripper=None):
+def _run_return_home(node, options, home, summary, home_gripper=None,
+                     quick=False):
     """Bring the follower back to the pose this run started from."""
     start = (summary.last_targets if summary.last_targets is not None
              else node.follower)
@@ -616,13 +637,32 @@ def _run_return_home(node, options, home, summary, home_gripper=None):
                      else getattr(node, 'follower_gripper', None))
     if not getattr(options, 'gripper', False):
         start_gripper = home_gripper = None
-    plan = plan_return(start, home, options.return_speed,
-                       options.return_max_peak)
+    return_options = options
+    initial_plan = plan_return(start, home, options.return_speed,
+                               options.return_max_peak)
+    if quick and initial_plan.duration > 0.0:
+        quick_duration = options.quick_reset_duration
+        quick_speed = max(
+            options.return_speed,
+            initial_plan.max_delta_deg / quick_duration)
+        quick_peak = max(
+            options.return_max_peak,
+            MINIMUM_JERK_PEAK_FACTOR
+            * initial_plan.max_delta_deg / quick_duration)
+        return_options = copy(options)
+        return_options.return_speed = quick_speed
+        return_options.return_max_peak = quick_peak
+    plan = plan_return(start, home, return_options.return_speed,
+                       return_options.return_max_peak)
     print()
     print('=' * 72)
-    if options.enable:
-        print(f'遥操作结束（{summary.stopped_by}）：正在回到初始位置，'
-              f'预计 {plan.duration:.1f} 秒；再按一次 Ctrl-C 可立即停下')
+    if return_options.enable:
+        if quick:
+            print(f'快速复位（{summary.stopped_by}）：正在回到初始位置，'
+                  f'目标 {plan.duration:.1f} 秒；再按一次 Ctrl-C 可立即停下')
+        else:
+            print(f'遥操作结束（{summary.stopped_by}）：正在回到初始位置，'
+                  f'预计 {plan.duration:.1f} 秒；再按一次 Ctrl-C 可立即停下')
     else:
         print(f'遥操作结束（{summary.stopped_by}）：干跑，以下是回位计划，'
               '不发送任何内容')
@@ -635,7 +675,7 @@ def _run_return_home(node, options, home, summary, home_gripper=None):
         print('  回位起点：follower 的实测姿态')
     _print_return_plan(start, home, plan, start_gripper, home_gripper)
 
-    if not options.enable:
+    if not return_options.enable:
         return
     error = node.enable_error()
     if error:
@@ -645,7 +685,7 @@ def _run_return_home(node, options, home, summary, home_gripper=None):
         print('  回位结束：follower 已经在初始姿态上，无需移动')
         return
     try:
-        if _follow_return_path(node, options, start, home, plan,
+        if _follow_return_path(node, return_options, start, home, plan,
                                start_gripper, home_gripper):
             print(f'  回位完成：{plan.duration:.1f}s 内走完轨迹，'
                   'follower 保持使能停在初始姿态')
@@ -676,6 +716,22 @@ def _parser():
                         help='发布频率 Hz（默认 %(default)s）')
     parser.add_argument('--duration', type=float, default=None,
                         help='可选：运行指定秒数后自动结束（随后回位）')
+    parser.add_argument('--quick-reset', action='store_true',
+                        help='启用 master 双击手势快速复位；不设 --duration 时不限时')
+    parser.add_argument('--quick-reset-window', type=float,
+                        default=DEFAULT_QUICK_RESET_WINDOW_S,
+                        help='两次 master 快速动作的最大间隔，秒（默认 %(default)s）')
+    parser.add_argument('--quick-reset-speed', type=float,
+                        default=DEFAULT_QUICK_RESET_TRIGGER_SPEED_DEG_S,
+                        help='快速动作触发速度，deg/s（默认 %(default)s）')
+    parser.add_argument('--quick-reset-release-speed', type=float,
+                        default=DEFAULT_QUICK_RESET_RELEASE_SPEED_DEG_S,
+                        help='一次快速动作结束的速度，deg/s（默认 %(default)s）')
+    parser.add_argument('--quick-reset-min-travel', type=float,
+                        default=DEFAULT_QUICK_RESET_MIN_TRAVEL_DEG,
+                        help='一次快速动作的最小位移，度（默认 %(default)s）')
+    parser.add_argument('--quick-reset-duration', type=float, default=2.0,
+                        help='快速回位目标时长，秒（默认 %(default)s）')
     parser.add_argument('--smooth-bandwidth', type=float,
                         default=DEFAULT_SMOOTH_BANDWIDTH_RAD_S,
                         help='五次插值平滑的带宽 rad/s；0 表示关掉这一级'
@@ -752,9 +808,20 @@ def _parser():
     return parser
 
 
+def _application_args(args):
+    """Return argparse inputs while removing ROS arguments and argv[0]."""
+    application_args = remove_ros_args(args)
+    # With ``args=None`` rclpy reads sys.argv and keeps argv[0] in the
+    # returned non-ROS list. argparse expects only argv[1:]. Explicit lists
+    # supplied by the wrapper already omit the program name.
+    if args is None:
+        application_args = application_args[1:]
+    return application_args
+
+
 def main(args=None):
     """Dry-run, or align the follower to the master and then follow it."""
-    options = _parser().parse_args(args)
+    options = _parser().parse_args(_application_args(args))
     if options.align_seconds < MIN_ALIGN_SECONDS:
         print(f'拒绝：--align-seconds 不得小于 {MIN_ALIGN_SECONDS}')
         return EXIT_REFUSED
@@ -799,6 +866,21 @@ def main(args=None):
     if options.return_speed <= 0.0 or options.return_max_peak <= 0.0:
         print('拒绝：--return-speed 与 --return-max-peak 必须为正')
         return EXIT_REFUSED
+    if options.quick_reset_window <= 0.0:
+        print('拒绝：--quick-reset-window 必须为正')
+        return EXIT_REFUSED
+    if options.quick_reset_speed <= 0.0:
+        print('拒绝：--quick-reset-speed 必须为正')
+        return EXIT_REFUSED
+    if not 0.0 <= options.quick_reset_release_speed < options.quick_reset_speed:
+        print('拒绝：--quick-reset-release-speed 必须小于 --quick-reset-speed')
+        return EXIT_REFUSED
+    if options.quick_reset_min_travel <= 0.0:
+        print('拒绝：--quick-reset-min-travel 必须为正')
+        return EXIT_REFUSED
+    if options.quick_reset_duration <= 0.0:
+        print('拒绝：--quick-reset-duration 必须为正')
+        return EXIT_REFUSED
 
     # 自己接管 SIGINT（SignalHandlerOptions.NO → Python 默认行为：抛
     # KeyboardInterrupt）。rclpy 默认的 SIGINT 处理会在 Ctrl-C 时立刻关闭上下文，
@@ -830,10 +912,15 @@ def main(args=None):
                               node.master_gripper, node.follower_gripper,
                               options.gripper_scale)
         print()
-        print(f'模式：先在 {options.align_seconds:g}s 内三次插值对齐，'
+        print(f'模式：先在 {options.align_seconds:g}s 内 minimum-jerk 对齐，'
               f'再绝对跟随 master；{options.rate:g} Hz，速度 {options.speed}%'
               + ('' if options.enable else '（干跑，不发送任何内容）'))
         print(_filter_note(options))
+        if options.quick_reset:
+            print('快速复位：master 两次快速开合（两次动作间隔不超过 '
+                  f'{options.quick_reset_window:g}s）后，follower 在不超过 '
+                  f'{options.quick_reset_duration:g}s 内回到 home；'
+                  '每个 side 独立检测')
         if options.gripper:
             if node.master_gripper is None or node.follower_gripper is None:
                 print('夹爪      ：话题里没有第 7 项，本次不镜像夹爪')
@@ -859,7 +946,13 @@ def main(args=None):
         print('结束时  ：' + return_note)
         print('注意：对齐期间请不要触碰 master，否则会自动重新对齐。')
 
-        summary = _run_teleop(node, options)
+        while True:
+            summary = _run_teleop(node, options)
+            if summary.stopped_by != QUICK_RESET_STOP:
+                break
+            _run_return_home(node, options, home, summary, home_gripper,
+                             quick=True)
+            print('  快速复位完成：重新进入 master 跟随')
 
         print()
         print(f'结束：运行 {summary.elapsed:.1f}s（{summary.stopped_by}），'

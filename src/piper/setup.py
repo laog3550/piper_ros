@@ -35,6 +35,7 @@ setup(
             'piper_joint_watch = piper.piper_joint_watch:main',
             'piper_joint_move = piper.piper_joint_move:main',
             'piper_teleop = piper.piper_teleop:main',
+            'piper_teleop_fast = piper.piper_teleop_fast:main',
             'piper_speed_limit = piper.piper_speed_limit:main',
             'piper_teleop_verify = piper.piper_teleop_verify:main',
         ],

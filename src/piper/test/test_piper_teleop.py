@@ -10,13 +10,40 @@ import types
 
 import pytest
 
-from piper import piper_teleop
+from piper import piper_teleop, piper_teleop_fast
 from piper.piper_feedback import JOINT_COUNT
 
 
 def _pose(value):
     """Build a six-joint pose holding ``value`` degrees in every joint."""
     return {joint: float(value) for joint in range(1, JOINT_COUNT + 1)}
+
+
+def test_fast_entrypoint_keeps_defaults_before_ros_args(monkeypatch):
+    """Keep application defaults outside the ROS argument section."""
+    captured = []
+    monkeypatch.setattr(
+        piper_teleop_fast, 'teleop_main',
+        lambda args: captured.append(args) or 0)
+
+    result = piper_teleop_fast.main(
+        ['--side', 'left', '--enable', '--ros-args'])
+
+    assert result == 0
+    assert captured == [[
+        '--side', 'left', '--enable',
+        '--master-topic', '/joint_states_master_left',
+        '--quick-reset', '--ros-args',
+    ]]
+
+
+def test_direct_entrypoint_drops_program_name_after_ros_filter(monkeypatch):
+    """Do not pass argv[0] to argparse when main receives no explicit list."""
+    monkeypatch.setattr(
+        piper_teleop, 'remove_ros_args',
+        lambda args: ['/installed/piper_teleop', '--side', 'left'])
+
+    assert piper_teleop._application_args(None) == ['--side', 'left']
 
 
 class FakeClock:
@@ -106,7 +133,9 @@ def _options(**overrides):
             piper_teleop.DEFAULT_SMOOTH_MAX_ACCELERATION_DEG_S2),
         smooth_max_jerk=piper_teleop.DEFAULT_SMOOTH_MAX_JERK_DEG_S3,
         align_seconds=0.1, duration=0.4, max_step_deg=0.0,
-        return_speed=10.0, return_max_peak=15.0, no_return_home=False)
+        return_speed=piper_teleop.DEFAULT_RETURN_SPEED_DEG_S,
+        return_max_peak=piper_teleop.DEFAULT_RETURN_MAX_PEAK_DEG_S,
+        no_return_home=False)
     for name, value in overrides.items():
         setattr(options, name, value)
     return options
@@ -141,7 +170,7 @@ def test_return_path_ends_exactly_at_home(monkeypatch):
     _run_return(node, _options(), home, start)
     published = [[math.degrees(v) for v in command]
                  for command in node.publisher.sent]
-    assert len(published) > 50, '回位应当按设定频率持续发完整条轨迹'
+    assert len(published) > 25, '回位应当按设定频率持续发完整条轨迹'
     assert published[0][0] == pytest.approx(0.0)
     assert published[-1][0] == pytest.approx(12.0)
     # 每个关节都单调向 home 收敛，没有回退。
@@ -301,10 +330,9 @@ def _align_run(monkeypatch, master_at_spin):
     return piper_teleop._run_teleop(node, options), node
 
 
-def test_default_alignment_is_twice_the_old_speed():
-    # 位移不变时对齐速度由时长决定：8 秒 -> 4 秒 即 2 倍速（实测 37 度位移的
-    # 峰值约 14 deg/s，远低于实测跟随能力 86 deg/s）。
-    assert piper_teleop.DEFAULT_ALIGN_SECONDS == 4.0
+def test_default_alignment_finishes_in_two_seconds():
+    # 已知起终点的对齐用 2 秒 minimum-jerk 轨迹，不再慢速爬行 4 秒。
+    assert piper_teleop.DEFAULT_ALIGN_SECONDS == 2.0
 
 
 def test_a_dragged_master_goes_straight_to_following(monkeypatch, capsys):
@@ -416,9 +444,7 @@ def test_a_small_hand_wobble_does_not_bias_the_target(monkeypatch):
 def test_the_full_chain_attenuates_hand_tremor(monkeypatch):
     # 手抖集中在 8~12 Hz，这一档才是"整条链压掉多少"要看的频段。这里把平滑级按
     # 真机默认打开（_options 默认关闭它，原因见上一条用例的说明）。
-    # 实测末 20 拍峰峰值：10 Hz、±0.3 度 -> 0.054 度（λ=0.65 时 0.043 度）；
-    # 5 Hz、±0.15 度 -> 0.153 度（λ=0.65 时 0.121 度）。换了参数后残差上升约
-    # 四分之一，仍与机械臂自身本底（0.011~0.041 度）同量级。
+    # 稳定优先配置 λ=0.65、带宽 12 rad/s 会进一步压低这两个频段。
     for hz, amp, step, bound in ((10.0, 0.3, 1.2566, 0.1),
                                  (5.0, 0.15, 0.6283, 0.2)):
         monkeypatch.setattr(piper_teleop, 'time', FakeClock())
@@ -433,7 +459,7 @@ def test_the_full_chain_attenuates_hand_tremor(monkeypatch):
 
         node.on_spin = on_spin
         options = _options(
-            align_seconds=0.1, duration=1.2, deadband_deg=0.2,
+            align_seconds=0.1, duration=1.6, deadband_deg=0.2,
             smooth_bandwidth=piper_teleop.DEFAULT_SMOOTH_BANDWIDTH_RAD_S)
         piper_teleop._run_teleop(node, options)
         series = [math.degrees(command[0]) for command in node.publisher.sent]
@@ -493,10 +519,10 @@ def test_follow_phase_uses_alpha_beta_by_default(monkeypatch):
     assert piper_teleop.DEFAULT_FILTER == 'alpha-beta'
     summary, after_step = _follow_run(monkeypatch)
     assert summary.mode == 'follow'
-    # λ=0.40 导出的 α=0.84：从 0 到 10 度的第一拍走到 8.4 度；之后位置与速度
-    # 状态共同收敛（峰值 10.51 度，不越过下面的 11）。这里关掉后级平滑，
+    # λ=0.65 导出的 α=0.5775：从 0 到 10 度的第一拍走到 5.775 度；之后位置与速度
+    # 状态共同收敛。这里关掉后级平滑，
     # 单独验证 α-β 的行为。
-    assert after_step[0] == pytest.approx(8.4, abs=1e-6)
+    assert after_step[0] == pytest.approx(5.775, abs=1e-6)
     assert max(after_step) < 11.0
     assert after_step[-1] > 9.99
 

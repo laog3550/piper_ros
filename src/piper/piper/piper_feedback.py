@@ -383,28 +383,24 @@ def out_of_limits(angles_deg: Dict[int, float]) -> Dict[int, float]:
     return overshoot
 
 
-def cubic_step(progress):
-    """
-    Smoothstep easing: an S-curve with zero velocity at both ends.
-
-    Used to move the follower from its own pose to the master's pose without
-    a velocity jump at either end of the move.
-    """
+def minimum_jerk_step(progress):
+    """Return an S-curve with zero endpoint velocity and acceleration."""
     if progress <= 0.0:
         return 0.0
     if progress >= 1.0:
         return 1.0
-    return progress * progress * (3.0 - 2.0 * progress)
+    return progress ** 3 * (
+        10.0 + progress * (-15.0 + 6.0 * progress))
 
 
 def align_targets(start_deg, goal_deg, progress):
     """
-    Interpolate a whole pose from start to goal along the cubic S-curve.
+    Interpolate a whole pose along a quintic minimum-jerk S-curve.
 
     ``progress`` is the fraction of the alignment move already elapsed, so 0
     yields exactly ``start_deg`` and 1 yields exactly ``goal_deg``.
     """
-    fraction = cubic_step(progress)
+    fraction = minimum_jerk_step(progress)
     return {
         joint: start_deg[joint]
         + fraction * (goal_deg[joint] - start_deg[joint])
@@ -468,6 +464,14 @@ DEFAULT_GRIPPER_EFFORT_NM = 1.0
 # 对应从臂走满行程，中间按比例跟随。两台夹爪完全相同时把它设成 1.0 就是纯镜像。
 DEFAULT_GRIPPER_SCALE = 1.3
 
+# 快速复位手势：一次手势是 master 做出一段短促移动后重新停下；两次
+# 手势在窗口内完成就触发 follower 回 home。检测器只处理角度和时间，
+# 不依赖 ROS，左右两臂各自实例化后不会共享状态。
+DEFAULT_QUICK_RESET_WINDOW_S = 2.0
+DEFAULT_QUICK_RESET_TRIGGER_SPEED_DEG_S = 20.0
+DEFAULT_QUICK_RESET_RELEASE_SPEED_DEG_S = 5.0
+DEFAULT_QUICK_RESET_MIN_TRAVEL_DEG = 3.0
+
 
 def clamp_gripper(open_m: float) -> float:
     """Clamp a gripper opening into the commandable range, in metres."""
@@ -480,15 +484,95 @@ def scale_gripper(open_m: float,
     return clamp_gripper(float(open_m) * float(scale))
 
 
-# The cubic S-curve used for the alignment move peaks at 1.5 times the average
-# speed of the same displacement (the derivative of 3t^2-2t^3 reaches 1.5 at
-# t=0.5), so a move of D degrees spread over T seconds never exceeds 1.5*D/T.
-CUBIC_PEAK_FACTOR = 1.5
-# Return-home defaults: 10 deg/s average and a 15 deg/s peak ceiling, which
-# happen to imply the same duration because 1.5 * 10 == 15.  They are two
-# independent knobs rather than one, so either can be tightened on its own.
-DEFAULT_RETURN_SPEED_DEG_S = 10.0
-DEFAULT_RETURN_MAX_PEAK_DEG_S = 15.0
+class DoubleMotionResetDetector:
+    """Detect two short master motion bursts inside a time window."""
+
+    def __init__(self,
+                 window_s: float = DEFAULT_QUICK_RESET_WINDOW_S,
+                 trigger_speed_deg_s: float =
+                 DEFAULT_QUICK_RESET_TRIGGER_SPEED_DEG_S,
+                 release_speed_deg_s: float =
+                 DEFAULT_QUICK_RESET_RELEASE_SPEED_DEG_S,
+                 min_travel_deg: float = DEFAULT_QUICK_RESET_MIN_TRAVEL_DEG):
+        if window_s <= 0.0:
+            raise ValueError('window_s must be positive')
+        if trigger_speed_deg_s <= 0.0:
+            raise ValueError('trigger speed must be positive')
+        if not 0.0 <= release_speed_deg_s < trigger_speed_deg_s:
+            raise ValueError('release speed must be below trigger speed')
+        if min_travel_deg <= 0.0:
+            raise ValueError('minimum travel must be positive')
+        self.window_s = float(window_s)
+        self.trigger_speed_deg_s = float(trigger_speed_deg_s)
+        self.release_speed_deg_s = float(release_speed_deg_s)
+        self.min_travel_deg = float(min_travel_deg)
+        self.reset()
+
+    def reset(self) -> None:
+        """Forget the previous burst and double-motion history."""
+        self._last_angles = None
+        self._last_time = None
+        self._moving = False
+        self._burst_start = None
+        self._burst_travel = 0.0
+        self._last_tap_time = None
+
+    def update(self, angles_deg: Dict[int, float], now: float) -> bool:
+        """Return true when two completed motion bursts are detected."""
+        values = {
+            joint: float(angles_deg[joint])
+            for joint in range(1, JOINT_COUNT + 1)
+            if joint in angles_deg and math.isfinite(float(angles_deg[joint]))
+        }
+        if len(values) != JOINT_COUNT:
+            self._last_angles = None
+            self._last_time = None
+            return False
+
+        speed = 0.0
+        if self._last_angles is not None and self._last_time is not None:
+            dt = float(now) - self._last_time
+            if dt > 0.0:
+                speed = max(abs(values[joint] - self._last_angles[joint])
+                            for joint in values) / dt
+
+        if (self._last_tap_time is not None
+                and float(now) - self._last_tap_time > self.window_s):
+            self._last_tap_time = None
+
+        if not self._moving and speed >= self.trigger_speed_deg_s:
+            self._moving = True
+            self._burst_start = dict(values)
+            self._burst_travel = 0.0
+        elif self._moving:
+            self._burst_travel = max(
+                self._burst_travel,
+                max(abs(values[joint] - self._burst_start[joint])
+                    for joint in values))
+            if speed <= self.release_speed_deg_s:
+                self._moving = False
+                if self._burst_travel >= self.min_travel_deg:
+                    if (self._last_tap_time is not None
+                            and float(now) - self._last_tap_time <= self.window_s):
+                        self._last_tap_time = None
+                        self._last_angles = values
+                        self._last_time = float(now)
+                        return True
+                    self._last_tap_time = float(now)
+
+        self._last_angles = values
+        self._last_time = float(now)
+        return False
+
+
+# The quintic minimum-jerk S-curve peaks at 1.875 times the average speed
+# (the derivative of 10t^3-15t^4+6t^5 reaches 1.875 at t=0.5).
+MINIMUM_JERK_PEAK_FACTOR = 1.875
+# Return-home is a known point-to-point move.  The old 10/15 deg/s values made
+# a normal return visibly slow; 20/40 shortens it by roughly half while keeping
+# the planned peak well below the measured 86 deg/s sustained capability.
+DEFAULT_RETURN_SPEED_DEG_S = 20.0
+DEFAULT_RETURN_MAX_PEAK_DEG_S = 40.0
 # Samples taken along the return path when reporting which joints the driver
 # would have to clamp.  Clamping is only possible where the pose or the home
 # pose sits outside the commandable range, so a coarse sweep is enough.
@@ -511,24 +595,24 @@ def return_duration(max_delta_deg,
                     speed_deg_s=DEFAULT_RETURN_SPEED_DEG_S,
                     max_peak_deg_s=DEFAULT_RETURN_MAX_PEAK_DEG_S) -> float:
     """
-    Seconds a cubic return move of ``max_delta_deg`` should take.
+    Seconds a minimum-jerk return move of ``max_delta_deg`` should take.
 
     The move has no fixed duration: it falls out of the distance and the two
     speed limits.  The average speed implies ``distance / speed`` seconds and
-    the peak ceiling implies ``1.5 * distance / peak``; the longer of the two
-    wins, so neither limit is exceeded.
+    the peak ceiling implies ``1.875 * distance / peak``; the longer of the
+    two wins, so neither limit is exceeded.
     """
     if speed_deg_s <= 0.0 or max_peak_deg_s <= 0.0:
         raise ValueError('speed and peak limits must be positive')
     if max_delta_deg <= 0.0:
         return 0.0
     return max(max_delta_deg / speed_deg_s,
-               CUBIC_PEAK_FACTOR * max_delta_deg / max_peak_deg_s)
+               MINIMUM_JERK_PEAK_FACTOR * max_delta_deg / max_peak_deg_s)
 
 
 @dataclass(frozen=True)
 class ReturnPlan:
-    """A cubic move from the pose a run ended in back to its home pose."""
+    """A minimum-jerk move from the final pose back to its home pose."""
 
     deltas_deg: Dict[int, float]
     max_delta_deg: float
@@ -567,7 +651,7 @@ def plan_return(start_deg, home_deg,
         deltas_deg=deltas,
         max_delta_deg=max_delta,
         duration=duration,
-        peak_deg_s=(CUBIC_PEAK_FACTOR * max_delta / duration
+        peak_deg_s=(MINIMUM_JERK_PEAK_FACTOR * max_delta / duration
                     if duration > 0.0 else 0.0),
         clamped_deg=clamped,
     )
@@ -596,21 +680,20 @@ DEFAULT_ONE_EURO_BETA = 0.3
 DEFAULT_ONE_EURO_D_CUTOFF_HZ = 1.0
 # α-β filter defaults.  They are pole-placed rather than hand-tuned.  For the
 # constant-velocity observer, a repeated discrete error pole λ gives
-# α=1-λ² and β=(1-λ)².  λ=0.40 at the 50 Hz teleop rate is a 21.8 ms
+# α=1-λ² and β=(1-λ)².  λ=0.65 at the 50 Hz teleop rate is a 46.4 ms
 # continuous-time constant.
 #
-# 2026-09-24 真机反馈"抖动已可接受、但迟滞明显"后按离线扫描改到 0.40（原 0.65，
-# 46.4 ms）。实测（同一条流水线，50 Hz）：
-#   静止残留抖动（10 Hz、±0.3 度）  0.021° → 0.052°，仍在机械臂自身本底
-#     （0.011~0.041°）量级，肉眼不可见；
-#   暂态峰值（100 deg/s）            起步 5.14°→3.50°、变速 5.12°→3.39°、
-#     反向 9.48°→6.89°、急停 8.90°→6.74°，约降 1/3。
+# 2026-09-24 第二轮真机反馈指出运动中仍有明显抖动，因此从追求暂态的 0.40
+# 调回稳定优先的 0.65。与下面 12 rad/s 的平滑级组合后，在同一份 90 秒左臂
+# master 记录上，5~15 Hz 指令 RMS 从 0.0192° 降到 0.0063°；20~80 deg/s
+# 档的指令侧中位偏差从 0.715° 增到 1.228°，仍远小于 follower 约 9.5° 的
+# 实测机械滞后。
 # **匀速段的滞后与 α、β 无关**：速度估计收敛后前馈把稳态滞后补成 0，改这两个
 # 只影响起步与变速的暂态。要再压暂态就得同时开大平滑级带宽，代价更大
 # （15→20 rad/s 抖动 0.052°→0.115°，而暂态只再降约两成）。
-DEFAULT_ALPHA_BETA_POLE = 0.40
-DEFAULT_ALPHA_BETA_ALPHA = 1.0 - DEFAULT_ALPHA_BETA_POLE ** 2  # 0.84
-DEFAULT_ALPHA_BETA_BETA = (1.0 - DEFAULT_ALPHA_BETA_POLE) ** 2  # 0.36
+DEFAULT_ALPHA_BETA_POLE = 0.65
+DEFAULT_ALPHA_BETA_ALPHA = 1.0 - DEFAULT_ALPHA_BETA_POLE ** 2  # 0.5775
+DEFAULT_ALPHA_BETA_BETA = (1.0 - DEFAULT_ALPHA_BETA_POLE) ** 2  # 0.1225
 # A sample gap this large means the constant-velocity model is no longer a
 # trustworthy description of what happened between observations.  Re-anchor
 # on the measurement instead of extrapolating stale velocity through the gap.
@@ -845,8 +928,9 @@ class DeadbandGate:
 #
 # 级联环按三阶 Butterworth 极点配置：特征多项式 s³ + 2ωs² + 2ω²s + ω³，
 # 于是 k_p = ω/2、k_v = ω、k_a = 2ω，只有一个可调参数 ω（带宽）。ω 越大越
-# 跟手、但急停时的过冲越大（ω=15 rad/s 时 150 deg/s 急停过冲约 7.6 度）。
-DEFAULT_SMOOTH_BANDWIDTH_RAD_S = 15.0
+# 跟手、抖动抑制越弱；当前默认 12 rad/s 是左臂真实轨迹离线重放后的折中值，
+# 150 deg/s 急停的指令侧过冲约 8 度。
+DEFAULT_SMOOTH_BANDWIDTH_RAD_S = 12.0
 # 速度、加速度、jerk 的硬上限：由实测加速度分布定的安全网（90 分位约 4700、
 # 峰值约 8500 deg/s²），正常情况下由 ω 决定形状，这几个上限只在猛拉时兜底。
 DEFAULT_SMOOTH_MAX_VELOCITY_DEG_S = 172.0
@@ -879,7 +963,7 @@ class MotionSmoother:
     estimate) keeps a steady drag tracked without lag, so smoothing does not
     cost tracking.  What it does cost is the braking distance: when the
     reference stops abruptly the tracker overshoots by about ``v / bandwidth``
-    (7.6 degrees for a 150 deg/s stop at the default 15 rad/s).
+    (about 8 degrees for a 150 deg/s stop at the default 12 rad/s).
 
     Limits are hard: acceleration and jerk never exceed the values passed in.
     The velocity ceiling can be exceeded by a fraction of a percent (0.35% was
