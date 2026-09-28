@@ -14,10 +14,7 @@
 | `piper_teleop_node.py` | ROS 订阅、发布、使能服务和命令所有权检查 | 新传输层实现相同的桥接接口 |
 | `piper_teleop_cli.py` | 命令行契约、默认值和参数校验 | 新参数只在此登记和校验 |
 | `piper_teleop.py` | 对齐、跟随、快速复位、回位状态机 | 新控制策略实现独立策略对象后注入 |
-| `piper_feedback_decode.py` | CAN 反馈帧解码、反馈新鲜度与关节角跟踪 | 增加新反馈帧解析器 |
-| `piper_motion.py` | 驱动限位、轨迹、回位、夹爪与快速复位规划 | 增加独立运动策略 |
-| `piper_filters.py` | α-β、One Euro、低通、死区和 jerk 平滑器 | 增加实现相同接口的滤波器 |
-| `piper_feedback.py` | 旧公开导入路径的兼容门面 | 不再向其中加入实现代码 |
+| `piper_feedback.py` | 反馈解码与纯算法工具 | 按“解码、轨迹、滤波”继续拆分 |
 
 ## 会话生命周期
 
@@ -44,7 +41,8 @@ Python 文件、函数和变量使用 `snake_case`，类使用 `PascalCase`，�
 `/joint_ctrl_cmd_left` 等接口为了现场兼容暂不直接改名，统一从 `piper_interfaces.py`
 取得，后续可以在一个位置增加新旧命名迁移层。
 
-## 兼容策略
+## 后续拆分建议
 
-已有代码仍可从 `piper_feedback.py` 导入全部公开符号。新代码应直接从职责模块导入；
-兼容门面只做重新导出，确保拆分不要求所有调用方在同一个版本中同时迁移。
+`piper_feedback.py` 仍混合 CAN 反馈、限位、轨迹规划和四种滤波器，应在后续 PR 中拆成
+`feedback_decode.py`、`motion_profile.py` 与 `filters.py`。该拆分应保持纯函数 API，并先
+迁移现有测试，避免与现场控制逻辑重构同时进行。
