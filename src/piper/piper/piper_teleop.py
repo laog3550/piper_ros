@@ -36,24 +36,11 @@ import time
 from typing import Dict, Optional
 
 import rclpy
+from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
 from rclpy.utilities import remove_ros_args
 from sensor_msgs.msg import JointState
-from piper.piper_interfaces import SIDES, arm_interface
-from piper.piper_teleop_cli import (
-    DEFAULT_ALIGN_SECONDS,
-    DEFAULT_FILTER,
-    DEFAULT_MASTER_TOPIC,
-    DEFAULT_MAX_STEP_DEG,
-    DEFAULT_RATE_HZ,
-    DEFAULT_SIDE,
-    DEFAULT_SPEED,
-    FILTERS,
-    MIN_ALIGN_SECONDS,
-    build_parser,
-    validate_options,
-)
-from piper.piper_teleop_node import TeleopBridge
+from piper_msgs.msg import PiperEnableStatusMsg
 from piper.piper_feedback import (
     MINIMUM_JERK_PEAK_FACTOR,
     DEFAULT_ALPHA_BETA_ALPHA,
@@ -97,18 +84,31 @@ from piper.piper_feedback import (
 
 JOINT_NAMES = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6',
                'gripper']
-ENABLE_SERVICES = {
-    side: arm_interface(side).enable_service for side in SIDES
+SIDES = {
+    'left': ('/joint_ctrl_cmd_left', '/joint_states_left',
+             '/arm_enable_status_left', 'follower_left (can_fl)'),
+    'right': ('/joint_ctrl_cmd_right', '/joint_states_right',
+              '/arm_enable_status_right', 'follower_right (can_fr)'),
 }
+ENABLE_SERVICES = {'left': '/enable_srv_left', 'right': '/enable_srv_right'}
+DEFAULT_MASTER_TOPIC = '/joint_states_single'
+DEFAULT_SIDE = 'left'
 # 对齐时长。点到点轨迹的两端已知，默认 2 秒可直接完成对齐；以实测最大约 55 度
 # 位移计算，minimum-jerk 峰值约 52 deg/s，仍低于实测持续能力 86 deg/s。
+DEFAULT_ALIGN_SECONDS = 2.0
 # 0 表示不做跳变限制。同步优先：任何对目标值的改动都会让 follower 与
 # master 不同步，所以默认关闭；需要防异常跳变时才设非零值。
+DEFAULT_MAX_STEP_DEG = 0.0
 # 速度百分比：节点把它转发给 MotionCtrl_2，是「对整臂最大速度（3 rad/s ≈
 # 172 deg/s）的缩放」，不是模式开关。100 = 不额外限速——2026-09-23 实测，
 # 10% 时 follower 的持续速度被压到 17.2 deg/s 且必然跟不上快速拖动；
 # 100% 时达到 45.6~86.2 deg/s 并跟着拖动速度走。遥操作要的就是跟随 master
 # 原值，所以默认不给它再加一道软件限速。
+DEFAULT_SPEED = 100
+DEFAULT_RATE_HZ = 50.0
+FILTERS = ('alpha-beta', 'one-euro', 'lowpass', 'none')
+DEFAULT_FILTER = 'alpha-beta'
+MIN_ALIGN_SECONDS = 1.0
 # 对齐期间 master 若被移动超过这个量，且**已经停下**，就以新姿态重新对齐。
 REALIGN_THRESHOLD_DEG = 2.0
 # 重新对齐的次数上限。对齐的目标是启动时冻结的 master 快照，操作者一直握着
@@ -120,10 +120,91 @@ MAX_REALIGNS = 2
 MASTER_MOVING_DEG_S = 1.0
 STATUS_PERIOD = 1.0
 # 使能状态话题以 10 Hz 发布；比这更旧的状态不再能支撑「整臂使能」这个结论。
+STATUS_TIMEOUT_S = 1.0
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
 QUICK_RESET_STOP = '快速复位触发'
+
+
+class TeleopBridge(Node):
+    """Read both arms and optionally publish aligned follower commands."""
+
+    def __init__(self, side, master_topic):
+        super().__init__(f'piper_teleop_{side}')
+        self.cmd_topic, self.follower_topic, self.status_topic, self.arm = (
+            SIDES[side])
+        self.master_topic = master_topic
+        self.master = None
+        self.follower = None
+        # 夹爪开口（米），来自各自消息的第 7 项；消息不足 7 项时保持 None，
+        # 遥操作据此判断这一路能不能镜像。
+        self.master_gripper = None
+        self.follower_gripper = None
+        self.status = None
+        self.status_time = None
+        self.create_subscription(JointState, master_topic,
+                                 self._on_master, 10)
+        self.create_subscription(JointState, self.follower_topic,
+                                 self._on_follower, 10)
+        self.create_subscription(PiperEnableStatusMsg, self.status_topic,
+                                 self._on_status, 10)
+        self.publisher = self.create_publisher(JointState, self.cmd_topic, 10)
+
+    def _angles(self, msg):
+        if len(msg.position) < JOINT_COUNT:
+            return None
+        values = [float(v) for v in msg.position[:JOINT_COUNT]]
+        if not all(math.isfinite(v) for v in values):
+            return None
+        return {i + 1: math.degrees(v) for i, v in enumerate(values)}
+
+    def _gripper(self, msg):
+        """Read the gripper opening in metres, or None when it is absent."""
+        if len(msg.position) < JOINT_COUNT + 1:
+            return None
+        value = float(msg.position[JOINT_COUNT])
+        return value if math.isfinite(value) else None
+
+    def _on_master(self, msg):
+        angles = self._angles(msg)
+        if angles is not None:
+            self.master = angles
+        gripper = self._gripper(msg)
+        if gripper is not None:
+            self.master_gripper = gripper
+
+    def _on_follower(self, msg):
+        angles = self._angles(msg)
+        if angles is not None:
+            self.follower = angles
+        gripper = self._gripper(msg)
+        if gripper is not None:
+            self.follower_gripper = gripper
+
+    def _on_status(self, msg):
+        self.status = msg
+        self.status_time = time.monotonic()
+
+    def enable_error(self):
+        """Return None when the arm is confirmed enabled, else why not."""
+        if self.status is None:
+            return f'{self.status_topic} 上没有收到使能状态'
+        age = time.monotonic() - self.status_time
+        if age > STATUS_TIMEOUT_S:
+            # 使能状态自己也是反馈：话题停了就说明这一路已经掉线，此时
+            # 不能把最后一条「已使能」当成现在的结论。
+            return f'使能状态已过期（{age:.1f}s 没有更新）'
+        if not self.status.all_enabled:
+            return (f'整臂未确认使能（state={self.status.state} '
+                    f'all_enabled={self.status.all_enabled}）')
+        return None
+
+    def spin_for(self, seconds):
+        """Pump callbacks for a while."""
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            rclpy.spin_once(self, timeout_sec=0.02)
 
 
 def _publish_targets(node, targets_deg, speed, gripper=None, gripper_effort=0.0):
@@ -724,10 +805,6 @@ def _parser():
                         help='结束时停在原地，不回到初始位置')
     parser.add_argument('--enable', action='store_true',
                         help='真正发布运动指令；不加此参数只做干跑')
-    parser.add_argument('--manage-enable', action='store_true',
-                        help='由遥操作会话调用本侧使能服务')
-    parser.add_argument('--disable-on-exit', action='store_true',
-                        help='完成回位后失能；需同时使用 --manage-enable')
     return parser
 
 
@@ -745,10 +822,6 @@ def _application_args(args):
 def main(args=None):
     """Dry-run, or align the follower to the master and then follow it."""
     options = _parser().parse_args(_application_args(args))
-    error = validate_options(options)
-    if error:
-        print(f'拒绝：{error}')
-        return EXIT_REFUSED
     if options.align_seconds < MIN_ALIGN_SECONDS:
         print(f'拒绝：--align-seconds 不得小于 {MIN_ALIGN_SECONDS}')
         return EXIT_REFUSED
@@ -825,16 +898,6 @@ def main(args=None):
         if node.follower is None:
             print(f'拒绝：{node.follower_topic} 上没有收到 follower 的角度')
             return EXIT_REFUSED
-        owner_error = node.command_owner_error()
-        if options.enable and owner_error:
-            print(f'拒绝：{owner_error}；同一机械臂只允许一个控制发布者')
-            return EXIT_REFUSED
-        if options.enable and options.manage_enable:
-            enabled, reason = node.request_enabled(True)
-            if not enabled:
-                print(f'拒绝：无法由遥操作会话使能 follower：{reason}')
-                return EXIT_REFUSED
-            node.spin_for(1.0)
         error = node.enable_error()
         if options.enable and error:
             print(f'拒绝：{error}，拒绝发布运动指令')
@@ -908,11 +971,6 @@ def main(args=None):
             _run_return_home(node, options, home, summary, home_gripper)
         return EXIT_OK
     finally:
-        if (options.enable and options.manage_enable
-                and options.disable_on_exit):
-            disabled, reason = node.request_enabled(False)
-            if not disabled:
-                print(f'警告：会话结束时失能失败：{reason}')
         node.destroy_node()
         rclpy.shutdown()
 

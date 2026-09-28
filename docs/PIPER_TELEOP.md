@@ -955,8 +955,3 @@ ros2 run piper piper_teleop_verify --analyze /tmp/piper_teleop_verify.csv
 | `--no-return-home` | 关 | 结束时停在原地，不回位 |
 | `--enable` | 关 | 不加则干跑，只打印不发送 |
 
-# 架构说明
-
-遥操作的模块边界、接口命名和会话生命周期见
-[PIPER_ARCHITECTURE.md](PIPER_ARCHITECTURE.md)。快速双臂入口现在由每侧遥操作节点自行
-调用使能服务，并在正常退出时失能，不再依赖独立的 `ros2 service call` 进程。

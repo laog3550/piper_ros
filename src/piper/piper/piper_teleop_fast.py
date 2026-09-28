@@ -4,7 +4,6 @@
 import sys
 
 from piper.piper_teleop import main as teleop_main
-from piper.piper_interfaces import arm_interface
 
 
 def _value_after(args, option, default):
@@ -25,9 +24,7 @@ def main(args=None):
     defaults = []
     if '--master-topic' not in argv and not any(
             value.startswith('--master-topic=') for value in argv):
-        defaults.extend([
-            '--master-topic', arm_interface(side).default_master_topic,
-        ])
+        defaults.extend(['--master-topic', f'/joint_states_master_{side}'])
     if '--quick-reset' not in argv:
         defaults.append('--quick-reset')
     # launch_ros appends ``--ros-args`` even when no ROS-specific options are
