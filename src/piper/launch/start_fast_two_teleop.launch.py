@@ -1,52 +1,30 @@
-"""启动左右两路不限时遥操作及独立的 master 双击快速复位。"""
+"""启动左右两路由单一会话管理使能状态的快速遥操作。"""
 
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, RegisterEventHandler
-from launch.event_handlers import OnProcessExit
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    """先分别使能两台 follower，再启动两路快速遥操作。"""
-    enable_left = ExecuteProcess(
-        cmd=[
-            'ros2', 'service', 'call', '/enable_srv_left',
-            'piper_msgs/srv/Enable', '{enable_request: true}',
-        ],
-        output='screen',
-    )
-    enable_right = ExecuteProcess(
-        cmd=[
-            'ros2', 'service', 'call', '/enable_srv_right',
-            'piper_msgs/srv/Enable', '{enable_request: true}',
-        ],
-        output='screen',
-    )
+    """每侧只启动一个遥操作会话，由它完成使能和退出失能。"""
     teleop_left = Node(
         package='piper',
         executable='piper_teleop_fast',
         output='screen',
-        arguments=['--side', 'left', '--enable'],
+        arguments=[
+            '--side', 'left', '--enable', '--manage-enable',
+            '--disable-on-exit',
+        ],
     )
     teleop_right = Node(
         package='piper',
         executable='piper_teleop_fast',
         output='screen',
-        arguments=['--side', 'right', '--enable'],
+        arguments=[
+            '--side', 'right', '--enable', '--manage-enable',
+            '--disable-on-exit',
+        ],
     )
     return LaunchDescription([
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=enable_left,
-                on_exit=[teleop_left],
-            ),
-        ),
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=enable_right,
-                on_exit=[teleop_right],
-            ),
-        ),
-        enable_left,
-        enable_right,
+        teleop_left,
+        teleop_right,
     ])
