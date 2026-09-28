@@ -6,6 +6,8 @@ import pytest
 
 from piper.piper_interfaces import SIDES, arm_interface, interface_matrix
 from piper.piper_teleop_cli import build_parser, validate_options
+from piper import piper_feedback
+from piper import piper_feedback_decode, piper_filters, piper_motion
 
 
 def test_interface_registry_has_one_complete_entry_per_side():
@@ -40,3 +42,21 @@ def test_fast_launch_does_not_spawn_detached_service_processes():
     assert 'ExecuteProcess' not in text
     assert "'--manage-enable'" in text
     assert "'--disable-on-exit'" in text
+
+
+def test_feedback_facade_preserves_the_split_public_api():
+    split_exports = set(piper_feedback_decode.__all__)
+    split_exports.update(piper_motion.__all__)
+    split_exports.update(piper_filters.__all__)
+    assert set(piper_feedback.__all__) == split_exports
+
+
+def test_feedback_layers_have_disjoint_public_ownership():
+    groups = [
+        set(piper_feedback_decode.__all__),
+        set(piper_motion.__all__),
+        set(piper_filters.__all__),
+    ]
+    assert not (groups[0] & groups[1])
+    assert not (groups[0] & groups[2])
+    assert not (groups[1] & groups[2])
