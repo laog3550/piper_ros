@@ -5,7 +5,7 @@ import time
 import pytest
 
 from piper.piper_feedback import ArmAngleTracker
-from piper.piper_joint_watch import ArmSampler
+from piper.piper_joint_watch import DEFAULT_ARMS, ArmSampler, _parse_arms
 
 
 def _frame(joint_a, joint_b, degrees):
@@ -150,10 +150,11 @@ def _angle_frame(joint_a, joint_b, degrees):
     return _FakeFrame(0x2A5, raw.to_bytes(4, 'big') + raw.to_bytes(4, 'big'))
 
 
-def _run_sampler(frames, predicate, timeout=3.0):
+def _run_sampler(frames, predicate, timeout=3.0, offset=0):
     """Run one sampler over fake frames until predicate holds."""
     bus = _FakeBus(frames)
-    sampler = ArmSampler('fake0', 'fake_role', bus_factory=lambda port: bus)
+    sampler = ArmSampler('fake0', 'fake_role', offset,
+                         bus_factory=lambda port: bus)
     sampler.start()
     deadline = time.monotonic() + timeout
     try:
@@ -205,3 +206,40 @@ def test_sampler_reports_a_bus_that_will_not_open():
     sampler.join(timeout=1.0)
     assert sampler.error == 'no such interface'
     assert sampler.snapshot(time.monotonic())[2] is None
+
+
+def test_default_arms_watch_the_plain_layout():
+    assert _parse_arms(None) == tuple(
+        (port, role, 0) for port, role in DEFAULT_ARMS)
+
+
+def test_parse_arms_reads_an_optional_offset():
+    assert _parse_arms(['can_left']) == (('can_left', '-', 0),)
+    assert _parse_arms(['can_left:主@0x20']) == (('can_left', '主', 0x20),)
+    assert _parse_arms(['can_left:从', 'can_right:右@0x10']) == (
+        ('can_left', '从', 0), ('can_right', '右', 0x10))
+
+
+def test_parse_arms_refuses_an_unsupported_offset():
+    with pytest.raises(ValueError, match='unsupported offset'):
+        _parse_arms(['can_left@0x30'])
+
+
+def test_sampler_with_an_offset_ignores_the_plain_frames():
+    # 同一条总线上两台臂：带 @0x20 的那一路只认 0x2C5，普通帧必须被忽略。
+    frames = [
+        _angle_frame(0, 0, 40.0),
+        _FakeFrame(0x2C5, int(70.0 * 1000).to_bytes(4, 'big')
+                   + int(70.0 * 1000).to_bytes(4, 'big')),
+    ]
+    sampler, _ = _run_sampler(
+        frames, lambda s: 1 in s.tracker.angles(), offset=0x20)
+    assert sampler.offset == 0x20
+    assert sampler.tracker.angles()[1] == pytest.approx(70.0)
+
+
+def test_sampler_without_an_offset_reads_the_plain_frames():
+    frames = [_angle_frame(0, 0, 40.0)]
+    sampler, _ = _run_sampler(
+        frames, lambda s: 1 in s.tracker.angles())
+    assert sampler.tracker.angles()[1] == pytest.approx(40.0)

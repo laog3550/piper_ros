@@ -34,10 +34,17 @@ from typing import Dict, List, Optional, Tuple
 import can
 import numpy as np
 
-from piper.piper_feedback import JOINT_ANGLE_IDS, JOINT_COUNT, decode_joint_angles
+from piper.piper_feedback import (
+    JOINT_ANGLE_IDS,
+    JOINT_COUNT,
+    decode_joint_angles,
+    parse_offset,
+)
 
-# 记录的是哪两台臂：默认 master_left(can_ml) 与 follower_left(can_fl)。
-DEFAULT_PORTS = (('master', 'can_ml'), ('follower', 'can_fl'))
+# 记录的是哪两台臂：默认左总线上的一对——主臂读它的偏移帧（0x2Cx），从臂读常规帧
+# （0x2Ax）。两侧现在各只有一条总线，靠偏移把两台分开；两个角色若指向同一个偏移，
+# 记录的就是同一批帧的两份拷贝（见 main 的拒绝逻辑）。
+DEFAULT_PORTS = (('master', 'can_left', 0x20), ('follower', 'can_left', 0))
 DEFAULT_SECONDS = 70.0
 SAMPLE_HZ = 50.0
 WOBBLE_BAND = (5.0, 15.0)
@@ -51,12 +58,12 @@ EXIT_OK = 0
 EXIT_FAILED = 3
 
 
-def _open_readonly(port: str) -> can.BusABC:
-    """Open one interface receiving only the joint angle frames."""
+def _open_readonly(port: str, offset: int = 0) -> can.BusABC:
+    """Open one interface receiving only this arm's joint angle frames."""
     bus = can.Bus(interface='socketcan', channel=port,
                   receive_own_messages=False)
     bus.set_filters([
-        {'can_id': can_id, 'can_mask': 0x7FF, 'extended': False}
+        {'can_id': can_id + offset, 'can_mask': 0x7FF, 'extended': False}
         for can_id in JOINT_ANGLE_IDS
     ])
     return bus
@@ -66,10 +73,11 @@ class Recorder(threading.Thread):
     """Read one interface's joint angle frames; never transmits."""
 
     def __init__(self, role: str, port: str, sink: list, lock,
-                 started: float):
+                 started: float, offset: int = 0):
         super().__init__(daemon=True)
         self.role = role
         self.port = port
+        self.offset = offset
         self.sink = sink
         self.lock = lock
         self.started = started
@@ -79,7 +87,7 @@ class Recorder(threading.Thread):
     def run(self) -> None:
         """Append (role, joint, t, deg) rows until asked to stop."""
         try:
-            bus = _open_readonly(self.port)
+            bus = _open_readonly(self.port, self.offset)
         except Exception as exc:  # noqa: BLE001 - 打开失败要如实报告
             self.error = str(exc)
             return
@@ -88,7 +96,8 @@ class Recorder(threading.Thread):
                 frame = bus.recv(timeout=0.2)
                 if frame is None:
                     continue
-                angles = decode_joint_angles(frame.arbitration_id, frame.data)
+                angles = decode_joint_angles(
+                    frame.arbitration_id - self.offset, frame.data)
                 if not angles:
                     continue
                 now = time.monotonic() - self.started
@@ -104,8 +113,8 @@ def record(ports, seconds: float, path: str) -> int:
     started = time.monotonic()
     rows: List[Tuple[str, int, float, float]] = []
     lock = threading.Lock()
-    readers = [Recorder(role, port, rows, lock, started)
-               for role, port in ports]
+    readers = [Recorder(role, port, rows, lock, started, offset)
+               for role, port, offset in ports]
     for reader in readers:
         reader.start()
     for reader in readers:
@@ -114,7 +123,7 @@ def record(ports, seconds: float, path: str) -> int:
             return EXIT_FAILED
     print(f'只读记录中（{seconds:.0f} 秒，接收-only，不发送任何帧）…')
     print('现在请在另一个终端启动遥操作，例如：')
-    print('  ros2 run piper piper_teleop --side left --enable --duration 50')
+    print('  ros2 run piper piper_two_can_teleop --side left --send --workspace-clear --duration 50')
     while time.monotonic() - started < seconds:
         time.sleep(0.2)
     for reader in readers:
@@ -125,9 +134,10 @@ def record(ports, seconds: float, path: str) -> int:
         writer = csv.writer(handle)
         writer.writerow(['arm', 'joint', 't', 'deg'])
         writer.writerows(sorted(rows, key=lambda row: (row[0], row[2])))
-    for role, port in ports:
+    for role, port, offset in ports:
         count = sum(1 for row in rows if row[0] == role)
-        print(f'  {role:<9}（{port}）：{count / seconds:.0f} 帧/秒')
+        where = port + (f'@{offset:#04x}' if offset else '')
+        print(f'  {role:<9}（{where}）：{count / seconds:.0f} 帧/秒')
     print(f'记录 {len(rows)} 帧到 {path}')
     print(f'结束后运行：ros2 run piper piper_teleop_verify --analyze {path}')
     return EXIT_OK
@@ -252,10 +262,29 @@ def _parser() -> ArgumentParser:
     parser.add_argument('--duration', type=float, default=DEFAULT_SECONDS,
                         help='记录多少秒（默认 %(default)s；要比遥操作长）')
     parser.add_argument('--arm', action='append', dest='arms',
-                        metavar='ROLE:IFACE',
+                        metavar='ROLE:IFACE[@OFFSET]',
                         help='记录哪两臂，默认 '
-                             + ' '.join(f'{r}:{p}' for r, p in DEFAULT_PORTS))
+                             + ' '.join(f'{r}:{p}' + (f'@{o:#04x}' if o else '')
+                                        for r, p, o in DEFAULT_PORTS)
+                             + '；主臂被 0x470 设为偏移主臂后其反馈 ID 偏移，'
+                               '要用 @0x20 指向它')
     return parser
+
+
+def _parse_arms(values) -> tuple:
+    """Parse ROLE:IFACE[@OFFSET] specs into (role, port, offset) triples."""
+    parsed = []
+    for value in values:
+        spec, _, offset_text = value.partition('@')
+        role, _, port = spec.partition(':')
+        if not role or not port:
+            raise ValueError(f'{value}：应为 ROLE:IFACE[@OFFSET]')
+        try:
+            offset = parse_offset(offset_text) if offset_text else 0
+        except ValueError as exc:
+            raise ValueError(f'{value}：{exc}') from None
+        parsed.append((role, port, offset))
+    return tuple(parsed)
 
 
 def main(args=None) -> int:
@@ -263,11 +292,23 @@ def main(args=None) -> int:
     options = _parser().parse_args(args)
     if options.analyze:
         return analyze(options.analyze)
-    ports = tuple(
-        tuple(value.split(':', 1)) for value in options.arms
-    ) if options.arms else DEFAULT_PORTS
+    if options.arms:
+        try:
+            ports = _parse_arms(options.arms)
+        except ValueError as exc:
+            print(f'错误：{exc}')
+            return EXIT_FAILED
+    else:
+        ports = DEFAULT_PORTS
     if options.duration <= 0:
         print('错误：--duration 必须为正')
+        return EXIT_FAILED
+    channels = [(port, offset) for _, port, offset in ports]
+    if len(set(channels)) != len(channels):
+        print('错误：两个角色指定了同一条总线的同一个偏移')
+        print('      那样记录的是同一批帧的两份拷贝，算出的滞后恒为 0。'
+              '两台臂共总线时，把被设为偏移主臂的那台用 @0x20 指定，'
+              '例如 --arm master:can_left@0x20 --arm follower:can_left。')
         return EXIT_FAILED
     return record(ports, options.duration, options.csv)
 

@@ -6,10 +6,13 @@ import math
 import numpy as np
 import pytest
 
+from piper import piper_teleop_verify
 from piper.piper_teleop_verify import (
+    DEFAULT_PORTS,
     EXIT_FAILED,
     EXIT_OK,
     _band_rms,
+    _parse_arms,
     _stretches,
     analyze,
 )
@@ -89,3 +92,51 @@ def test_analyze_fails_without_both_arms(tmp_path, capsys):
         csv.writer(handle).writerows(rows)
     assert analyze(str(path)) == EXIT_FAILED
     assert '没有 master/follower' in capsys.readouterr().out
+
+
+def test_parse_arms_reads_role_port_and_offset():
+    assert _parse_arms(['master:can_left@0x20', 'follower:can_left']) == (
+        ('master', 'can_left', 0x20), ('follower', 'can_left', 0))
+
+
+def test_parse_arms_needs_both_role_and_port():
+    with pytest.raises(ValueError, match='ROLE:IFACE'):
+        _parse_arms(['can_left@0x20'])
+
+
+def test_parse_arms_refuses_an_unsupported_offset():
+    with pytest.raises(ValueError, match='unsupported offset'):
+        _parse_arms(['master:can_left@0x30'])
+
+
+def test_default_pairs_the_offset_master_with_the_plain_follower():
+    assert DEFAULT_PORTS == (
+        ('master', 'can_left', 0x20), ('follower', 'can_left', 0))
+
+
+def test_refuses_two_roles_on_one_bus_and_the_same_offset(
+        monkeypatch, capsys):
+    recorded = []
+    monkeypatch.setattr(piper_teleop_verify, 'record',
+                        lambda ports, seconds, path: recorded.append(ports))
+    exit_code = piper_teleop_verify.main([
+        '--arm', 'master:can_left@0x20', '--arm', 'follower:can_left@0x20',
+        '--duration', '1',
+    ])
+    assert exit_code == EXIT_FAILED
+    assert recorded == []
+    assert '同一个偏移' in capsys.readouterr().out
+
+
+def test_allows_a_shared_bus_when_the_offsets_differ(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(
+        piper_teleop_verify, 'record',
+        lambda ports, seconds, path: recorded.append(ports) or EXIT_OK)
+    exit_code = piper_teleop_verify.main([
+        '--arm', 'master:can_left@0x20', '--arm', 'follower:can_left',
+        '--duration', '1',
+    ])
+    assert exit_code == EXIT_OK
+    assert recorded == [(('master', 'can_left', 0x20),
+                         ('follower', 'can_left', 0))]

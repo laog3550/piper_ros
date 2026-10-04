@@ -14,6 +14,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PiperStatusMsg.msg"  
   "msg/PosCmd.msg"
   "msg/PiperEnableStatusMsg.msg"
+  "msg/PiperTeleopStatusMsg.msg"
   "srv/Enable.srv"
   DEPENDENCIES # Add packages that above messages depend on, in this case geometry_msgs for Sphere.msg
 )

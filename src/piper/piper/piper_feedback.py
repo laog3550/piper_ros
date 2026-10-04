@@ -42,6 +42,25 @@ CORE_FEEDBACK_CAN_IDS = (
 # received that command stays a motion output arm and keeps the plain IDs.
 TEACHING_INPUT_OFFSETS = (0x10, 0x20)
 _ANGLE_SCALE = 0.001  # raw joint angles are 0.001 degree per count
+# The gripper frame reports its opening as a signed count of 0.001 mm.
+# piper_ctrl_single_node publishes the same value divided by 1e6 as metres,
+# so this scale keeps a reader and an SDK node bit-for-bit compatible.
+GRIPPER_SCALE_M = 1e-6
+# Use the exact angular unit conversion for offset readers.
+DEG_TO_RAD = math.pi / 180.0
+# Byte 0 of the arm status frame (0x2A1) reports the control mode.  An arm
+# made a teaching input arm by CAN 0x470 reports LINKAGE_TEACHING_MODE,
+# which is how a read-only observer tells the mode change took effect.
+CTRL_MODE_BYTE = 0
+LINKAGE_TEACHING_MODE = 0x06
+# Motion-control command family (0x150~0x15F, or 0x160~0x17F once the
+# control-ID offset is applied), plus the enable (0x471) and linkage
+# configuration (0x470) frames.  A bus that carries any of these has
+# somebody commanding the arms: a host node, or a teaching input arm
+# broadcasting its own joint commands.
+COMMAND_FAMILY_FIRST = 0x150
+COMMAND_FAMILY_LAST = 0x17F
+COMMAND_CONFIG_IDS = (0x470, 0x471)
 
 # True = enabled, False = disabled, None = no usable recent frame.
 JointObservations = Tuple[Optional[bool], ...]
@@ -69,6 +88,44 @@ def detect_feedback_offset(observed_can_ids) -> Optional[int]:
         if matched >= len(CORE_FEEDBACK_CAN_IDS):
             return offset
     return None
+
+
+def commanding_can_ids(observed_can_ids) -> tuple:
+    """Return the IDs that mean somebody is commanding the arms."""
+    return tuple(sorted(
+        can_id for can_id in set(observed_can_ids)
+        if COMMAND_FAMILY_FIRST <= can_id <= COMMAND_FAMILY_LAST
+        or can_id in COMMAND_CONFIG_IDS
+    ))
+
+
+def decode_gripper(can_id: int, data) -> Optional[float]:
+    """Decode a gripper feedback frame into an opening in metres."""
+    if can_id != GRIPPER_FEEDBACK_CAN_ID or len(data) < 4:
+        return None
+    counts = int.from_bytes(data[0:4], 'big', signed=True)
+    return counts * GRIPPER_SCALE_M
+
+
+def parse_offset(text: str) -> int:
+    """Parse a feedback ID offset such as '0x20', refusing other values."""
+    try:
+        offset = int(str(text), 0)
+    except ValueError:
+        raise ValueError(f'invalid offset: {text}') from None
+    supported = (0x00, *TEACHING_INPUT_OFFSETS)
+    if offset not in supported:
+        allowed = '/'.join(f'0x{value:02X}' for value in supported)
+        raise ValueError(
+            f'unsupported offset 0x{offset:02X}; use {allowed}')
+    return offset
+
+
+def decode_ctrl_mode(can_id: int, data) -> Optional[int]:
+    """Return the control mode of an arm status frame, or None."""
+    if can_id != ARM_STATUS_CAN_ID or len(data) <= CTRL_MODE_BYTE:
+        return None
+    return data[CTRL_MODE_BYTE]
 
 
 def decode_joint_angles(can_id: int, data) -> Dict[int, float]:
@@ -190,7 +247,8 @@ class FeedbackTracker:
 class ArmAngleTracker:
     """Track one arm's six joint angles against a baseline pose."""
 
-    def __init__(self):
+    def __init__(self, offset: int = 0):
+        self.offset = offset  # feedback IDs shifted by a teaching arm mode
         self._angles: Dict[int, float] = {}
         self._baseline: Dict[int, float] = {}
         self._max_offset: Dict[int, float] = {}
@@ -201,7 +259,7 @@ class ArmAngleTracker:
     def update(self, can_id: int, data, now: float = None,
                change_threshold: float = 0.05) -> Tuple[int, ...]:
         """Store the angles carried by one frame; return the joints it moved."""
-        decoded = decode_joint_angles(can_id, data)
+        decoded = decode_joint_angles(can_id - self.offset, data)
         if not decoded:
             return ()
         current = time.monotonic() if now is None else now

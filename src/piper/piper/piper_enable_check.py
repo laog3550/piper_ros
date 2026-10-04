@@ -10,6 +10,9 @@
 # Unlike the arm_enable_status topic, which reports a joint as valid once its
 # frame has been seen, this tool also bounds how old a frame may be, so a
 # joint that stops reporting cannot keep contributing a stale enable bit.
+#
+# 注意：共享低速反馈不能区分实体主臂与从臂；偏移不会分离 0x261～0x266。
+# 本工具的最新值只用于观察；整侧读回应使用会话中的全样本窗口判定。
 
 import time
 from argparse import ArgumentParser
@@ -20,7 +23,7 @@ import can
 from piper.piper_enable_status import EnableState, aggregate, describe
 from piper.piper_feedback import FEEDBACK_CAN_IDS, JOINT_COUNT, FeedbackTracker
 
-DEFAULT_PORTS = ('can_fl', 'can_fr')
+DEFAULT_PORTS = ('can_left', 'can_right')
 DEFAULT_DURATION = 3.0
 DEFAULT_TIMEOUT = 0.5
 

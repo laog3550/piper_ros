@@ -1,26 +1,16 @@
 {
-  "master_left": {
-    "interface": "can_ml",
-    "usb_port": "USB_PORT_FOR_MASTER_LEFT",
-    "serial": "SERIAL_FOR_MASTER_LEFT",
-    "bitrate": 1000000
+  "left": {
+    "interface": "can_left",
+    "usb_port": "USB_PORT_FOR_LEFT_BUS",
+    "serial": "ADAPTER_SERIAL_FOR_LEFT_BUS",
+    "bitrate": 1000000,
+    "arms": ["master_left", "follower_left"]
   },
-  "master_right": {
-    "interface": "can_mr",
-    "usb_port": "USB_PORT_FOR_MASTER_RIGHT",
-    "serial": "SERIAL_FOR_MASTER_RIGHT",
-    "bitrate": 1000000
-  },
-  "follower_left": {
-    "interface": "can_fl",
-    "usb_port": "USB_PORT_FOR_FOLLOWER_LEFT",
-    "serial": "SERIAL_FOR_FOLLOWER_LEFT",
-    "bitrate": 1000000
-  },
-  "follower_right": {
-    "interface": "can_fr",
-    "usb_port": "USB_PORT_FOR_FOLLOWER_RIGHT",
-    "serial": "SERIAL_FOR_FOLLOWER_RIGHT",
-    "bitrate": 1000000
+  "right": {
+    "interface": "can_right",
+    "usb_port": "USB_PORT_FOR_RIGHT_BUS",
+    "serial": "ADAPTER_SERIAL_FOR_RIGHT_BUS",
+    "bitrate": 1000000,
+    "arms": ["master_right", "follower_right"]
   }
 }

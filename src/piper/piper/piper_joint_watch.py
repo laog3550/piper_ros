@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Watch all four Piper arms' joint angles live, read-only."""
+"""Watch both Piper buses' joint angles live, read-only."""
 
-# 用途：人工逐个拖动机械臂，程序实时显示四条 CAN 总线各自的关节角度。哪一条
+# 用途：人工逐个拖动机械臂，程序实时显示两条 CAN 总线各自的关节角度。哪一条
 # 总线的读数跟着动，就说明那条接口对应你手上的那台臂，从而确证映射关系。
+#
+# 注意：一条总线上现在挂着一侧的主臂与从臂。两台都用常规布局时，同一批角度帧
+# 由两台同时发出，这里显示的是混合结果，分不出是哪一台——此时只能确认「哪条
+# 总线在动」。要分开两台，需要主臂处于偏移主臂布局（反馈 ID 整体偏移），
+# 而本工具默认只收常规布局的角度帧，读不到偏移后的主臂。
 #
 # 本工具只调用 recv()，代码中没有任何发送路径，因此在人手接触机械臂时运行是
 # 安全的：它不会使能、失能或运动任何关节，也不会下发任何指令。
@@ -16,13 +21,11 @@ from typing import Dict, List, Optional, Tuple
 
 import can
 
-from piper.piper_feedback import JOINT_ANGLE_IDS, ArmAngleTracker
+from piper.piper_feedback import JOINT_ANGLE_IDS, ArmAngleTracker, parse_offset
 
 DEFAULT_ARMS = (
-    ('can_ml', 'master_left'),
-    ('can_mr', 'master_right'),
-    ('can_fl', 'follower_left'),
-    ('can_fr', 'follower_right'),
+    ('can_left', 'left'),
+    ('can_right', 'right'),
 )
 JOINTS = tuple(sorted({j for pair in JOINT_ANGLE_IDS.values() for j in pair}))
 REFRESH_SECONDS = 0.15
@@ -34,13 +37,13 @@ EXIT_OK = 0
 EXIT_FAILED = 3
 
 
-def open_readonly_bus(port: str):
+def open_readonly_bus(port: str, offset: int = 0):
     """Open one interface receiving only the joint angle frames."""
     bus = can.Bus(
         interface='socketcan', channel=port, receive_own_messages=False,
     )
     bus.set_filters([
-        {'can_id': can_id, 'can_mask': 0x7FF, 'extended': False}
+        {'can_id': can_id + offset, 'can_mask': 0x7FF, 'extended': False}
         for can_id in JOINT_ANGLE_IDS
     ])
     return bus
@@ -49,13 +52,16 @@ def open_readonly_bus(port: str):
 class ArmSampler(threading.Thread):
     """Read one interface's joint angle frames into its own tracker."""
 
-    def __init__(self, port: str, role: str, bus_factory=open_readonly_bus):
+    def __init__(self, port: str, role: str, offset: int = 0,
+                 bus_factory=None):
         super().__init__(daemon=True)
         self.port = port
         self.role = role
-        self.tracker = ArmAngleTracker()
+        self.offset = offset
+        self.tracker = ArmAngleTracker(offset=offset)
         self.error: Optional[str] = None
-        self._bus_factory = bus_factory
+        self._bus_factory = bus_factory or (
+            lambda port: open_readonly_bus(port, offset))
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
 
@@ -141,7 +147,7 @@ def _header() -> str:
 def _render(arms: List[ArmSampler], elapsed: float, baseline_at: float,
             threshold: float, now: float, interactive: bool) -> List[str]:
     lines = [
-        '=== 四臂关节角度实时监视（只读，不发送任何帧）===',
+        '=== 两条总线关节角度实时监视（只读，不发送任何帧）===',
         f'运行 {elapsed:.0f}s　基准 T+{baseline_at:.0f}s　'
         f'按 r 重置基准　按 q 退出',
         '',
@@ -150,7 +156,7 @@ def _render(arms: List[ArmSampler], elapsed: float, baseline_at: float,
     ]
     for arm in arms:
         angles, _, _, _ = arm.snapshot(now)
-        lines.append(_angle_row(arm.port, arm.role, angles))
+        lines.append(_angle_row(arm.port, _label(arm), angles))
 
     lines += ['', f'相对基准的最大位移（度），阈值 {threshold:.1f}', _header()]
     moving: List[str] = []
@@ -196,28 +202,42 @@ def _print_summary(arms: List[ArmSampler], threshold: float) -> None:
         joints = [j for j in JOINTS if peaks.get(j, 0.0) >= threshold]
         if joints:
             found = True
-            print(f'  {arm.port:<11}{arm.role:<16}' +
+            print(f'  {arm.port:<11}{_label(arm):<16}' +
                   '、'.join(f'j{j}({peaks[j]:.1f}°)' for j in joints))
     if not found:
         print('  （无）')
 
 
-def _parse_arms(values: Optional[List[str]]) -> Tuple[Tuple[str, str], ...]:
+def _parse_arms(values: Optional[List[str]]
+                ) -> Tuple[Tuple[str, str, int], ...]:
+    """Parse IFACE[:ROLE][@OFFSET] specs; the offset reads a shifted arm."""
     if not values:
-        return DEFAULT_ARMS
+        return tuple((port, role, 0) for port, role in DEFAULT_ARMS)
     parsed = []
     for value in values:
-        port, _, role = value.partition(':')
-        parsed.append((port, role or '-'))
+        spec, _, offset_text = value.partition('@')
+        port, _, role = spec.partition(':')
+        try:
+            offset = parse_offset(offset_text) if offset_text else 0
+        except ValueError as exc:
+            raise ValueError(f'{value}：{exc}') from None
+        parsed.append((port, role or '-', offset))
     return tuple(parsed)
+
+
+def _label(arm) -> str:
+    """Label one row, showing the offset when it reads a shifted arm."""
+    return f'{arm.role}@{arm.offset:#04x}' if arm.offset else arm.role
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        '--arm', action='append', dest='arms', metavar='IFACE[:ROLE]',
-        help='要监视的接口，可重复；默认四条 '
-             + ' '.join(f'{p}:{r}' for p, r in DEFAULT_ARMS),
+        '--arm', action='append', dest='arms',
+        metavar='IFACE[:ROLE][@OFFSET]',
+        help='要监视的臂，可重复；默认两条总线（不带偏移）。主臂被 0x470 设为'
+             '偏移主臂后其反馈 ID 偏移，用 @0x20 读它，例如 '
+             '--arm can_left:主@0x20 --arm can_left:从',
     )
     parser.add_argument(
         '--moved-threshold', type=float, default=MOVED_THRESHOLD,
@@ -240,9 +260,14 @@ def main(args=None) -> int:
     if options.refresh <= 0:
         print('错误：--refresh 必须为正')
         return EXIT_FAILED
+    try:
+        specs = _parse_arms(options.arms)
+    except ValueError as exc:
+        print(f'错误：{exc}')
+        return EXIT_FAILED
     arms = [
-        ArmSampler(port, role)
-        for port, role in _parse_arms(options.arms)
+        ArmSampler(port, role, offset)
+        for port, role, offset in specs
     ]
     for arm in arms:
         arm.start()
@@ -301,7 +326,8 @@ def main(args=None) -> int:
     _print_summary(arms, options.moved_threshold)
     print()
     print('提示：只有被你拖动的那台臂对应的接口位移应该变化；'
-          '若两条接口同时变化，说明映射有误。')
+          '两台臂共总线时，用 @0x20 读被设为偏移主臂的那台，'
+          '不带偏移读到的才是常规臂。')
     return EXIT_OK
 
 

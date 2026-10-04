@@ -42,7 +42,7 @@ from piper.piper_feedback import (
     encode_limit_set,
 )
 
-DEFAULT_PORTS = ('can_fl', 'can_mr', 'can_fr', 'can_ml')
+DEFAULT_PORTS = ('can_left', 'can_right')
 # 1500 = 1.5 rad/s ≈ 86 deg/s，是全部 3000（3 rad/s ≈ 172 deg/s）的一半。
 DEFAULT_SPEED_RAW = 1500
 # 帧间隔：24 条写入帧挤在一起会挤掉同一条总线上控制节点的反馈帧。
@@ -56,11 +56,11 @@ EXIT_OK = 0
 EXIT_REFUSED = 1
 EXIT_FAILED = 3
 
-# 各接口的失能提示。can_ml/can_mr 是 master，通常用 start_single_piper.launch.py
-# 启动，enable 服务没被重映射；两条从臂在 start_two_piper.launch.py 里重映射过。
+# 各总线的失能提示。左右各一条总线，这一侧从臂的 enable 服务在
+# start_two_piper.launch.py 里被重映射过；主臂与从臂同总线，失能时要确认是哪一台。
 ENABLE_HINTS = {
-    'can_fl': '/enable_srv_left',
-    'can_fr': '/enable_srv_right',
+    'can_left': '/enable_srv_left',
+    'can_right': '/enable_srv_right',
 }
 DEFAULT_ENABLE_HINT = '/enable_srv'
 

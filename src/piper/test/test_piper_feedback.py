@@ -22,7 +22,10 @@ from piper.piper_feedback import (
     DEFAULT_SMOOTH_MAX_ACCELERATION_DEG_S2,
     DEFAULT_SMOOTH_MAX_JERK_DEG_S3,
     DEFAULT_SMOOTH_MAX_VELOCITY_DEG_S,
+    ArmAngleTracker,
     DoubleMotionResetDetector,
+    decode_gripper,
+    parse_offset,
     FEEDBACK_FIRST_CAN_ID,
     GRIPPER_OPEN_MAX_M,
     GRIPPER_OPEN_MIN_M,
@@ -112,6 +115,47 @@ def test_gripper_scale_converts_master_travel_to_follower_travel():
     assert scale_gripper(-0.02) == GRIPPER_OPEN_MIN_M
     # 两台夹爪相同时用 1.0，就是纯镜像
     assert scale_gripper(0.035, 1.0) == pytest.approx(0.035)
+
+
+def test_gripper_frame_decodes_to_metres():
+    """夹爪反馈的前 4 字节是有符号的 0.001mm 计数，除以 1e6 得米。"""
+    assert decode_gripper(0x2A8, _gripper_frame(-300)) == \
+        pytest.approx(-0.0003)
+    assert decode_gripper(0x2A8, _gripper_frame(70000)) == \
+        pytest.approx(0.07)
+
+
+def test_gripper_decoding_ignores_other_frames_and_short_payloads():
+    """只有 0x2A8 是夹爪帧；4 字节以下解不出东西。"""
+    assert decode_gripper(0x2A5, _gripper_frame(1000)) is None
+    assert decode_gripper(0x2A8, b'\x00\x00\x00') is None
+
+
+def test_gripper_sign_is_kept():
+    """实测静止时夹爪反馈在 -0.3~0.0mm，负号必须如实保留。"""
+    reading = decode_gripper(0x2A8, _gripper_frame(-100))
+    assert reading * 1000 == pytest.approx(-0.1)
+
+
+def test_parse_offset_accepts_only_the_documented_values():
+    """偏移只有 0x00/0x10/0x20 三档，其它值必须被拒绝而不是猜。"""
+    assert parse_offset('0x00') == 0
+    assert parse_offset('0x10') == 0x10
+    assert parse_offset('32') == 0x20
+    with pytest.raises(ValueError, match='unsupported offset'):
+        parse_offset('0x30')
+    with pytest.raises(ValueError, match='invalid offset'):
+        parse_offset('nope')
+
+
+def test_tracker_with_an_offset_reads_the_shifted_layout_only():
+    """带偏移的跟踪器只认偏移后的 ID，普通帧进来不算数。"""
+    tracker = ArmAngleTracker(offset=0x20)
+    tracker.update(0x2A5, _angle_frame(10.0, -20.0))
+    assert tracker.angles() == {}
+    tracker.update(0x2C5, _angle_frame(10.0, -20.0))
+    assert tracker.angles() == {1: pytest.approx(10.0),
+                                2: pytest.approx(-20.0)}
 
 
 def test_double_motion_reset_requires_two_completed_bursts():
@@ -428,6 +472,22 @@ def test_limits_match_what_the_driver_reports():
         5: (-70.0, 70.0),
         6: (-180.0, 180.0),
     }
+
+
+def _gripper_frame(counts):
+    """Build the 32-bit gripper opening the arm reports on 0x2A8."""
+    raw = int(counts)
+    if raw < 0:
+        raw += 1 << 32
+    return raw.to_bytes(4, 'big') + bytes(4)
+
+
+def _angle_frame(joint_a, joint_b):
+    """Build one joint angle frame from degrees."""
+    return b''.join(
+        int(round(value * 1000)).to_bytes(4, 'big', signed=True)
+        for value in (joint_a, joint_b)
+    )
 
 
 def _zeros(values):

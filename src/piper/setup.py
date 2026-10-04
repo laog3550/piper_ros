@@ -1,5 +1,4 @@
 from setuptools import find_packages, setup
-import glob
 import sys
 import os
 from glob import glob
@@ -34,10 +33,16 @@ setup(
             'piper_bus_probe = piper.piper_bus_probe:main',
             'piper_joint_watch = piper.piper_joint_watch:main',
             'piper_joint_move = piper.piper_joint_move:main',
-            'piper_teleop = piper.piper_teleop:main',
-            'piper_teleop_fast = piper.piper_teleop_fast:main',
             'piper_speed_limit = piper.piper_speed_limit:main',
             'piper_teleop_verify = piper.piper_teleop_verify:main',
+            'piper_master_state = piper.piper_master_state:main',
+            'piper_arm_enable = piper.piper_arm_enable:main',
+            'piper_master_slave = piper.piper_master_slave:main',
+            'piper_two_can_identity = piper.piper_two_can_identity:main',
+            'piper_two_can_align = piper.piper_two_can_align:main',
+            'piper_two_can_teleop = piper.piper_two_can_teleop:main',
+            'piper_can_quality = piper.piper_can_quality:main',
+            'piper_two_can_manager = piper.piper_two_can_manager:main',
         ],
     },
 )

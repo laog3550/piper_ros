@@ -24,14 +24,15 @@ from piper.piper_feedback import (
 )
 
 NAMES = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'gripper']
-# 左右从臂的接口名按 config/pi05_can_map.json：follower_left=can_fl,
-# follower_right=can_fr。角色一律以 config 的序列号为准——接口名在
-# 2026-09-24 被重新绑定过一次，按名字反推角色不可靠。
+# 左右从臂所在总线的接口名按 config/pi05_can_map.json：follower_left 在
+# can_left、follower_right 在 can_right（该侧的从臂与主臂共用这条总线）。
+# 角色一律以 config 的序列号为准——接口名在 2026-09-24 被重新绑定过一次，
+# 按名字反推角色不可靠。
 SIDES = {
     'left': ('/joint_ctrl_cmd_left', '/joint_states_left',
-             '/arm_enable_status_left', 'follower_left, can_fl'),
+             '/arm_enable_status_left', 'follower_left, can_left'),
     'right': ('/joint_ctrl_cmd_right', '/joint_states_right',
-              '/arm_enable_status_right', 'follower_right, can_fr'),
+              '/arm_enable_status_right', 'follower_right, can_right'),
 }
 DEFAULT_SIDE = 'left'
 DEFAULT_TARGET = 'joint1'

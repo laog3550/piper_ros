@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Survey one CAN bus read-only to confirm a healthy Piper arm is on it."""
+"""Survey one CAN bus read-only to see which Piper arms report on it."""
 
 # 本工具为纯观测：以接收-only 方式打开套接字，按反馈帧过滤，代码中没有任何
 # 发送路径。它自行解码原始帧，不依赖 piper_sdk，因此可以用来佐证控制节点，
@@ -8,6 +8,16 @@
 # 它回答的问题是「这条接口上到底连着什么」：Piper 的核心反馈帧是否齐全、
 # 帧率是否正常、关节角度与供电是否合理、以及反馈 ID 是否已被偏移成示教输入
 # 臂的布局。
+#
+# 现在一条总线上同时挂着该侧的主臂与从臂，判读方式随之改变：
+#   * 核心帧齐全不再等于「只有一台臂」——两台都用常规布局时，同一批 ID 上
+#     会有两台在报，高速反馈帧率约为单台的两倍，本工具会把这种情况标出来；
+#   * 额外出现的 5 个未定义 ID（0x1C0~0x1C3、0x212）是主臂在场的判据；
+#   * 只有主臂被设为示教输入臂（反馈 ID 整体偏移 0x10/0x20）时，两台的反馈
+#     才落在不同的 ID 上，控制节点才能分得开；
+#   * 状态帧（0x2A1）第 0 字节是控制模式：同一批帧里出现两种模式，就是「一条
+#     总线上两台臂、其中一台已被 0x470 设为示教输入臂」的直接证据，这也是
+#     验证 0x470 是否生效的只读手段。
 
 import time
 from argparse import ArgumentParser
@@ -24,12 +34,15 @@ from piper.piper_feedback import (
     HIGH_SPEED_CAN_IDS,
     JOINT_ANGLE_IDS,
     JOINT_COUNT,
+    LINKAGE_TEACHING_MODE,
+    commanding_can_ids,
     decode,
+    decode_ctrl_mode,
     decode_joint_angles,
     detect_feedback_offset,
 )
 
-DEFAULT_PORTS = ('can_fl', 'can_mr', 'can_fr', 'can_ml')
+DEFAULT_PORTS = ('can_left', 'can_right')
 DEFAULT_DURATION = 2.0
 
 EXIT_OK = 0
@@ -38,6 +51,32 @@ EXIT_FAILED = 3
 
 # 核心帧的标称帧率，仅用于判断「是否在流」，不作为严格断言。
 MIN_FRAMES = 10
+
+# 单台臂的高速反馈标称帧率（见 docs/PI05_CAN_MAPPING.md）。两台常规布局的臂
+# 挂在同一条总线上时，同一批 ID 的帧率会接近它的两倍。
+NOMINAL_HIGH_SPEED_HZ = 200.0
+TWO_ARM_RATIO = 1.6
+
+# 控制模式（0x2A1 第 0 字节）的显示名，取自 SDK 的 CtrlMode 枚举。
+CTRL_MODE_NAMES = {
+    0x00: '待机',
+    0x01: 'CAN 指令控制',
+    0x02: '示教',
+    0x03: '以太网控制',
+    0x04: 'WiFi 控制',
+    0x05: '遥控',
+    LINKAGE_TEACHING_MODE: '联动示教输入',
+    0x07: '离线轨迹',
+}
+
+
+def _mode_summary(modes: Counter) -> str:
+    """Name each observed control mode with its frame count."""
+    parts = []
+    for mode, count in sorted(modes.items()):
+        name = CTRL_MODE_NAMES.get(mode, '未定义')
+        parts.append(f'0x{mode:02X} {name} x{count}')
+    return '，'.join(parts)
 
 
 def _listen(port: str) -> can.BusABC:
@@ -50,9 +89,10 @@ def _listen(port: str) -> can.BusABC:
 
 
 def survey(port: str, duration: float):
-    """Watch one interface and return (frame counts, newest payloads)."""
+    """Watch one interface and return (counts, newest payloads, modes)."""
     counter: Counter = Counter()
     last: Dict[int, bytes] = {}
+    modes: Counter = Counter()
     bus = _listen(port)
     try:
         deadline = time.monotonic() + duration
@@ -63,9 +103,12 @@ def survey(port: str, duration: float):
                 continue
             counter[frame.arbitration_id] += 1
             last[frame.arbitration_id] = bytes(frame.data)
+            mode = decode_ctrl_mode(frame.arbitration_id, frame.data)
+            if mode is not None:
+                modes[mode] += 1
     finally:
         bus.shutdown()
-    return counter, last
+    return counter, last, modes
 
 
 def _angle_summary(last: Dict[int, bytes]) -> str:
@@ -102,8 +145,18 @@ def _voltage_summary(last: Dict[int, bytes]) -> str:
     return ' '.join(parts) if parts else '无低压帧'
 
 
+def _high_speed_ratio(counter: Counter, duration: float) -> Optional[float]:
+    """Return frames/nominal if a second arm likely shares these frame IDs."""
+    nominal = len(HIGH_SPEED_CAN_IDS) * NOMINAL_HIGH_SPEED_HZ * duration
+    if nominal <= 0:
+        return None
+    observed = sum(counter.get(c, 0) for c in HIGH_SPEED_CAN_IDS)
+    ratio = observed / nominal
+    return ratio if ratio >= TWO_ARM_RATIO else None
+
+
 def report(port: str, counter: Counter, last: Dict[int, bytes],
-           duration: float) -> Tuple[bool, Optional[int]]:
+           modes: Counter, duration: float) -> Tuple[bool, Optional[int]]:
     """Print one bus survey and return (core frames complete, offset)."""
     print(f'--- {port} ---')
     if not counter:
@@ -139,12 +192,42 @@ def report(port: str, counter: Counter, last: Dict[int, bytes],
             print(f'      0x{can_id:03X} x{counter[can_id]} '
                   f'({counter[can_id] / duration:.0f} Hz) 载荷 {payload.hex(" ")}')
 
+    commanding = commanding_can_ids(counter)
+    if commanding:
+        print(f'  *** 总线上有控制指令帧 {[hex(c) for c in commanding]}：'
+              f'有东西在给臂下发指令 ***')
+        print('      可能是主机节点（piper_two_can_teleop / piper_single_ctrl / '
+              '工作区里的执行器），也可能是**示教输入臂**在播发关节指令。')
+        print('      若仍有固件广播，停用当前链路并按两 CAN 方案隔离配置主臂；'
+              '不得在两臂在线时清零偏移。')
+    else:
+        print('  控制指令  : 没有指令帧（没有主机节点或示教输入臂在发指令）')
+
     print(f'  关节角度  : {_angle_summary(last)}')
     print(f'  母线电压  : {_voltage_summary(last)}')
     print(f'  使能位    : {_enable_summary(last)}')
+    if modes:
+        print(f'  控制模式  : {_mode_summary(modes)}')
+        if len(modes) > 1:
+            print('      同一批状态帧里出现多种模式 → 这条总线上不止一台臂，'
+                  '各自处于不同模式')
+            if LINKAGE_TEACHING_MODE in modes:
+                print('      其中一台已是联动示教输入臂（0x470 的 0xFA 生效），'
+                      '另一台仍是常规臂')
+        elif LINKAGE_TEACHING_MODE in modes:
+            print('      这条总线上的臂处于联动示教输入模式'
+                  '（注意：若两台都收到过 0x470，两台都会是这个模式）')
+    else:
+        print('  控制模式  : 无状态帧')
     print(f'  高速反馈  : {sum(counter.get(c, 0) for c in HIGH_SPEED_CAN_IDS)} 帧'
           f'，末端位姿 {sum(counter.get(c, 0) for c in END_POSE_CAN_IDS)} 帧'
           f'，夹爪 {counter.get(GRIPPER_FEEDBACK_CAN_ID, 0)} 帧')
+    ratio = _high_speed_ratio(counter, duration)
+    if ratio is not None:
+        print(f'  *** 高速反馈帧率约为单台臂的 {ratio:.1f} 倍：这条总线上'
+              f'有两台常规布局的臂在同一个 ID 上报 ***')
+        print('      这个布局下控制节点分不出两台臂：需要把其中一台'
+              '（通常是主臂）离线配置为 0xFC，反馈和控制偏移均为 0x20')
     return not missing, offset
 
 
@@ -173,11 +256,11 @@ def main(args=None) -> int:
     incomplete = []
     for port in ports:
         try:
-            counter, last = survey(port, options.duration)
+            counter, last, modes = survey(port, options.duration)
         except (OSError, can.CanError) as exc:
             print(f'错误：无法监听 {port}: {exc}')
             return EXIT_FAILED
-        complete, _ = report(port, counter, last, options.duration)
+        complete, _ = report(port, counter, last, modes, options.duration)
         if not complete:
             incomplete.append(port)
 

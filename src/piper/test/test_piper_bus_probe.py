@@ -1,17 +1,27 @@
 """Tests for bus frame classification, angle decoding and offset detection."""
 
+from collections import Counter
+
 import pytest
 
+from piper.piper_bus_probe import report
 from piper.piper_feedback import (
     CORE_FEEDBACK_CAN_IDS,
     FEEDBACK_CAN_IDS,
     HIGH_SPEED_CAN_IDS,
     JOINT_ANGLE_IDS,
+    LINKAGE_TEACHING_MODE,
     TEACHING_INPUT_OFFSETS,
+    decode_ctrl_mode,
     decode_joint_angles,
     detect_feedback_offset,
     joint_for_can_id,
 )
+
+
+def _status_frame(ctrl_mode: int) -> bytes:
+    """Build one arm status payload with the given control mode."""
+    return bytes([ctrl_mode] + [0] * 7)
 
 
 def _angle_frame(joint_a, joint_b, raw_a=None, raw_b=None):
@@ -93,3 +103,75 @@ def test_low_speed_ids_map_to_their_joint():
     for index, can_id in enumerate(FEEDBACK_CAN_IDS, start=1):
         assert joint_for_can_id(can_id) == index
     assert joint_for_can_id(HIGH_SPEED_CAN_IDS[0]) is None
+
+
+def test_ctrl_mode_comes_from_the_first_status_byte():
+    frame = _status_frame(LINKAGE_TEACHING_MODE)
+    assert decode_ctrl_mode(0x2A1, frame) == 0x06
+    assert decode_ctrl_mode(0x2A1, _status_frame(0x01)) == 0x01
+
+
+def test_ctrl_mode_ignores_other_frames_and_short_payloads():
+    assert decode_ctrl_mode(0x2A5, _status_frame(0x06)) is None
+    assert decode_ctrl_mode(0x2A1, b'') is None
+
+
+def _survey_counter():
+    return Counter({can_id: 20 for can_id in CORE_FEEDBACK_CAN_IDS})
+
+
+def test_two_modes_on_one_bus_name_both_arms(capsys):
+    # A shared bus after 0x470 on one arm: the follower still reports CAN
+    # control mode while the master reports linkage teaching input.
+    report('can_left', _survey_counter(), {0x2A1: _status_frame(0x01)},
+           Counter({0x01: 300, LINKAGE_TEACHING_MODE: 300}), 1.0)
+    out = capsys.readouterr().out
+    assert '0x01 CAN 指令控制 x300' in out
+    assert '0x06 联动示教输入 x300' in out
+    assert '不止一台臂' in out
+    assert '0x470 的 0xFA 生效' in out
+
+
+def test_single_plain_mode_is_not_reported_as_two_arms(capsys):
+    report('can_left', _survey_counter(), {0x2A1: _status_frame(0x01)},
+           Counter({0x01: 600}), 1.0)
+    out = capsys.readouterr().out
+    assert '不止一台臂' not in out
+    assert '联动示教输入模式' not in out
+
+
+def test_linkage_mode_alone_warns_that_both_arms_may_share_it(capsys):
+    report('can_left', _survey_counter(),
+           {0x2A1: _status_frame(LINKAGE_TEACHING_MODE)},
+           Counter({LINKAGE_TEACHING_MODE: 600}), 1.0)
+    out = capsys.readouterr().out
+    assert '两台都收到过 0x470' in out
+
+
+def test_commanding_ids_catch_host_and_teaching_arm_frames():
+    from piper.piper_feedback import commanding_can_ids
+    # 主机的关节指令、使能、示教输入臂偏移后的指令都要被认出来
+    assert commanding_can_ids({0x2A5, 0x155, 0x2A1}) == (0x155,)
+    assert commanding_can_ids({0x151, 0x471}) == (0x151, 0x471)
+    assert commanding_can_ids({0x175, 0x2C5}) == (0x175,)
+    # 纯粹的反馈帧不算「有人在发指令」
+    assert commanding_can_ids({0x2A5, 0x2A1, 0x251, 0x1C0, 0x212}) == ()
+
+
+def test_report_flags_command_frames(capsys):
+    counter = _survey_counter()
+    counter[0x155] = 40  # 有人在给臂下发关节指令
+    last = {0x2A1: _status_frame(0x01), 0x155: bytes(8)}
+    report('can_left', counter, last, Counter({0x01: 300}), 1.0)
+    out = capsys.readouterr().out
+    assert '有控制指令帧' in out
+    assert '0x155' in out
+    assert '示教输入臂' in out
+
+
+def test_report_says_when_nothing_is_commanding(capsys):
+    report('can_left', _survey_counter(), {0x2A1: _status_frame(0x00)},
+           Counter({0x00: 300}), 1.0)
+    out = capsys.readouterr().out
+    assert '没有指令帧' in out
+    assert '有控制指令帧' not in out
