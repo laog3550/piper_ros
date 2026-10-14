@@ -1,4 +1,4 @@
-"""按序列号启动三路 RGB-D 相机；运行：ros2 launch piper start_cameras.launch.py。"""
+"""按序列号启动三路 RGB-D 相机；运行：ros2 launch piper start_cameras.launch.py."""
 
 import json
 import os

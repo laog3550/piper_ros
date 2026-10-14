@@ -11,7 +11,7 @@ from unittest import mock
 import can
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from piper.piper_direct_can_decode import decode_frame
+from piper.piper_direct_can_decode import decode_frame  # noqa: E402
 
 
 def frame(can_id, data, **kwargs):
@@ -40,8 +40,10 @@ class DirectCanDecodeTest(unittest.TestCase):
                 self.assertAlmostEqual(result['joint_position_rad'][1], math.pi)
 
     def test_gripper_target_and_feedback_are_distinct(self):
-        target = (12345).to_bytes(4, 'big', signed=True) + (2500).to_bytes(2, 'big') + bytes((3, 0xAE))
-        actual = (-8000).to_bytes(4, 'big', signed=True) + (-1200).to_bytes(2, 'big', signed=True) + bytes((0x40, 0))
+        target = ((12345).to_bytes(4, 'big', signed=True)
+                  + (2500).to_bytes(2, 'big') + bytes((3, 0xAE)))
+        actual = ((-8000).to_bytes(4, 'big', signed=True)
+                  + (-1200).to_bytes(2, 'big', signed=True) + bytes((0x40, 0)))
         command = decode_frame(frame(0x159, target))
         measured = decode_frame(frame(0x2A8, actual))
         self.assertEqual(command['kind'], 'master_target')
@@ -100,7 +102,8 @@ class DirectCanDecodeTest(unittest.TestCase):
         bus.recv.side_effect = [
             frame(0x155, bytes(8)), frame(0x2A8, bytes(8))
         ]
-        node_path = pathlib.Path(__file__).resolve().parents[1] / 'piper' / 'piper_direct_can_node.py'
+        node_path = (pathlib.Path(__file__).resolve().parents[1]
+                     / 'piper' / 'piper_direct_can_node.py')
         spec = importlib.util.spec_from_file_location('piper_direct_can_node_test', str(node_path))
         module = importlib.util.module_from_spec(spec)
         with mock.patch.dict(sys.modules, {'rclpy': fake_rclpy,
