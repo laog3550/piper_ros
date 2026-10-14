@@ -213,6 +213,9 @@ def replay(bridge, bag, storage_id):
     from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
 
+    bag = Path(bag)
+    if not (bag / "metadata.yaml").is_file() and (bag / "bag" / "metadata.yaml").is_file():
+        bag = bag / "bag"
     reader = rosbag2_py.SequentialReader()
     reader.open(rosbag2_py.StorageOptions(uri=str(bag), storage_id=storage_id),
                 rosbag2_py.ConverterOptions("", ""))
