@@ -18,6 +18,7 @@ MESSAGE_TYPES = {
     "CompressedImage": "sensor_msgs/msg/CompressedImage",
     "JointState": "sensor_msgs/msg/JointState",
     "Float64MultiArray": "std_msgs/msg/Float64MultiArray",
+    "PiperDirectCanFrame": "piper_msgs/msg/PiperDirectCanFrame",
     "String": "std_msgs/msg/String",
 }
 
@@ -46,8 +47,8 @@ def load_config(path):
             raise ValueError("深度流须使用 sensor_msgs/Image")
         if channel.endswith("/rgb") and kind not in ("Image", "CompressedImage"):
             raise ValueError("RGB 流须使用 Image 或 CompressedImage")
-        if channel.startswith("arm/") and kind not in ("JointState", "Float64MultiArray"):
-            raise ValueError("机械臂曲线须使用 JointState 或 Float64MultiArray")
+        if channel.startswith("arm/") and kind not in ("JointState", "Float64MultiArray", "PiperDirectCanFrame"):
+            raise ValueError("不支持机械臂曲线消息类型")
         if channel == "episode/events" and kind != "String":
             raise ValueError("事件须使用 std_msgs/String")
         topics[topic] = (channel, spec)
@@ -90,6 +91,15 @@ def raw_image(msg):
 
 
 def joint_values(msg, spec):
+    if spec["type"] == "PiperDirectCanFrame":
+        if msg.joint_index == 0:
+            return [("gripper_m", float(msg.gripper_position_m)),
+                    ("gripper_effort_nm", float(msg.gripper_effort_nm))]
+        if msg.joint_index not in (1, 3, 5):
+            raise ValueError(f"无效关节编号: {msg.joint_index}")
+        return [(f"joint_{msg.joint_index + offset}", float(value))
+                for offset, value in enumerate(msg.joint_position_rad)
+                if math.isfinite(float(value))]
     values = msg.position if spec["type"] == "JointState" else msg.data
     names = spec.get("joint_names") or list(getattr(msg, "name", []))
     if not names:
@@ -113,19 +123,20 @@ class Bridge:
     def accept(self, topic, msg, receive_ns=None, buffered=False):
         channel, spec = self.topics[topic]
         when = stamp_ns(msg, receive_ns or time.time_ns())
+        slot = f"{channel}/{msg.can_id}" if spec["type"] == "PiperDirectCanFrame" else channel
         rate = self.config["image_hz"] if channel.startswith("camera/") else self.config["joint_hz"]
         if channel != "episode/events":
-            last = self.last_ns.get(channel)
+            last = self.last_ns.get(slot)
             if last is not None and 0 <= when - last < 1_000_000_000 / rate:
                 return
-            self.last_ns[channel] = when
+            self.last_ns[slot] = when
         item = (channel, spec, msg, when)
         if buffered:
             with self.lock:
                 if channel == "episode/events":
                     self.events.append(item)
                 else:
-                    self.latest[channel] = item
+                    self.latest[slot] = item
         else:
             self.log(item)
 
