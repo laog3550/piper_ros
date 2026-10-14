@@ -25,5 +25,5 @@
       "actual": {"topic": "/piper_direct/right/slave_feedback", "type": "PiperDirectCanFrame"}
     }
   },
-  "events": {"topic": "/replace/episode/events", "type": "String"}
+  "events": {"topic": "/collection/events", "type": "String"}
 }
