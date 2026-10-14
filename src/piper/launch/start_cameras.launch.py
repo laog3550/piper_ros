@@ -1,4 +1,4 @@
-"""按机器本地序列号映射启动三路彩色相机。"""
+"""按序列号启动三路 RGB-D 相机；运行：ros2 launch piper start_cameras.launch.py。"""
 
 import json
 import os
@@ -48,8 +48,11 @@ def _start_cameras(context):
                 'camera_name': 'D455',
                 'serial_no': '_' + camera['serial'],
                 'rgb_camera.color_profile': '640,480,30',
+                'depth_module.depth_profile': '640,480,30',
                 'enable_color': 'true',
-                'enable_depth': 'false',
+                'enable_depth': 'true',
+                'align_depth.enable': 'true',
+                'enable_sync': 'true',
                 'enable_infra1': 'false',
                 'enable_infra2': 'false',
                 'pointcloud.enable': 'false',
@@ -62,23 +65,28 @@ def _start_cameras(context):
                 'color_width': '640',
                 'color_height': '480',
                 'color_fps': '30',
+                'depth_width': '640',
+                'depth_height': '480',
+                'depth_fps': '30',
                 'enable_color': 'true',
-                'enable_depth': 'false',
+                'enable_depth': 'true',
+                'depth_registration': 'true',
                 'enable_left_ir': 'false',
                 'enable_right_ir': 'false',
-                'enable_frame_sync': 'false',
+                'enable_frame_sync': 'true',
                 'enable_point_cloud': 'false',
                 'color.image_raw.enable_pub_plugins': '["image_transport/raw"]',
+                'depth.image_raw.enable_pub_plugins': '["image_transport/raw"]',
             }
         launch_path = Path(get_package_share_directory(package)) / 'launch' / filename
         # Each vendor launch must have an isolated argument scope.
         group = GroupAction(actions=[
-            LogInfo(msg=f'启动 {role}：{camera["serial"]}，640x480 @ 30 fps 彩色流'),
+            LogInfo(msg=f'启动 {role}：{camera["serial"]}，640x480 @ 30 fps RGB-D 流'),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(str(launch_path)),
                 launch_arguments=arguments.items(),
             ),
-        ], scoped=True)
+        ], scoped=True, forwarding=False)
         actions.append(TimerAction(period=float(index * 4), actions=[group]))
     return actions
 
