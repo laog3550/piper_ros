@@ -15,16 +15,16 @@ class PiperDirectCanNode(Node):
     def __init__(self):
         super().__init__('piper_direct_can')
         self._stop = threading.Event()
-        self._publishers = {}
+        self._frame_publishers = {}
         for channel in ('can_left', 'can_right'):
             side = channel[4:]
-            self._publishers[channel] = {
+            self._frame_publishers[channel] = {
                 kind: self.create_publisher(
                     PiperDirectCanFrame, '/piper_direct/{}/{}'.format(side, kind), 1000
                 ) for kind in ('master_target', 'slave_feedback')
             }
         self._threads = [threading.Thread(target=self._listen, args=(channel,), daemon=True)
-                         for channel in self._publishers]
+                         for channel in self._frame_publishers]
         for thread in self._threads:
             thread.start()
 
@@ -57,7 +57,7 @@ class PiperDirectCanNode(Node):
                     'gripper_position_m', 'gripper_effort_nm', 'gripper_status',
                     'gripper_set_zero'):
             setattr(msg, key, value[key])
-        self._publishers[channel][value['kind']].publish(msg)
+        self._frame_publishers[channel][value['kind']].publish(msg)
 
     def destroy_node(self):
         self._stop.set()

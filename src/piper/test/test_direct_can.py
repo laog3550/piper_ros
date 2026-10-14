@@ -84,10 +84,12 @@ class DirectCanDecodeTest(unittest.TestCase):
 
         class FakeNode:
             def __init__(self, _name):
-                pass
+                self._publishers = []
 
             def create_publisher(self, _message_type, topic, _queue_size):
-                return Publisher(topic)
+                publisher = Publisher(topic)
+                self._publishers.append(publisher)
+                return publisher
 
         fake_rclpy = types.ModuleType('rclpy')
         fake_rclpy.ok = mock.Mock(side_effect=(True, True, False))
