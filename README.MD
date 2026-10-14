@@ -719,6 +719,7 @@ rosbag2 SQLite 的 `messages.timestamp` 是录制端接收时间。原始消息�
 
 ```bash
 source /opt/ros/humble/setup.bash
+source install/setup.bash
 /usr/bin/python3 -m venv --system-site-packages /tmp/piper-rerun-bridge-venv
 /tmp/piper-rerun-bridge-venv/bin/python -m pip install rerun-sdk==0.39.0
 /tmp/piper-rerun-bridge-venv/bin/python tools/rerun_bridge.py --config bridge.json live
