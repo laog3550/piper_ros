@@ -21,7 +21,9 @@ from typing import Dict
 import can
 
 from piper.piper_enable_status import EnableState, aggregate, describe
-from piper.piper_feedback import FEEDBACK_CAN_IDS, JOINT_COUNT, FeedbackTracker
+from piper.piper_feedback import (
+    FEEDBACK_CAN_IDS, JOINT_COUNT, FeedbackTracker, decode,
+)
 
 DEFAULT_PORTS = ('can_left', 'can_right')
 DEFAULT_DURATION = 3.0
@@ -60,13 +62,53 @@ def collect(port: str, duration: float, timeout: float) -> FeedbackTracker:
     try:
         deadline = time.monotonic() + duration
         while time.monotonic() < deadline:
-            frame = bus.recv(timeout=min(0.2, max(0.0, deadline - time.monotonic())))
+            frame = bus.recv(timeout=min(
+                0.2, max(0.0, deadline - time.monotonic())))
             if frame is None:
                 continue
             tracker.update(frame.arbitration_id, frame.data)
     finally:
         bus.shutdown()
     return tracker
+
+
+def collect_enable_window(port: str, duration: float, timeout: float):
+    """Keep every enable bit on a shared bus, including both arms' samples."""
+    samples = {joint: [] for joint in range(1, JOINT_COUNT + 1)}
+    last_seen = {}
+    bus = _listen(port)
+    try:
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            frame = bus.recv(timeout=min(
+                0.2, max(0.0, deadline - time.monotonic())))
+            if frame is None or frame.is_error_frame or frame.is_extended_id:
+                continue
+            feedback = decode(frame.arbitration_id, frame.data)
+            if feedback is not None:
+                samples[feedback.joint].append(feedback.enabled)
+                last_seen[feedback.joint] = time.monotonic()
+    finally:
+        bus.shutdown()
+    now = time.monotonic()
+    states = []
+    for joint in range(1, JOINT_COUNT + 1):
+        observed = samples[joint]
+        if (not observed or now - last_seen[joint] > timeout):
+            states.append(None)
+        elif all(observed):
+            states.append(True)
+        elif not any(observed):
+            states.append(False)
+        else:
+            states.append('mixed')
+    if any(state is None for state in states):
+        verdict = EnableState.UNKNOWN
+    elif any(state == 'mixed' for state in states):
+        verdict = EnableState.PARTIAL
+    else:
+        verdict = aggregate(states)
+    return verdict, samples
 
 
 def report(port: str, tracker: FeedbackTracker) -> EnableState:
@@ -138,7 +180,8 @@ def main(args=None) -> int:
     states = tuple(verdicts.values())
     print('=' * 60)
     print('summary: ' + ', '.join(
-        f'{port}={EnableState(state).name}' for port, state in verdicts.items()))
+        f'{port}={EnableState(state).name}'
+        for port, state in verdicts.items()))
     if any(state is EnableState.PARTIAL for state in states):
         print(f'RESULT: PARTIAL enable detected (expected {options.expect})')
         return EXIT_PARTIAL

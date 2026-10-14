@@ -13,7 +13,8 @@ string side
 #   WAIT_TEACH         等待操作员用实体按钮让主臂进入示教
 #   ALIGNING           从臂正在受限对齐主臂
 #   ACTIVE             实时摇操中
-#   WAIT_TEACH_RELEASE 已停目标流，等待操作员确认实体示教已退出
+#   RETURNING          从臂按本轮启动时冻结的目标回位
+#   WAIT_TEACH_RELEASE 回位成功且已停目标流，等待新的实体示教退出确认
 #   STOPPING           正在整侧失能并读回验证
 #   FAULT_LATCHED      故障已锁存，本进程不再自动进入摇操
 string state
@@ -24,7 +25,7 @@ string state_label
 # 故障原因；没有故障时为空字符串。
 string fault
 
-# 是否正在向从臂下发关节目标（即 state == ACTIVE）。
+# 是否处于实时跟随（即 state == ACTIVE）；RETURNING 也可能发送运动目标。
 bool running
 
 # 实际下发命令频率，Hz。

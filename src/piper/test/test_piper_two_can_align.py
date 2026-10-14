@@ -83,6 +83,22 @@ def test_plan_refuses_a_follower_start_outside_command_limits():
         plan_alignment(start, _pose())
 
 
+def test_plan_clamps_only_small_follower_start_overshoot():
+    start = _pose()
+    start[2] = -2.066
+    plan = plan_alignment(start, _pose(), max_start_clamp_deg=0.1)
+
+    assert plan.requested_start_deg[2] == -2.066
+    assert plan.start_deg[2] == -2.0
+    assert plan.start_corrections_deg == pytest.approx({2: -0.066})
+    assert plan.deltas_deg[2] == 2.0
+    assert len(encode_joint_targets(plan.start_deg)) == 3
+
+    start[2] = -2.101
+    with pytest.raises(SafetyError, match='从臂起点'):
+        plan_alignment(start, _pose(), max_start_clamp_deg=0.1)
+
+
 def test_motion_control_payloads_use_standard_follower_address_layout():
     assert encode_motion_ctrl_2(5) == bytes.fromhex('01 01 05 00 00 00 00 00')
     assert encode_motion_ctrl_2(5, standby=True) == bytes.fromhex(

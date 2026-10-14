@@ -517,10 +517,8 @@ GRIPPER_OPEN_MAX_M = 0.08
 DEFAULT_GRIPPER_DEADBAND_M = 0.0005
 # 从臂夹爪的夹持力，单位 N·m；节点的 joint_callback 会把它钳到 [0.5, 3]。
 DEFAULT_GRIPPER_EFFORT_NM = 1.0
-# 主从夹爪的行程倍数：master 的开口乘上它才是 follower 的开口。本机构上主臂夹爪
-# 的有效行程只有从臂的约 1/1.3（从臂 0~80mm），所以默认 1.3——主臂走满行程正好
-# 对应从臂走满行程，中间按比例跟随。两台夹爪完全相同时把它设成 1.0 就是纯镜像。
-DEFAULT_GRIPPER_SCALE = 1.3
+# 从臂开口按主臂开口的 1.5 倍跟随，最大钳制在从臂可指令上限 80 mm。
+DEFAULT_GRIPPER_SCALE = 1.5
 
 # 快速复位手势：一次手势是 master 做出一段短促移动后重新停下；两次
 # 手势在窗口内完成就触发 follower 回 home。检测器只处理角度和时间，

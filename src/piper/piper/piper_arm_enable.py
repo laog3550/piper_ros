@@ -21,9 +21,8 @@ from typing import List
 
 import can
 
-from piper.piper_enable_check import collect
-from piper.piper_enable_check import report as report_enable_state
-from piper.piper_enable_status import EnableState, aggregate
+from piper.piper_enable_check import collect_enable_window
+from piper.piper_enable_status import EnableState
 from piper.piper_feedback import JOINT_COUNT
 
 ENABLE_DISABLE_CAN_ID = 0x471
@@ -84,10 +83,15 @@ def _dry_run(ports: List[str], enable: bool) -> int:
 
 
 def _verify(port: str, seconds: float, timeout: float) -> EnableState:
-    """Read the enable bits back and return the aggregate verdict."""
-    tracker = collect(port, seconds, timeout)
-    report_enable_state(port, tracker)
-    return aggregate(tracker.observations(time.monotonic()))
+    """Check every shared-ID sample rather than only the last frame."""
+    verdict, samples = collect_enable_window(port, seconds, timeout)
+    print(f'--- {port} ---')
+    for joint, observed in samples.items():
+        on_count = sum(observed)
+        print(f'  joint {joint}: enabled={on_count} '
+              f'disabled={len(observed) - on_count}')
+    print(f'  verdict: {verdict.name}')
+    return verdict
 
 
 def _execute(ports: List[str], enable: bool, verify_seconds: float,
@@ -132,8 +136,8 @@ def _execute(ports: List[str], enable: bool, verify_seconds: float,
         print(f'结果：所有总线都读到 {expected.name}，{action}成功')
         return EXIT_OK
     print(f'结果：至少一条总线没有读到 {expected.name}')
-    print('      两种常见原因：帧被丢掉（重跑一次本命令即可，重复发送无害），'
-          '或总线上两台臂状态不一致（读回会是 PARTIAL）')
+    print('      请核对实体示教、每关节样本和两台臂的状态；'
+          '同 ID 的 enabled/disabled 混合会报告 PARTIAL。')
     return EXIT_UNCONFIRMED
 
 

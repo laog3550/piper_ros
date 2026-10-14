@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Survey one CAN bus read-only to see which Piper arms report on it."""
 
-# 本工具为纯观测：以接收-only 方式打开套接字，按反馈帧过滤，代码中没有任何
+# 本工具为纯观测：以接收-only 方式打开套接字，接收所有 CAN 帧，代码中没有任何
 # 发送路径。它自行解码原始帧，不依赖 piper_sdk，因此可以用来佐证控制节点，
 # 而不是复述节点的话。
 #
@@ -12,12 +12,9 @@
 # 现在一条总线上同时挂着该侧的主臂与从臂，判读方式随之改变：
 #   * 核心帧齐全不再等于「只有一台臂」——两台都用常规布局时，同一批 ID 上
 #     会有两台在报，高速反馈帧率约为单台的两倍，本工具会把这种情况标出来；
-#   * 额外出现的 5 个未定义 ID（0x1C0~0x1C3、0x212）是主臂在场的判据；
-#   * 只有主臂被设为示教输入臂（反馈 ID 整体偏移 0x10/0x20）时，两台的反馈
-#     才落在不同的 ID 上，控制节点才能分得开；
-#   * 状态帧（0x2A1）第 0 字节是控制模式：同一批帧里出现两种模式，就是「一条
-#     总线上两台臂、其中一台已被 0x470 设为示教输入臂」的直接证据，这也是
-#     验证 0x470 是否生效的只读手段。
+#   * 反馈 ID 偏移只能证明地址布局，不能据此判定 0xFA/0xFC 角色；
+#   * 官方 0xFA 输入臂可能只发送控制帧，没有反馈。接口静默不能直接判为断线；
+#   * 状态帧（0x2A1）第 0 字节只表示采到的反馈控制模式，不等于角色读回。
 
 import time
 from argparse import ArgumentParser
@@ -160,7 +157,7 @@ def report(port: str, counter: Counter, last: Dict[int, bytes],
     """Print one bus survey and return (core frames complete, offset)."""
     print(f'--- {port} ---')
     if not counter:
-        print('  总线上没有任何帧')
+        print('  本接口未收到任何帧；无法仅凭此判断设备角色或 CAN 接线')
         return False, None
 
     missing = [c for c in CORE_FEEDBACK_CAN_IDS if counter.get(c, 0) < MIN_FRAMES]
@@ -174,13 +171,13 @@ def report(port: str, counter: Counter, last: Dict[int, bytes],
     print(f'  帧总数 {sum(counter.values())} / {duration:.1f}s，'
           f'不同 ID {len(counter)} 个')
     if offset is None:
-        print('  反馈 ID 未偏移 → 常规（运动输出臂）布局')
+        print('  反馈 ID 未偏移 → 常规反馈布局；不能单凭偏移判断角色')
     else:
         shifted = sorted(c for c in counter if c - offset in CORE_FEEDBACK_CAN_IDS)
-        print(f'  *** 反馈 ID 整体偏移 0x{offset:02X}，该臂处于示教输入臂布局 ***')
+        print(f'  *** 反馈 ID 整体偏移 0x{offset:02X}；不能据此判定 0xFA 角色 ***')
         print(f'      {len(shifted)} 个核心帧以 0x{offset:02X} 偏移出现，'
               f'例如 0x{shifted[0]:03X} 对应 0x{shifted[0] - offset:03X}')
-        print('      常规布局的核心帧在这个偏移下不可能同时对上，故判定无歧义')
+        print('      只能确认反馈地址布局，不能确认发送臂的角色')
 
     print(f'  核心帧 {len(CORE_FEEDBACK_CAN_IDS) - len(missing)}/'
           f'{len(CORE_FEEDBACK_CAN_IDS)} 齐全'
@@ -198,10 +195,10 @@ def report(port: str, counter: Counter, last: Dict[int, bytes],
               f'有东西在给臂下发指令 ***')
         print('      可能是主机节点（piper_two_can_teleop / piper_single_ctrl / '
               '工作区里的执行器），也可能是**示教输入臂**在播发关节指令。')
-        print('      若仍有固件广播，停用当前链路并按两 CAN 方案隔离配置主臂；'
-              '不得在两臂在线时清零偏移。')
+        print('      若为固件联动控制，停臂应按设备实体流程；'
+              '运行中不要发送角色配置。')
     else:
-        print('  控制指令  : 没有指令帧（没有主机节点或示教输入臂在发指令）')
+        print('  控制指令  : 观察窗口内未收到指令帧')
 
     print(f'  关节角度  : {_angle_summary(last)}')
     print(f'  母线电压  : {_voltage_summary(last)}')
@@ -209,14 +206,11 @@ def report(port: str, counter: Counter, last: Dict[int, bytes],
     if modes:
         print(f'  控制模式  : {_mode_summary(modes)}')
         if len(modes) > 1:
-            print('      同一批状态帧里出现多种模式 → 这条总线上不止一台臂，'
-                  '各自处于不同模式')
+            print('      窗口内出现多种模式；可能是状态切换或多台臂，需隔离核验')
             if LINKAGE_TEACHING_MODE in modes:
-                print('      其中一台已是联动示教输入臂（0x470 的 0xFA 生效），'
-                      '另一台仍是常规臂')
+                print('      0x06 是反馈控制模式，不等于已读回 0xFA 角色')
         elif LINKAGE_TEACHING_MODE in modes:
-            print('      这条总线上的臂处于联动示教输入模式'
-                  '（注意：若两台都收到过 0x470，两台都会是这个模式）')
+            print('      采到 0x06 控制模式；不能据此确认角色或臂的数量')
     else:
         print('  控制模式  : 无状态帧')
     print(f'  高速反馈  : {sum(counter.get(c, 0) for c in HIGH_SPEED_CAN_IDS)} 帧'
@@ -224,10 +218,8 @@ def report(port: str, counter: Counter, last: Dict[int, bytes],
           f'，夹爪 {counter.get(GRIPPER_FEEDBACK_CAN_ID, 0)} 帧')
     ratio = _high_speed_ratio(counter, duration)
     if ratio is not None:
-        print(f'  *** 高速反馈帧率约为单台臂的 {ratio:.1f} 倍：这条总线上'
-              f'有两台常规布局的臂在同一个 ID 上报 ***')
-        print('      这个布局下控制节点分不出两台臂：需要把其中一台'
-              '（通常是主臂）离线配置为 0xFC，反馈和控制偏移均为 0x20')
+        print(f'  *** 高速反馈帧率约为单台臂的 {ratio:.1f} 倍；'
+              '可能有多个同 ID 发送源，需隔离核验 ***')
     return not missing, offset
 
 

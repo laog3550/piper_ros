@@ -10,6 +10,8 @@ from typing import Dict, Mapping, Optional, Tuple
 
 import can
 
+from piper.piper_can_writer import CanWriterLease
+
 from piper.piper_enable_status import EnableState, aggregate
 from piper.piper_feedback import (
     DEFAULT_GRIPPER_EFFORT_NM,
@@ -85,11 +87,17 @@ class SafetyError(RuntimeError):
     """A condition that forbids starting or continuing motion."""
 
 
+class SnapshotSkewError(SafetyError):
+    """One complete pose has angle frames outside the skew window."""
+
+
 @dataclass(frozen=True)
 class AlignmentPlan:
     """Frozen start/goal poses and the bounded minimum-jerk duration."""
 
     start_deg: Mapping[int, float]
+    requested_start_deg: Mapping[int, float]
+    start_corrections_deg: Mapping[int, float]
     requested_goal_deg: Mapping[int, float]
     goal_deg: Mapping[int, float]
     goal_corrections_deg: Mapping[int, float]
@@ -178,8 +186,17 @@ class PoseTracker:
                 f'关节反馈过期：最旧帧龄 {current - oldest:.3f}s'
             )
         if newest - oldest > max_skew_s:
-            raise SafetyError(
-                f'六关节快照不同步：跨度 {newest - oldest:.3f}s'
+            oldest_id = min(JOINT_ANGLE_IDS,
+                            key=lambda can_id: self._frame_times[can_id])
+            newest_id = max(JOINT_ANGLE_IDS,
+                            key=lambda can_id: self._frame_times[can_id])
+            arm = '主臂' if self.offset == MASTER_OFFSET else '从臂'
+            raise SnapshotSkewError(
+                f'{arm}六关节快照不同步：跨度 '
+                f'{(newest - oldest) * 1000.0:.3f}ms（门限 '
+                f'{max_skew_s * 1000.0:.3f}ms；最旧 '
+                f'0x{oldest_id + self.offset:03X}、最新 '
+                f'0x{newest_id + self.offset:03X}）'
             )
         if len(self._angles) != JOINT_COUNT:
             raise SafetyError('没有完整的六关节角度')
@@ -190,6 +207,7 @@ def plan_alignment(start_deg: Mapping[int, float],
                    goal_deg: Mapping[int, float], *,
                    max_delta_deg: float = DEFAULT_MAX_DELTA_DEG,
                    max_goal_clamp_deg: float = DEFAULT_MAX_GOAL_CLAMP_DEG,
+                   max_start_clamp_deg: float = 0.0,
                    min_duration_s: float = DEFAULT_MIN_DURATION_S,
                    max_peak_deg_s: float = DEFAULT_MAX_PEAK_DEG_S,
                    ) -> AlignmentPlan:
@@ -198,14 +216,16 @@ def plan_alignment(start_deg: Mapping[int, float],
     if set(start_deg) != expected or set(goal_deg) != expected:
         raise ValueError('start and goal must contain joints 1..6 exactly')
     if (max_delta_deg <= 0 or max_goal_clamp_deg < 0
+            or max_start_clamp_deg < 0
             or min_duration_s <= 0 or max_peak_deg_s <= 0):
         raise ValueError('alignment limits must be positive')
     if not all(math.isfinite(float(value))
                for value in (*start_deg.values(), *goal_deg.values())):
         raise ValueError('joint angles must be finite')
 
-    _, start_limited = clamp_targets(dict(start_deg))
-    if start_limited:
+    command_start, start_limited = clamp_targets(dict(start_deg))
+    if any(abs(correction) > max_start_clamp_deg
+           for correction in start_limited.values()):
         details = '、'.join(
             f'j{joint}={start_deg[joint]:.3f}°'
             for joint in sorted(start_limited)
@@ -229,7 +249,7 @@ def plan_alignment(start_deg: Mapping[int, float],
         )
 
     deltas = {
-        joint: float(command_goal[joint]) - float(start_deg[joint])
+        joint: float(command_goal[joint]) - float(command_start[joint])
         for joint in range(1, JOINT_COUNT + 1)
     }
     largest = max(abs(delta) for delta in deltas.values())
@@ -244,7 +264,9 @@ def plan_alignment(start_deg: Mapping[int, float],
     peak = (MINIMUM_JERK_PEAK_FACTOR * largest / duration
             if duration > 0 else 0.0)
     return AlignmentPlan(
-        start_deg=dict(start_deg),
+        start_deg=command_start,
+        requested_start_deg=dict(start_deg),
+        start_corrections_deg=start_limited,
         requested_goal_deg=dict(goal_deg),
         goal_deg=command_goal,
         goal_corrections_deg=goal_corrections,
@@ -275,8 +297,7 @@ def encode_motion_ctrl_2(speed_percent: int, standby: bool = False) -> bytes:
 
 
 def encode_joint_targets(
-        targets_deg: Mapping[int, float]
-        ) -> Tuple[Tuple[int, bytes], ...]:
+        targets_deg: Mapping[int, float]) -> Tuple[Tuple[int, bytes], ...]:
     """Encode 0x155..0x157 as signed big-endian millidegrees."""
     expected = set(range(1, JOINT_COUNT + 1))
     if set(targets_deg) != expected:
@@ -476,6 +497,7 @@ class RuntimeMonitor:
         self._error_times.append(now)
         self._prune_errors(now)
         description = error_frame_class(frame)
+        self.error_classes[description] += 1
         if error_frame_is_degradation(frame):
             raise SafetyError(f'运行中 CAN 状态退化：{description}')
         if self.error_policy == 'strict':
@@ -679,6 +701,8 @@ def run_alignment(bus, monitor: RuntimeMonitor, plan: AlignmentPlan, *,
             if check_stop is not None:
                 check_stop()
             _drain_until(bus, monitor, min(next_command, probe_deadline))
+            if check_stop is not None:
+                check_stop()
             now = time.monotonic()
             if now >= probe_deadline:
                 break
@@ -694,14 +718,18 @@ def run_alignment(bus, monitor: RuntimeMonitor, plan: AlignmentPlan, *,
                     f'静止探针期间主臂移动 {drift:.3f}°，超过 '
                     f'{master_drift_deg:.3f}°'
                 )
-            hold_error = max(
-                abs(follower[joint] - plan.start_deg[joint])
-                for joint in range(1, JOINT_COUNT + 1)
-            )
+            hold_joint = max(
+                range(1, JOINT_COUNT + 1),
+                key=lambda joint: abs(
+                    follower[joint] - plan.start_deg[joint]))
+            hold_error = abs(
+                follower[hold_joint] - plan.start_deg[hold_joint])
             if hold_error > max_follow_error_deg:
                 raise SafetyError(
                     f'静止探针期间从臂偏移 {hold_error:.3f}°，超过 '
-                    f'{max_follow_error_deg:.3f}°'
+                    f'{max_follow_error_deg:.3f}°（j{hold_joint} 实测 '
+                    f'{follower[hold_joint]:.3f}°、目标 '
+                    f'{plan.start_deg[hold_joint]:.3f}°）'
                 )
             sent_any = True
             send_target(bus, plan.start_deg, speed_percent,
@@ -722,6 +750,8 @@ def run_alignment(bus, monitor: RuntimeMonitor, plan: AlignmentPlan, *,
             if now >= final_deadline:
                 break
             _drain_until(bus, monitor, min(next_command, final_deadline))
+            if check_stop is not None:
+                check_stop()
             now = time.monotonic()
             if now < next_command:
                 continue
@@ -738,14 +768,17 @@ def run_alignment(bus, monitor: RuntimeMonitor, plan: AlignmentPlan, *,
             progress = min(1.0, (now - started) / plan.duration_s)
             targets = align_targets(
                 plan.start_deg, plan.goal_deg, progress)
-            follow_error = max(
-                abs(follower[joint] - targets[joint])
-                for joint in range(1, JOINT_COUNT + 1)
-            )
+            follow_joint = max(
+                range(1, JOINT_COUNT + 1),
+                key=lambda joint: abs(follower[joint] - targets[joint]))
+            follow_error = abs(
+                follower[follow_joint] - targets[follow_joint])
             if follow_error > max_follow_error_deg:
                 raise SafetyError(
                     f'从臂跟踪误差 {follow_error:.3f}°，超过 '
-                    f'{max_follow_error_deg:.3f}°'
+                    f'{max_follow_error_deg:.3f}°（j{follow_joint} 实测 '
+                    f'{follower[follow_joint]:.3f}°、目标 '
+                    f'{targets[follow_joint]:.3f}°）'
                 )
             sent_any = True
             send_target(bus, targets, speed_percent, gripper_at(progress),
@@ -797,6 +830,31 @@ def execute_alignment(port: str, *, max_delta_deg: float,
                          max_follow_error_deg, settle_s, goal_tolerance_deg,
                          speed_percent)
 
+    lease = CanWriterLease(port)
+    lease.acquire()
+    try:
+        return _execute_owned_alignment(
+            port, max_delta_deg=max_delta_deg,
+            max_goal_clamp_deg=max_goal_clamp_deg,
+            min_duration_s=min_duration_s, max_peak_deg_s=max_peak_deg_s,
+            rate_hz=rate_hz, speed_percent=speed_percent,
+            stale_s=stale_s, max_skew_s=max_skew_s,
+            master_drift_deg=master_drift_deg,
+            max_follow_error_deg=max_follow_error_deg,
+            settle_s=settle_s, goal_tolerance_deg=goal_tolerance_deg,
+            stationary_probe_s=stationary_probe_s, error_policy=error_policy,
+            max_error_rate_hz=max_error_rate_hz, gripper=gripper,
+            target_deg=target_deg)
+    finally:
+        lease.release()
+
+
+def _execute_owned_alignment(
+        port, *, max_delta_deg, max_goal_clamp_deg, min_duration_s,
+        max_peak_deg_s, rate_hz, speed_percent, stale_s, max_skew_s,
+        master_drift_deg, max_follow_error_deg, settle_s, goal_tolerance_deg,
+        stationary_probe_s, error_policy, max_error_rate_hz, gripper,
+        target_deg):
     bus = _open_bus(port)
     monitor = RuntimeMonitor(
         stale_s=stale_s, max_skew_s=max_skew_s,
@@ -841,6 +899,12 @@ def print_plan(plan: AlignmentPlan, goal_label: str = '主臂读数') -> None:
             f'j{joint} {plan.requested_goal_deg[joint]:.3f}°→'
             f'{plan.goal_deg[joint]:.3f}°'
             for joint in sorted(plan.goal_corrections_deg)
+        ))
+    if plan.start_corrections_deg:
+        print('  起点限幅：' + '、'.join(
+            f'j{joint} {plan.requested_start_deg[joint]:.3f}°→'
+            f'{plan.start_deg[joint]:.3f}°'
+            for joint in sorted(plan.start_corrections_deg)
         ))
     print(
         f'  最大位移 {plan.max_delta_deg:.3f}°；'

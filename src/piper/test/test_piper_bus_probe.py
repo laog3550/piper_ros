@@ -120,16 +120,14 @@ def _survey_counter():
     return Counter({can_id: 20 for can_id in CORE_FEEDBACK_CAN_IDS})
 
 
-def test_two_modes_on_one_bus_name_both_arms(capsys):
-    # A shared bus after 0x470 on one arm: the follower still reports CAN
-    # control mode while the master reports linkage teaching input.
+def test_two_modes_do_not_claim_a_verified_fa_role(capsys):
     report('can_left', _survey_counter(), {0x2A1: _status_frame(0x01)},
            Counter({0x01: 300, LINKAGE_TEACHING_MODE: 300}), 1.0)
     out = capsys.readouterr().out
     assert '0x01 CAN 指令控制 x300' in out
     assert '0x06 联动示教输入 x300' in out
-    assert '不止一台臂' in out
-    assert '0x470 的 0xFA 生效' in out
+    assert '状态切换或多台臂' in out
+    assert '不等于已读回 0xFA 角色' in out
 
 
 def test_single_plain_mode_is_not_reported_as_two_arms(capsys):
@@ -140,12 +138,19 @@ def test_single_plain_mode_is_not_reported_as_two_arms(capsys):
     assert '联动示教输入模式' not in out
 
 
-def test_linkage_mode_alone_warns_that_both_arms_may_share_it(capsys):
+def test_linkage_mode_alone_does_not_prove_arm_count_or_role(capsys):
     report('can_left', _survey_counter(),
            {0x2A1: _status_frame(LINKAGE_TEACHING_MODE)},
            Counter({LINKAGE_TEACHING_MODE: 600}), 1.0)
     out = capsys.readouterr().out
-    assert '两台都收到过 0x470' in out
+    assert '不能据此确认角色或臂的数量' in out
+
+
+def test_silent_interface_does_not_claim_disconnected_can(capsys):
+    report('can_left', Counter(), {}, Counter(), 1.0)
+    out = capsys.readouterr().out
+    assert '本接口未收到任何帧' in out
+    assert '无法仅凭此判断设备角色或 CAN 接线' in out
 
 
 def test_commanding_ids_catch_host_and_teaching_arm_frames():
@@ -173,5 +178,5 @@ def test_report_says_when_nothing_is_commanding(capsys):
     report('can_left', _survey_counter(), {0x2A1: _status_frame(0x00)},
            Counter({0x00: 300}), 1.0)
     out = capsys.readouterr().out
-    assert '没有指令帧' in out
+    assert '观察窗口内未收到指令帧' in out
     assert '有控制指令帧' not in out

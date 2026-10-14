@@ -22,27 +22,7 @@ sudo python3 src/piper/piper/pi05_can.py activate --apply
 
 ## 地址配置
 
-当前方案使用主臂 `0xFC + feedback_offset=0x20 + ctrl_offset=0x20`，从臂保持
-`0xFC + 0x00`。没有 `0xFA` 固件随动入口。
-
-仅在从臂已断电或断开 CAN、总线上只剩主臂时配置：
-
-```bash
-ros2 run piper piper_master_slave --port can_left
-ros2 run piper piper_master_slave --port can_left --isolated-master --send
-```
-
-工具只发送 `0x470 FC 20 20 00 00 00 00 00`，不清零偏移、不使能、不发送运动指令。
-发送后给主臂断电重启，先单臂确认 `0x2C1`～`0x2C8` 约 `200 Hz`、默认窗口消失；
-再连接从臂，用以下命令确认两套地址：
-
-```bash
-ros2 run piper piper_two_can_identity --side left
-ros2 run piper piper_joint_watch --arm can_left:主@0x20 --arm can_left:从
-```
-
-`0x251`～`0x266` 在当前固件上不偏移，不能用它们识别实体主臂或从臂。
-`0x471` 是整侧使能广播；`0x470` 是配置广播，绝不能用它作为正常退出手段。
-
-右侧需独立完成同样的离线配置。遥操作按 [操作说明](PIPER_TELEOP.md) 执行；
-现场测量记录见 [实现方案](TWO_CAN_HOST_TELEOP_IMPLEMENTATION.md)。
+当前方案使用官方角色：主臂 `0xFA`、从臂 `0xFC`，三个地址偏移均为 `0`。
+每次只能隔离一台臂并广播一次 `0x470` 配置帧；左右两侧分别配置。
+完整命令、上电顺序和只读核验见[官方原生摇操操作说明](OFFICIAL_NATIVE_TELEOP.md)。
+旧 `0xFC + 0x20` 的测量记录保存在[历史方案](TWO_CAN_HOST_TELEOP_IMPLEMENTATION.md)。

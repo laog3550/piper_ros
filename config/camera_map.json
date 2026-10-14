@@ -1,0 +1,21 @@
+{
+  "position_verified": true,
+  "left_wrist": {
+    "model": "Orbbec Gemini 305",
+    "serial": "CV27561000MR",
+    "usb_serial": "CV27561000MR",
+    "camera_name": "camera_wrist_left"
+  },
+  "right_wrist": {
+    "model": "Orbbec Gemini 305",
+    "serial": "CV275610002H",
+    "usb_serial": "CV275610002H",
+    "camera_name": "camera_wrist_right"
+  },
+  "top": {
+    "model": "Intel RealSense D455",
+    "serial": "338122301303",
+    "usb_serial": "250343060799",
+    "camera_name": "camera_top"
+  }
+}
