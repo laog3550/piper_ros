@@ -691,7 +691,7 @@ sudo apt install ros-$ROS_DISTRO-xacro
 
 # Episode 录制（ROS 2 Humble）
 
-独立只读录制器位于 `tools/episode_recorder/episode_recorder.py`，使用已安装的 `ros2 bag record` 和 SQLite 后端，不控制机械臂。将 `config/episode_recorder.example.json` 复制为自己的 JSON 配置，并`topics` 已列出当前 CAN 和三台 RGB-D 的话题契约；使用前请确认话题正在发布。`min_free_gb` 是开始录制前的最低可用空间，`startup_timeout_sec` 是等待全部话题出现且 rosbag2 建立订阅的秒数。
+独立只读录制器位于 `tools/episode_recorder/episode_recorder.py`，使用已安装的 `ros2 bag record` 和 SQLite 后端，不控制机械臂。先编译并加载 `piper_msgs`，再将 `config/episode_recorder.example.json` 复制为自己的 JSON 配置。`topics` 已列出当前 CAN 和三台 RGB-D 的话题契约；使用前请确认话题正在发布。`min_free_gb` 是开始录制前的最低可用空间，示例预留 20 GB；`startup_timeout_sec` 是等待全部话题出现且 rosbag2 建立订阅的秒数。
 
 在已加载 ROS 2 环境的终端运行：
 
@@ -706,5 +706,7 @@ python3 tools/episode_recorder/episode_recorder.py discard --config /path/to/con
 ```
 
 `--metadata` 是任意 JSON 对象，省略时为空对象。一个暂存 Episode 需在 `stop` 后选择 `save` 或 `discard`；`save` 仅接受所有配置话题均有消息且 SQLite 检查通过的录制，成功后写入连续编号目录 `episode_000001` 等。停止后若服务重启，可继续保存已核验的暂存录制；意外中断的录制会标记为 `interrupted`，需检查并丢弃。`status` 给出当前状态及剩余磁盘空间。`frame_topics` 分别按消息头时间统计各路图像的间隔、异常和估计缺帧数，不假设相机之间同步；若知道某路实际帧率，可在 `expected_fps` 对象中以话题名指定，否则以该路正时间间隔的中位数估计基准，估计缺帧数仅供诊断。
+
+ROS 2 服务为 `/collection/start`（`piper_msgs/srv/StartEpisode`，请求含 `mode`、`task`、`skill`、`metadata_json`）及 `/collection/stop`、`/collection/save`、`/collection/discard`、`/collection/status`（`std_srvs/srv/Trigger`，响应 `message` 为 JSON）。`/collection/events` 为 `std_msgs/msg/String`，其 `data` 是含 `episode_id`、`event`、`time`（Unix 纳秒）的 JSON；录制开始、结束和录制中异常事件写入 bag，保存及丢弃事件写入 Episode 元数据，丢弃元数据保存在输出目录的 `discarded/`。
 
 rosbag2 SQLite 的 `messages.timestamp` 是录制端接收时间。原始消息的 `header.stamp`（若该消息类型有消息头）保留在 CDR 消息体中，录制器不会改写；两种时间不可混用。

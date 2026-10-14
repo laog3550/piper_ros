@@ -18,6 +18,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PiperTeleopStatusMsg.msg"
   "msg/PiperDirectCanFrame.msg"
   "srv/Enable.srv"
+  "srv/StartEpisode.srv"
   DEPENDENCIES std_msgs
 )
 

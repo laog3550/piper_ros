@@ -18,6 +18,9 @@ import time
 import uuid
 
 import rclpy
+from piper_msgs.srv import StartEpisode
+from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
 
 def atomic_json(path, data):
@@ -98,7 +101,12 @@ class Recorder:
         self.root.mkdir(parents=True, exist_ok=True)
         self.staging = self.root / ".staging"
         self.staging.mkdir(exist_ok=True)
-        self.topics = config["topics"]
+        self.discarded = self.root / "discarded"
+        self.discarded.mkdir(exist_ok=True)
+        self.events_topic = "/collection/events"
+        self.topics = list(config["topics"])
+        if self.events_topic not in self.topics:
+            self.topics.append(self.events_topic)
         if not self.topics or len(set(self.topics)) != len(self.topics) or any(
             not isinstance(topic, str) or not topic.startswith("/") for topic in self.topics
         ):
@@ -118,17 +126,54 @@ class Recorder:
         self.lock = (self.root / ".recorder.lock").open("w")
         fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         self.node = rclpy.create_node("piper_episode_manager")
+        self.event_publisher = self.node.create_publisher(String, self.events_topic, 10)
         self.process = None
         self.current = None
         self._recover()
+        self.node.create_service(StartEpisode, "/collection/start", self._service_start)
+        for action in ("stop", "save", "discard", "status"):
+            self.node.create_service(Trigger, f"/collection/{action}", self._trigger(action))
+
+    def _service_start(self, request, response):
+        try:
+            fields = json.loads(request.metadata_json or "{}")
+            result = self.start({"mode": request.mode, "task": request.task,
+                                 "skill": request.skill, "metadata": fields})
+            response.success = True
+            response.result_json = json.dumps(result, ensure_ascii=False)
+        except (ValueError, OSError, KeyError, sqlite3.Error) as error:
+            response.success = False
+            response.result_json = json.dumps({"error": str(error)}, ensure_ascii=False)
+        return response
+
+    def _trigger(self, action):
+        def callback(_request, response):
+            try:
+                response.message = json.dumps(getattr(self, action)(), ensure_ascii=False)
+                response.success = True
+            except (ValueError, OSError, KeyError, sqlite3.Error) as error:
+                response.message = json.dumps({"error": str(error)}, ensure_ascii=False)
+                response.success = False
+            return response
+        return callback
+
+    def _event(self, name):
+        event = {"episode_id": self.metadata["episode_id"], "event": name,
+                 "time": time.time_ns(), "time_unit": "unix_ns"}
+        self.metadata.setdefault("events", []).append(event)
+        self._write_current()
+        self.event_publisher.publish(String(data=json.dumps(event, ensure_ascii=False)))
 
     def _recover(self):
         pending = []
         for directory in sorted(self.staging.iterdir()):
-            metadata_file = directory / "episode.json"
-            if not directory.is_dir() or not metadata_file.exists():
+            if not directory.is_dir():
                 continue
-            metadata = load_json(metadata_file)
+            metadata_file = directory / "episode.json"
+            metadata = load_json(metadata_file) if metadata_file.exists() else {
+                "schema_version": 1, "episode_id": directory.name, "state": "starting",
+                "error": "暂存目录无元数据，录制服务意外中断",
+            }
             pid = metadata.get("recorder_pid")
             if pid:
                 command_file = Path(f"/proc/{pid}/cmdline")
@@ -146,6 +191,10 @@ class Recorder:
             if metadata.get("state") in ("recording", "starting"):
                 metadata["state"] = "interrupted"
                 metadata["error"] = "录制服务意外中断；请检查后丢弃或重新开始"
+                event = {"episode_id": metadata.get("episode_id", directory.name),
+                         "event": "interrupted", "time": time.time_ns(), "time_unit": "unix_ns"}
+                metadata.setdefault("events", []).append(event)
+                self.event_publisher.publish(String(data=json.dumps(event, ensure_ascii=False)))
                 atomic_json(metadata_file, metadata)
             pending.append((directory, metadata))
         if len(pending) == 1 and pending[0][1].get("state") == "stopped":
@@ -158,7 +207,7 @@ class Recorder:
         return shutil.disk_usage(self.root).free
 
     def _graph_ready(self, node_name):
-        rclpy.spin_once(self.node, timeout_sec=0.1)
+        time.sleep(0.1)
         for topic in self.topics:
             pubs = self.node.get_publishers_info_by_topic(topic)
             subs = self.node.get_subscriptions_info_by_topic(topic)
@@ -188,8 +237,10 @@ class Recorder:
         self.current.mkdir()
         self.metadata = {
             "schema_version": 1, "state": "starting", "mode": mode,
+            "episode_id": self.current.name,
             "task": task, "skill": skill if mode == "skill" else None,
             "task_metadata": fields, "topics": self.topics,
+            "frame_topics": self.frame_topics, "expected_fps": self.expected_fps,
             "started_at_unix_ns": time.time_ns(),
             "timestamp_note": "rosbag2 messages.timestamp 是接收时间；原始消息 header.stamp 保留在 CDR 消息中",
         }
@@ -205,7 +256,7 @@ class Recorder:
         except OSError as error:
             self.metadata["state"] = "failed"
             self.metadata["error"] = str(error)
-            self._write_current()
+            self._event("failed")
             raise
         finally:
             log.close()
@@ -216,12 +267,12 @@ class Recorder:
             if self._graph_ready(node_name) and (self.current / "bag").is_dir():
                 self.metadata["state"] = "recording"
                 self.metadata["ready_at_unix_ns"] = time.time_ns()
-                self._write_current()
+                self._event("started")
                 return self.status()
         self._terminate()
         self.metadata["state"] = "failed"
         self.metadata["error"] = "rosbag2 未在超时内订阅全部配置话题；见 rosbag.log"
-        self._write_current()
+        self._event("failed")
         raise ValueError(self.metadata["error"])
 
     def _terminate(self):
@@ -240,8 +291,10 @@ class Recorder:
         if self.process is None or self.process.poll() is not None:
             self.metadata["state"] = "interrupted"
             self.metadata["error"] = "rosbag2 已意外退出"
-            self._write_current()
+            self._event("interrupted")
             raise ValueError(self.metadata["error"])
+        self._event("stopped")
+        time.sleep(0.15)
         self._terminate()
         self.metadata["stopped_at_unix_ns"] = time.time_ns()
         try:
@@ -251,13 +304,15 @@ class Recorder:
         except (ValueError, sqlite3.Error) as error:
             self.metadata["state"] = "failed"
             self.metadata["error"] = str(error)
+            self._event("failed")
         self._write_current()
         return self.status()
 
     def save(self):
         if self.current is None or self.metadata["state"] != "stopped":
             raise ValueError("只能保存已停止且通过完整性核验的 Episode")
-        inspect_bag(self.current / "bag", self.topics, self.frame_topics, self.expected_fps)
+        inspect_bag(self.current / "bag", self.metadata["topics"],
+                    self.metadata.get("frame_topics", []), self.metadata.get("expected_fps", {}))
         counter = self.root / ".next_id"
         stored = int(counter.read_text()) if counter.exists() else 1
         existing = [int(p.name[8:]) for p in self.root.glob("episode_[0-9]*") if p.name[8:].isdigit()]
@@ -266,7 +321,7 @@ class Recorder:
         self.metadata["state"] = "saved"
         self.metadata["episode_number"] = number
         self.metadata["saved_at_unix_ns"] = time.time_ns()
-        self._write_current()
+        self._event("saved")
         self.current.rename(destination)
         atomic_json(counter, number + 1)
         self.current = None
@@ -275,14 +330,25 @@ class Recorder:
     def discard(self):
         if self.current is not None:
             self._terminate()
+            self.metadata["state"] = "discarded"
+            self._event("discarded")
+            metadata = self.metadata
             shutil.rmtree(self.current)
+            atomic_json(self.discarded / f"{metadata['episode_id']}.json", metadata)
             self.current = None
             return {"state": "discarded"}
         directories = sorted(p for p in self.staging.iterdir() if p.is_dir())
         if not directories:
             raise ValueError("没有可丢弃的 Episode")
         for directory in directories:
+            metadata = load_json(directory / "episode.json")
+            metadata["state"] = "discarded"
+            event = {"episode_id": metadata.get("episode_id", directory.name),
+                     "event": "discarded", "time": time.time_ns(), "time_unit": "unix_ns"}
+            metadata.setdefault("events", []).append(event)
+            self.event_publisher.publish(String(data=json.dumps(event, ensure_ascii=False)))
             shutil.rmtree(directory)
+            atomic_json(self.discarded / f"{event['episode_id']}.json", metadata)
         return {"state": "discarded", "count": len(directories)}
 
     def status(self):
@@ -290,12 +356,13 @@ class Recorder:
             if self.process and self.process.poll() is not None and self.metadata["state"] == "recording":
                 self.metadata["state"] = "interrupted"
                 self.metadata["error"] = "rosbag2 意外退出"
-                self._write_current()
+                self._event("interrupted")
             if self.metadata["state"] == "recording" and self._available() < self.min_free_bytes:
-                self._terminate()
                 self.metadata["state"] = "failed"
                 self.metadata["error"] = "剩余磁盘空间低于配置下限，录制已停止"
-                self._write_current()
+                self._event("failed")
+                time.sleep(0.15)
+                self._terminate()
             return {"state": self.metadata["state"], "path": str(self.current),
                     "metadata": self.metadata, "free_bytes": self._available()}
         pending = [str(p) for p in self.staging.iterdir() if p.is_dir()]
@@ -303,6 +370,9 @@ class Recorder:
 
     def close(self):
         if self.process:
+            if self.current and self.metadata["state"] == "recording":
+                self._event("interrupted")
+                time.sleep(0.15)
             self._terminate()
             if self.current:
                 self.metadata["state"] = "interrupted"
@@ -333,6 +403,7 @@ def serve(config):
     signal.signal(signal.SIGINT, shutdown)
     try:
         while running:
+            rclpy.spin_once(recorder.node, timeout_sec=0)
             try:
                 connection, _ = server.accept()
             except socket.timeout:

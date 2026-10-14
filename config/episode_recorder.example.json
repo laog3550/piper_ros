@@ -26,6 +26,6 @@
     "/camera_top/D455/color/image_raw",
     "/camera_top/D455/aligned_depth_to_color/image_raw"
   ],
-  "min_free_gb": 1,
+  "min_free_gb": 20,
   "startup_timeout_sec": 15
 }

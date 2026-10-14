@@ -1,0 +1,7 @@
+string mode
+string task
+string skill
+string metadata_json
+---
+bool success
+string result_json
