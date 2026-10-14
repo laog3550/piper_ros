@@ -1,0 +1,29 @@
+{
+  "image_hz": 10,
+  "joint_hz": 30,
+  "cameras": {
+    "left": {
+      "rgb": {"topic": "/replace/left/rgb", "type": "Image"},
+      "depth": {"topic": "/replace/left/depth", "type": "Image", "meter": 1000}
+    },
+    "right": {
+      "rgb": {"topic": "/replace/right/rgb", "type": "Image"},
+      "depth": {"topic": "/replace/right/depth", "type": "Image", "meter": 1000}
+    },
+    "front": {
+      "rgb": {"topic": "/replace/front/rgb", "type": "Image"},
+      "depth": {"topic": "/replace/front/depth", "type": "Image", "meter": 1000}
+    }
+  },
+  "arms": {
+    "left": {
+      "target": {"topic": "/replace/left/target", "type": "JointState"},
+      "actual": {"topic": "/replace/left/actual", "type": "JointState"}
+    },
+    "right": {
+      "target": {"topic": "/replace/right/target", "type": "JointState"},
+      "actual": {"topic": "/replace/right/actual", "type": "JointState"}
+    }
+  },
+  "events": {"topic": "/replace/episode/events", "type": "String"}
+}

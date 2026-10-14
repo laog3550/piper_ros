@@ -710,3 +710,25 @@ python3 tools/episode_recorder/episode_recorder.py discard --config /path/to/con
 ROS 2 服务为 `/collection/start`（`piper_msgs/srv/StartEpisode`，请求含 `mode`、`task`、`skill`、`metadata_json`）及 `/collection/stop`、`/collection/save`、`/collection/discard`、`/collection/status`（`std_srvs/srv/Trigger`，响应 `message` 为 JSON）。`/collection/events` 为 `std_msgs/msg/String`，其 `data` 是含 `episode_id`、`event`、`time`（Unix 纳秒）的 JSON；录制开始、结束和录制中异常事件写入 bag，保存及丢弃事件写入 Episode 元数据，丢弃元数据保存在输出目录的 `discarded/`。
 
 rosbag2 SQLite 的 `messages.timestamp` 是录制端接收时间。原始消息的 `header.stamp`（若该消息类型有消息头）保留在 CDR 消息体中，录制器不会改写；两种时间不可混用。
+
+## ROS 2 episode 的 Rerun 只读显示
+
+`tools/rerun_bridge.py` 是独立的 ROS 2 进程，只订阅配置的话题；关闭 Rerun 或此进程不会停止 rosbag2 录制。先复制 `tools/rerun_bridge.example.json`，将所有 `/replace/...` 话题改为实际话题，并按消息类型设置 `type`。RGB 支持 `Image` 和 `CompressedImage`，深度支持 `Image`（`16UC1` 的 `meter` 通常为 1000，`32FC1` 为 1）；关节指令与反馈支持 `JointState` 或 `Float64MultiArray`，后者可配置 `joint_names`；事件使用 `String`。`image_hz` 与 `joint_hz` 只限制显示频率，不改变原始话题或录制。
+
+在提供 ROS 2 Humble 的系统上，使用隔离环境安装经验证的 Rerun 版本：
+
+```bash
+source /opt/ros/humble/setup.bash
+/usr/bin/python3 -m venv --system-site-packages /tmp/piper-rerun-bridge-venv
+/tmp/piper-rerun-bridge-venv/bin/python -m pip install rerun-sdk==0.39.0
+/tmp/piper-rerun-bridge-venv/bin/python tools/rerun_bridge.py --config bridge.json live
+```
+
+回放 rosbag2 episode，或写出可稍后打开的 Rerun 文件：
+
+```bash
+/tmp/piper-rerun-bridge-venv/bin/python tools/rerun_bridge.py --config bridge.json replay /path/to/episode
+/tmp/piper-rerun-bridge-venv/bin/python tools/rerun_bridge.py --config bridge.json --save /tmp/episode.rrd replay /path/to/episode
+```
+
+MCAP 格式的包在 `replay` 后加 `--storage-id mcap`，并确保系统已安装对应的 rosbag2 存储插件。
