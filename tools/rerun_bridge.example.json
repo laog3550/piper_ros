@@ -3,26 +3,26 @@
   "joint_hz": 30,
   "cameras": {
     "left": {
-      "rgb": {"topic": "/replace/left/rgb", "type": "Image"},
-      "depth": {"topic": "/replace/left/depth", "type": "Image", "meter": 1000}
+      "rgb": {"topic": "/camera_wrist_left/color/image_raw", "type": "Image"},
+      "depth": {"topic": "/camera_wrist_left/depth/image_raw", "type": "Image", "meter": 1000}
     },
     "right": {
-      "rgb": {"topic": "/replace/right/rgb", "type": "Image"},
-      "depth": {"topic": "/replace/right/depth", "type": "Image", "meter": 1000}
+      "rgb": {"topic": "/camera_wrist_right/color/image_raw", "type": "Image"},
+      "depth": {"topic": "/camera_wrist_right/depth/image_raw", "type": "Image", "meter": 1000}
     },
     "front": {
-      "rgb": {"topic": "/replace/front/rgb", "type": "Image"},
-      "depth": {"topic": "/replace/front/depth", "type": "Image", "meter": 1000}
+      "rgb": {"topic": "/camera_top/D455/color/image_raw", "type": "Image"},
+      "depth": {"topic": "/camera_top/D455/aligned_depth_to_color/image_raw", "type": "Image", "meter": 1000}
     }
   },
   "arms": {
     "left": {
-      "target": {"topic": "/replace/left/target", "type": "JointState"},
-      "actual": {"topic": "/replace/left/actual", "type": "JointState"}
+      "target": {"topic": "/piper_direct/left/master_target", "type": "PiperDirectCanFrame"},
+      "actual": {"topic": "/piper_direct/left/slave_feedback", "type": "PiperDirectCanFrame"}
     },
     "right": {
-      "target": {"topic": "/replace/right/target", "type": "JointState"},
-      "actual": {"topic": "/replace/right/actual", "type": "JointState"}
+      "target": {"topic": "/piper_direct/right/master_target", "type": "PiperDirectCanFrame"},
+      "actual": {"topic": "/piper_direct/right/slave_feedback", "type": "PiperDirectCanFrame"}
     }
   },
   "events": {"topic": "/replace/episode/events", "type": "String"}

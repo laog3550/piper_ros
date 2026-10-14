@@ -713,7 +713,7 @@ rosbag2 SQLite 的 `messages.timestamp` 是录制端接收时间。原始消息�
 
 ## ROS 2 episode 的 Rerun 只读显示
 
-`tools/rerun_bridge.py` 是独立的 ROS 2 进程，只订阅配置的话题；关闭 Rerun 或此进程不会停止 rosbag2 录制。先复制 `tools/rerun_bridge.example.json`，将所有 `/replace/...` 话题改为实际话题，并按消息类型设置 `type`。RGB 支持 `Image` 和 `CompressedImage`，深度支持 `Image`（`16UC1` 的 `meter` 通常为 1000，`32FC1` 为 1）；关节指令与反馈支持 `JointState` 或 `Float64MultiArray`，后者可配置 `joint_names`；事件使用 `String`。`image_hz` 与 `joint_hz` 只限制显示频率，不改变原始话题或录制。
+`tools/rerun_bridge.py` 是独立的 ROS 2 进程，只订阅配置的话题；关闭 Rerun 或此进程不会停止 rosbag2 录制。先复制 `tools/rerun_bridge.example.json`，按实际事件话题替换 `/replace/episode/events`。三路相机话题与双臂 CAN 话题已填入示例。RGB 支持 `Image` 和 `CompressedImage`，深度支持 `Image`（`16UC1` 的 `meter` 通常为 1000，`32FC1` 为 1）；机械臂支持 `PiperDirectCanFrame`、`JointState` 或 `Float64MultiArray`；事件使用 `String`。CAN 帧的两个关节按 `joint_index` 独立记在各自的接收时间，夹爪帧显示开口与力矩，不将不同帧假设成同一时刻的完整状态。`image_hz` 与 `joint_hz` 只限制显示频率，不改变原始话题或录制。
 
 在提供 ROS 2 Humble 的系统上，使用隔离环境安装经验证的 Rerun 版本：
 
