@@ -688,3 +688,23 @@ sudo apt install ros-$ROS_DISTRO-robot-state-publisher
 ```shell
 sudo apt install ros-$ROS_DISTRO-xacro
 ```
+
+# Episode 录制（ROS 2 Humble）
+
+独立只读录制器位于 `tools/episode_recorder/episode_recorder.py`，使用已安装的 `ros2 bag record` 和 SQLite 后端，不控制机械臂。将 `config/episode_recorder.example.json` 复制为自己的 JSON 配置，并`topics` 已列出当前 CAN 和三台 RGB-D 的话题契约；使用前请确认话题正在发布。`min_free_gb` 是开始录制前的最低可用空间，`startup_timeout_sec` 是等待全部话题出现且 rosbag2 建立订阅的秒数。
+
+在已加载 ROS 2 环境的终端运行：
+
+```bash
+python3 tools/episode_recorder/episode_recorder.py serve --config /path/to/config.json
+python3 tools/episode_recorder/episode_recorder.py start --config /path/to/config.json --mode task --task pickup --metadata /path/to/task.json
+python3 tools/episode_recorder/episode_recorder.py start --config /path/to/config.json --mode skill --task pickup --skill reach --metadata /path/to/task.json
+python3 tools/episode_recorder/episode_recorder.py status --config /path/to/config.json
+python3 tools/episode_recorder/episode_recorder.py stop --config /path/to/config.json
+python3 tools/episode_recorder/episode_recorder.py save --config /path/to/config.json
+python3 tools/episode_recorder/episode_recorder.py discard --config /path/to/config.json
+```
+
+`--metadata` 是任意 JSON 对象，省略时为空对象。一个暂存 Episode 需在 `stop` 后选择 `save` 或 `discard`；`save` 仅接受所有配置话题均有消息且 SQLite 检查通过的录制，成功后写入连续编号目录 `episode_000001` 等。停止后若服务重启，可继续保存已核验的暂存录制；意外中断的录制会标记为 `interrupted`，需检查并丢弃。`status` 给出当前状态及剩余磁盘空间。`frame_topics` 分别按消息头时间统计各路图像的间隔、异常和估计缺帧数，不假设相机之间同步；若知道某路实际帧率，可在 `expected_fps` 对象中以话题名指定，否则以该路正时间间隔的中位数估计基准，估计缺帧数仅供诊断。
+
+rosbag2 SQLite 的 `messages.timestamp` 是录制端接收时间。原始消息的 `header.stamp`（若该消息类型有消息头）保留在 CDR 消息体中，录制器不会改写；两种时间不可混用。

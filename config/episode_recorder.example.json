@@ -1,0 +1,31 @@
+{
+  "output_dir": "/tmp/piper_episodes",
+  "topics": [
+    "/piper_direct/left/master_target",
+    "/piper_direct/left/slave_feedback",
+    "/piper_direct/right/master_target",
+    "/piper_direct/right/slave_feedback",
+    "/camera_wrist_left/color/image_raw",
+    "/camera_wrist_left/color/camera_info",
+    "/camera_wrist_left/depth/image_raw",
+    "/camera_wrist_left/depth/camera_info",
+    "/camera_wrist_right/color/image_raw",
+    "/camera_wrist_right/color/camera_info",
+    "/camera_wrist_right/depth/image_raw",
+    "/camera_wrist_right/depth/camera_info",
+    "/camera_top/D455/color/image_raw",
+    "/camera_top/D455/color/camera_info",
+    "/camera_top/D455/aligned_depth_to_color/image_raw",
+    "/camera_top/D455/aligned_depth_to_color/camera_info"
+  ],
+  "frame_topics": [
+    "/camera_wrist_left/color/image_raw",
+    "/camera_wrist_left/depth/image_raw",
+    "/camera_wrist_right/color/image_raw",
+    "/camera_wrist_right/depth/image_raw",
+    "/camera_top/D455/color/image_raw",
+    "/camera_top/D455/aligned_depth_to_color/image_raw"
+  ],
+  "min_free_gb": 1,
+  "startup_timeout_sec": 15
+}
