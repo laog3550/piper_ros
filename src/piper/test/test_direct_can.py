@@ -96,6 +96,11 @@ class DirectCanDecodeTest(unittest.TestCase):
         fake_rclpy.shutdown = mock.Mock()
         fake_rclpy_node = types.ModuleType('rclpy.node')
         fake_rclpy_node.Node = FakeNode
+        fake_rclpy_core = types.ModuleType('rclpy._rclpy_pybind11')
+        fake_rclpy_core.RCLError = type('RCLError', (RuntimeError,), {})
+        fake_rclpy_executors = types.ModuleType('rclpy.executors')
+        fake_rclpy_executors.ExternalShutdownException = type(
+            'ExternalShutdownException', (RuntimeError,), {})
         fake_messages = types.ModuleType('piper_msgs.msg')
         fake_messages.PiperDirectCanFrame = Message
 
@@ -110,6 +115,8 @@ class DirectCanDecodeTest(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         with mock.patch.dict(sys.modules, {'rclpy': fake_rclpy,
                                            'rclpy.node': fake_rclpy_node,
+                                           'rclpy._rclpy_pybind11': fake_rclpy_core,
+                                           'rclpy.executors': fake_rclpy_executors,
                                            'piper_msgs.msg': fake_messages}):
             spec.loader.exec_module(module)
             with mock.patch.object(can, 'Bus', return_value=bus) as bus_factory:

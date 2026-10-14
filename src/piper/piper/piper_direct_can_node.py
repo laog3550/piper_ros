@@ -5,6 +5,8 @@ import threading
 
 import can
 import rclpy
+from rclpy._rclpy_pybind11 import RCLError
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from piper_msgs.msg import PiperDirectCanFrame
 
@@ -38,6 +40,9 @@ class PiperDirectCanNode(Node):
                     frame = bus.recv(timeout=0.2)
                     if frame is not None:
                         self._publish_frame(channel, frame, parser)
+        except RCLError:
+            if rclpy.ok():
+                raise
         except can.CanError as exc:
             self.get_logger().error('CAN listener {} stopped: {}'.format(channel, exc))
             self._stop.set()
@@ -71,6 +76,8 @@ def main(args=None):
     node = PiperDirectCanNode()
     try:
         rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
         node.destroy_node()
         if rclpy.ok():
