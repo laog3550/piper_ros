@@ -1,0 +1,9 @@
+std_msgs/Header header
+uint32 can_id
+uint8[8] raw_data
+uint8 joint_index
+float64[2] joint_position_rad
+float64 gripper_position_m
+float64 gripper_effort_nm
+uint8 gripper_status
+uint8 gripper_set_zero

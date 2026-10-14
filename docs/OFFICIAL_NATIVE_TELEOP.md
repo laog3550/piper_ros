@@ -258,3 +258,26 @@ sysfs 与 udev 中 `can_left` 对应 USB 端口 `1-13:1.0` 和映射文件中的
 
 旧上位机桥接方案和实测记录保存在[历史实现方案](TWO_CAN_HOST_TELEOP_IMPLEMENTATION.md)，
 不能按其中的 `--send --workspace-clear` 命令启动当前入口。
+
+## 只读 ROS 2 数据接口
+
+需要录制 episode 或在 Rerun 中查看数据时，可另启只读节点：
+
+```bash
+ros2 run piper piper_direct_can
+```
+
+节点只监听 `can_left` 和 `can_right`，不发送 CAN 帧，也不改变上文的实体停机流程。
+每条标准 8 字节数据帧独立发布为 `piper_msgs/msg/PiperDirectCanFrame`：
+
+| 话题 | 内容 | CAN ID |
+|---|---|---|
+| `/piper_direct/{left,right}/master_target` | 主臂目标指令 | `0x155`～`0x157`、`0x159` |
+| `/piper_direct/{left,right}/slave_feedback` | 从臂实测反馈 | `0x2A5`～`0x2A8` |
+
+`header.stamp` 是 SocketCAN 接收该帧的 Unix 时间，`header.frame_id` 是 CAN 接口名。
+`can_id`、`raw_data` 保留原始 ID 和 8 字节数据供复核。关节帧的 `joint_index`
+为首个关节编号（1、3、5），`joint_position_rad` 是该关节对的弧度值；夹爪帧的
+`joint_index` 为 0，`gripper_position_m` 单位为米，`gripper_effort_nm` 单位为 N·m。
+`gripper_status` 为原始状态字节；目标帧的 `gripper_set_zero` 为设零字节。
+无关字段填零。各帧是独立观测，不代表同一时刻的完整关节状态。
