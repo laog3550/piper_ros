@@ -38,6 +38,7 @@ setup(
             'piper_arm_enable = piper.piper_arm_enable:main',
             'piper_two_can_teleop = piper.piper_two_can_teleop:main',
             'piper_can_quality = piper.piper_can_quality:main',
+            'piper_direct_can = piper.piper_direct_can_node:main',
         ],
     },
 )
