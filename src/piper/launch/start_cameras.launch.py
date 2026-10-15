@@ -12,6 +12,7 @@ from launch.actions import (
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
 
 ROLES = ('left_wrist', 'right_wrist', 'top')
@@ -42,7 +43,6 @@ def _start_cameras(context):
     for index, role in enumerate(selected):
         camera = mapping[role]
         if role == 'top':
-            package, filename = 'realsense2_camera', 'rs_launch.py'
             arguments = {
                 'camera_namespace': camera['camera_name'],
                 'camera_name': 'D455',
@@ -57,35 +57,46 @@ def _start_cameras(context):
                 'enable_infra2': 'false',
                 'pointcloud.enable': 'false',
             }
-        else:
-            package, filename = 'orbbec_camera', 'gemini_301_series.launch.py'
-            arguments = {
-                'camera_name': camera['camera_name'],
-                'serial_number': camera['serial'],
-                'color_width': '640',
-                'color_height': '480',
-                'color_fps': '30',
-                'depth_width': '640',
-                'depth_height': '480',
-                'depth_fps': '30',
-                'enable_color': 'true',
-                'enable_depth': 'true',
-                'depth_registration': 'true',
-                'enable_left_ir': 'false',
-                'enable_right_ir': 'false',
-                'enable_frame_sync': 'true',
-                'enable_point_cloud': 'false',
-                'color.image_raw.enable_pub_plugins': '["image_transport/raw"]',
-                'depth.image_raw.enable_pub_plugins': '["image_transport/raw"]',
-            }
-        launch_path = Path(get_package_share_directory(package)) / 'launch' / filename
-        # Each vendor launch must have an isolated argument scope.
-        group = GroupAction(actions=[
-            LogInfo(msg=f'启动 {role}：{camera["serial"]}，640x480 @ 30 fps RGB-D 流'),
-            IncludeLaunchDescription(
+            launch_path = Path(get_package_share_directory('realsense2_camera')) / 'launch' / 'rs_launch.py'
+            camera_action = IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(str(launch_path)),
                 launch_arguments=arguments.items(),
-            ),
+            )
+        else:
+            parameters = {
+                'camera_name': camera['camera_name'],
+                'serial_number': camera['serial'],
+                'color_width': 640,
+                'color_height': 480,
+                'color_fps': 30,
+                'color_format': 'YUYV',
+                'depth_width': 640,
+                'depth_height': 480,
+                'depth_fps': 30,
+                'depth_format': 'Y16',
+                'enable_color': True,
+                'enable_depth': True,
+                'depth_registration': True,
+                'enable_left_ir': False,
+                'enable_right_ir': False,
+                'enable_frame_sync': True,
+                'enable_point_cloud': False,
+                'color.image_raw.enable_pub_plugins': ['image_transport/raw'],
+                'depth.image_raw.enable_pub_plugins': ['image_transport/raw'],
+            }
+            camera_action = Node(
+                package='orbbec_camera',
+                executable='orbbec_camera_node',
+                namespace=camera['camera_name'],
+                name=camera['camera_name'],
+                parameters=[parameters],
+                # The terminal signals launch; launch then signals this process once.
+                prefix='setsid',
+                output='screen',
+            )
+        group = GroupAction(actions=[
+            LogInfo(msg=f'启动 {role}：{camera["serial"]}，640x480 @ 30 fps RGB-D 流'),
+            camera_action,
         ], scoped=True, forwarding=False)
         actions.append(TimerAction(period=float(index * 4), actions=[group]))
     return actions
