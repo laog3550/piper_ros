@@ -45,3 +45,21 @@
 运行 `python3 tools/vla_contract/validate_contract.py --self-test`：生成内存中的合成单臂 `pick`、`place` 和双臂扩展对象，正例应通过；维度、关节顺序、非有限数、缺图像、时间倒置、引用和版本不匹配等负例应被拒绝。运行 `python3 tools/vla_contract/validate_contract.py sample.json` 可检查自备的三对象 JSON 文件。离线接口验收要求：全部样本通过结构检查、负例全部被拒绝、每个样本的原始 bag/图像/标定/归一化版本可追溯，并单独统计缺源与超窗快照数量。零退出码仅表示接口结构检查通过；当前校验器不读取图像 `uri`，不核对 bag 内容、标定文件或动作物理可行性。验收记录应保存输入文件摘要、程序 commit、输出及版本标识。
 
 离线接口通过后仍需依次完成：S0 控制模式、限位、停机与安全路径；S1 标定、跨源时间误差和数据质量；S2 单臂 `pick`/`place` 隔离测试集与逐级实机验收；S3 左右臂独立技能与共享空间检查。对象数量、类别和桌面范围按指南 MVP 目标准备，但没有数据或机械臂时不得宣称技能成功率、同步精度或安全能力。
+
+## 官方 π0.5-DROID 离线基线边界
+
+固定上游源码为 [openpi commit `215abfb217dbac7d5f1273282331b9b1866c0479`](https://github.com/Physical-Intelligence/openpi/tree/215abfb217dbac7d5f1273282331b9b1866c0479)，依赖按该 commit 的 `uv.lock` 安装，配置为 `pi05_droid`，权重路径为 `gs://openpi-assets/checkpoints/pi05_droid`。上游代码采用 Apache-2.0，仓库另含 `LICENSE_GEMMA.txt` 中的 Gemma 使用条款；获取、使用及再分发权重前应核对这些条款。该 checkpoint 是 DROID 策略，不是 Piper 策略。
+
+该配置的模型内部 action 为 `15×32`，上游 `DroidOutputs` 截取前 8 维，公开 DROID 执行示例把这 8 维解释为 **7 维关节速度加 1 维夹爪位置**；上游示例中的旧 `10×8` 注释与当前 `pi05_droid` 配置的 15 步不一致，以固定 commit 的配置与运行输出为准。DROID 输入需要 7 维关节位置和 1 维夹爪位置，而 Piper 契约状态只有 6 个关节角加夹爪开口。两个机器人的关节数、动作语义和夹爪标度不同，不能直接重排、补零、积分或把原输出标为 `absolute_joint_position_7`。官方 DROID 图像槽位为一张外部 RGB 和一张腕部 RGB，第三槽位用掩码屏蔽；本契约单臂 RGB 可供图像预检查，但不能据此宣称策略适配完成。
+
+`tools/vla_contract/openpi05_offline.py` 提供两个互不混淆的入口：
+
+```bash
+python3 tools/vla_contract/openpi05_offline.py --preflight sample_input.json --image-dir /path/to/frames --now-ns 1800000000105000000 --max-age-ns 10000000 --max-skew-ns 10000000
+python3 tools/vla_contract/openpi05_offline.py --smoke --openpi-root /path/to/openpi --checkpoint /path/to/pi05_droid
+python3 -m unittest discover -s tools/vla_contract -p 'test_openpi05_offline.py' -v
+```
+
+`sample_input.json` 顶层只含 `observation` 和 `skill_goal`，图像 `uri` 为 `--image-dir` 内的本地相对路径。预检查要求契约版本、引用、RGB 文件、`640×480`、单臂、源间 Header 偏差与明确的最大观测年龄均通过；结果只返回校验元数据和缺失的语义桥接项，**不会生成 `action_chunk`**。`--smoke` 仅以官方随机 DROID 样例检查完整本地 checkpoint 的输出形状、有限性与首轮耗时；随机输出不可用作 Piper 策略。两种入口都不连接 ROS/CAN。
+
+本次环境检查：Ubuntu 目标机的 RTX 5880 Ada 显存约 48 GB，驱动 595.99.02，磁盘空闲约 822 GB；但系统 Python 为 3.10.12，未找到 Python 3.11 或 `uv`，未发现本地 `pi05_droid` 权重。上游要求 Python ≥3.11，并建议 `uv`；公开对象清单合计约 12.43 GB。尚无本项目真实示教、对应的标定版本、归一化统计与 Piper 适配 checkpoint。只有这些数据和经过验证的动作空间转换具备后，才可能生成符合本契约的真实动作块；离线 smoke 不能替代该验证。
