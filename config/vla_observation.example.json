@@ -1,0 +1,15 @@
+{
+  "time_domain": "unix_ns",
+  "calibration_version": "UNVERIFIED_REPLACE_AFTER_SITE_CALIBRATION",
+  "normalization_version": "UNVERIFIED_REPLACE_WITH_DATASET_VERSION",
+  "max_age_ns": 150000000,
+  "max_cross_camera_skew_ns": 50000000,
+  "max_rgb_depth_skew_ns": 10000000,
+  "max_info_age_ns": 1000000000,
+  "depth_scale_m_per_unit": {
+    "top": 0.001,
+    "left_wrist": 0.001,
+    "right_wrist": 0.001
+  },
+  "roi_xywh": [300, 220, 40, 40]
+}
