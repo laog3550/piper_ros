@@ -98,3 +98,21 @@ python3 -m venv /tmp/piper-lerobot-env
 `task_orchestrator.py` 使用 `OBSERVE` → `PLAN` → `EXECUTE` → `VERIFY` → `RECOVER` / `DONE` / `SAFE_STOP` 的状态机，`Blackboard` 记录当前臂、技能、尝试次数、观测、目标、动作、截止时间和状态历史。观测器、策略、评估器、执行器和时钟均以接口注入；执行器仅能收到 `ActionSupervisor.tick()` 返回的单个获准目标。每次重试重新观测、重新规划，且再次经过完整安全预检。`SnapshotObserverAdapter` 可接收观测分支 `SnapshotBuilder.build()` 的返回记录，以不晚于当前时间的最新顶部 RGB Header 为锚点，并要求另行提供独立反馈来源；无效快照和实时 `ros://` URI 直接拒绝。人工接管成功取消后进入 `HUMAN_TAKEOVER`；取消失败时锁存 STOP。未知评估结果、碰撞风险、反馈故障及超时也进入锁存 STOP。当前仅接受 `LEFT` 或 `RIGHT` 单臂任务；左右臂可分别构造编排器，尚未提供双臂协同调度。
 
 此离线接口以同步调用模拟时间。未来接入真实策略、相机与执行设备时，仍需为可能阻塞的外部调用提供独立的超时与取消机制，并完成前述标定、安全参数和实机验收；当前代码没有驱动发送入口。
+
+## 官方 π0.5-DROID 离线基线边界
+
+固定上游源码为 [openpi commit `215abfb217dbac7d5f1273282331b9b1866c0479`](https://github.com/Physical-Intelligence/openpi/tree/215abfb217dbac7d5f1273282331b9b1866c0479)，依赖按该 commit 的 `uv.lock` 安装，配置为 `pi05_droid`，权重路径为 `gs://openpi-assets/checkpoints/pi05_droid`。上游代码采用 Apache-2.0，仓库另含 `LICENSE_GEMMA.txt` 中的 Gemma 使用条款；获取、使用及再分发权重前应核对这些条款。该 checkpoint 是 DROID 策略，不是 Piper 策略。
+
+该配置的模型内部 action 为 `15×32`，上游 `DroidOutputs` 截取前 8 维，公开 DROID 执行示例把这 8 维解释为 **7 维关节速度加 1 维夹爪位置**；上游示例中的旧 `10×8` 注释与当前 `pi05_droid` 配置的 15 步不一致，以固定 commit 的配置与运行输出为准。DROID 输入需要 7 维关节位置和 1 维夹爪位置，而 Piper 契约状态只有 6 个关节角加夹爪开口。两个机器人的关节数、动作语义和夹爪标度不同，不能直接重排、补零、积分或把原输出标为 `absolute_joint_position_7`。官方 DROID 图像槽位为一张外部 RGB 和一张腕部 RGB，第三槽位用掩码屏蔽；本契约单臂 RGB 可供图像预检查，但不能据此宣称策略适配完成。
+
+`tools/vla_contract/openpi05_offline.py` 提供两个互不混淆的入口：
+
+```bash
+python3 tools/vla_contract/openpi05_offline.py --preflight sample_input.json --image-dir /path/to/frames --now-ns 1800000000105000000 --max-age-ns 10000000 --max-skew-ns 10000000
+python3 tools/vla_contract/openpi05_offline.py --smoke --openpi-root /path/to/openpi --checkpoint /path/to/pi05_droid
+python3 -m unittest discover -s tools/vla_contract -p 'test_openpi05_offline.py' -v
+```
+
+`sample_input.json` 顶层只含 `observation` 和 `skill_goal`，图像 `uri` 为 `--image-dir` 内的本地相对路径。预检查要求契约版本、引用、RGB 文件、`640×480`、单臂、源间 Header 偏差与明确的最大观测年龄均通过；结果只返回校验元数据和缺失的语义桥接项，**不会生成 `action_chunk`**。`--smoke` 仅以官方随机 DROID 样例检查完整本地 checkpoint 的输出形状、有限性与首轮耗时；随机输出不可用作 Piper 策略。两种入口都不连接 ROS/CAN。
+
+本次环境检查：Ubuntu 目标机的 RTX 5880 Ada 显存约 48 GB，驱动 595.99.02，磁盘空闲约 822 GB；但系统 Python 为 3.10.12，未找到 Python 3.11 或 `uv`，未发现本地 `pi05_droid` 权重。上游要求 Python ≥3.11，并建议 `uv`；公开对象清单合计约 12.43 GB。尚无本项目真实示教、对应的标定版本、归一化统计与 Piper 适配 checkpoint。只有这些数据和经过验证的动作空间转换具备后，才可能生成符合本契约的真实动作块；离线 smoke 不能替代该验证。
