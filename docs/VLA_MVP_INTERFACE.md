@@ -62,4 +62,6 @@ python3 -m unittest discover -s tools/vla_contract -p 'test_openpi05_offline.py'
 
 `sample_input.json` 顶层只含 `observation` 和 `skill_goal`，图像 `uri` 为 `--image-dir` 内的本地相对路径。预检查要求契约版本、引用、RGB 文件、`640×480`、单臂、源间 Header 偏差与明确的最大观测年龄均通过；结果只返回校验元数据和缺失的语义桥接项，**不会生成 `action_chunk`**。`--smoke` 仅以官方随机 DROID 样例检查完整本地 checkpoint 的输出形状、有限性与首轮耗时；随机输出不可用作 Piper 策略。两种入口都不连接 ROS/CAN。
 
-本次环境检查：Ubuntu 目标机的 RTX 5880 Ada 显存约 48 GB，驱动 595.99.02，磁盘空闲约 822 GB；但系统 Python 为 3.10.12，未找到 Python 3.11 或 `uv`，未发现本地 `pi05_droid` 权重。上游要求 Python ≥3.11，并建议 `uv`；公开对象清单合计约 12.43 GB。尚无本项目真实示教、对应的标定版本、归一化统计与 Piper 适配 checkpoint。只有这些数据和经过验证的动作空间转换具备后，才可能生成符合本契约的真实动作块；离线 smoke 不能替代该验证。
+本次环境检查：Ubuntu 目标机的 RTX 5880 Ada 显存约 48 GB，驱动 595.99.02，磁盘空闲约 822 GB；但系统 Python 为 3.10.12，未找到 Python 3.11 或 `uv`，未发现本地 `pi05_droid` 权重。上游要求 Python ≥3.11，并建议 `uv`；公开对象清单合计约 12.43 GB。
+
+只读检查另一个工作区 `/home/mips/piper_tjp/data` 的 `metadata.yaml`：其中有 6 次录制，4 次只有相机/事件话题；`scene-a05` 的 2 次录制包含左侧 `/dataset/can_left/action_target`、`feedback_observed` 与三路 JPEG RGB。`banana-direct-a05-002` 的候选清单记录了 139 个对齐样本，但最长内部缺口为 1.235 s、`training_ready=false`，并列出反馈实体归属、夹爪零点/执行映射及最终动作节拍待核对。这些是已有的左侧候选示教材料，不能据此推断双臂或完整 `pick`/`place` 训练集已经具备。`/dataset/...` 话题与本契约话题不同，JPEG 与本契约原始 `rgb8` 帧也不同；本离线工具不会隐式转换。仍缺少经过验证的契约映射、标定版本、Piper 归一化统计与适配 checkpoint。只有这些条件和动作空间转换经验证后，才可能生成符合本契约的真实动作块；离线 smoke 不能替代该验证。上述检查没有修改 `/home/mips/piper_tjp`。
