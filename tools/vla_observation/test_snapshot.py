@@ -76,6 +76,8 @@ class SnapshotTests(unittest.TestCase):
         self.assertFalse(record["contract_observation_valid"])
         self.assertIsNone(record["observation"])
         self.assertEqual(record["sources"]["top"]["roi_depth"]["reason"], "missing_depth")
+        self.assertFalse(record["sources"]["top"]["depth"]["stale"])
+        self.assertFalse(record["sources"]["left_state"]["stale"])
         self.assertIn("left.state:missing", record["rejection_reasons"])
 
     def test_paired_rgb_wins_over_closer_unpaired_rgb(self):

@@ -52,7 +52,7 @@ def nearest(items, target, now, tolerance):
 
 def status(item, now, max_age):
     if item is None:
-        return {"valid": False, "reason": "missing", "source_timestamp_ns": None, "age_ns": None, "stale": True}
+        return {"valid": False, "reason": "missing", "source_timestamp_ns": None, "age_ns": None, "stale": False}
     age = now - item[0]
     stale = age < 0 or age > max_age
     return {"valid": not stale, "reason": "stale" if stale else None,
