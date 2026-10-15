@@ -47,6 +47,7 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <label for="instruction">语言指令</label><textarea id="instruction" maxlength="2000" placeholder="例如：把桌上的杯子放入收纳盒"></textarea>
 <div class="row"><button id="start">开始录制</button><button id="stop" class="secondary">停止录制</button></div>
 <div class="row"><div><label for="outcome">结果标签</label><select id="outcome"><option value="">请选择</option><option value="success">成功</option><option value="failure">失败</option></select></div><button id="save">保存 Episode</button><button id="discard" class="danger">丢弃 Episode</button></div>
+<p class="muted">结果标签只记录任务成败；夹爪映射未经核对时，七维示教向量无效，不可用于训练。</p>
 <p id="notice" class="notice" role="status"></p>
 </section>
 <section><h2>已保存 Episode</h2><div class="tablewrap"><table><thead><tr><th>编号</th><th>任务</th><th>语言指令</th><th>结果</th><th>开始时间</th><th>路径</th></tr></thead><tbody id="episodes"></tbody></table></div></section>

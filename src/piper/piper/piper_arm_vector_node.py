@@ -56,7 +56,7 @@ class PiperArmVectorNode(Node):
             msg.missing = value['missing']
             msg.stale = value['stale']
             msg.time_inconsistent = value['time_inconsistent']
-            msg.valid = value['valid']
+            msg.valid = value['valid'] and self._gripper_verified
             msg.gripper_mapping_verified = self._gripper_verified
             publisher.publish(msg)
 

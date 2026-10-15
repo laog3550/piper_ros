@@ -1,4 +1,4 @@
-# 四帧组成的七维关节向量；valid 只表示帧完整、时间一致且数值有限，不表示实机标定完成。
+# 四帧组成的七维关节向量；valid 要求帧完整、时间一致、数值有限且夹爪映射已核对。
 # header.stamp 为四帧中最新的原始 CAN 时间戳；无帧时为零。frame_id 为 CAN 接口名。
 std_msgs/Header header
 # 原始输入话题，区分主臂示教目标与从臂实测反馈。
@@ -13,5 +13,5 @@ bool[4] missing
 bool[4] stale
 bool time_inconsistent
 bool valid
-# 仅现场核对夹爪换算、零位和符号后才能置 true；不改变 valid 的结构含义。
+# 仅现场核对夹爪换算、零位和符号后才能置 true；默认 false，使 valid 保持 false。
 bool gripper_mapping_verified
