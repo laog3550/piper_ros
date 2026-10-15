@@ -2,20 +2,31 @@
 
 import json
 import os
+import signal
 from pathlib import Path
 
-from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
-    DeclareLaunchArgument, GroupAction, IncludeLaunchDescription,
-    LogInfo, OpaqueFunction, TimerAction,
+    DeclareLaunchArgument, EmitEvent, GroupAction, LogInfo,
+    OpaqueFunction, RegisterEventHandler, TimerAction,
 )
-from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.event_handlers import OnShutdown
+from launch.events import matches_action
+from launch.events.process import SignalProcess
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
 ROLES = ('left_wrist', 'right_wrist', 'top')
+
+
+def _signal_isolated_cameras(event, context, nodes):
+    if not event.due_to_sigint or context.noninteractive:
+        return []
+    return [EmitEvent(event=SignalProcess(
+        signal_number=signal.SIGINT,
+        process_matcher=matches_action(node),
+    )) for node in nodes]
 
 
 def _start_cameras(context):
@@ -37,31 +48,41 @@ def _start_cameras(context):
         raise RuntimeError('camera 必须为 all、left_wrist、right_wrist 或 top')
     selected = ROLES if selection == 'all' else (selection,)
     actions = []
+    nodes = []
     if mapping.get('position_verified') is not True:
-        actions.append(LogInfo(msg='相机位置尚待现场核对，当前角色沿用旧配对记录。'))
+        actions.append(LogInfo(
+            msg='相机位置尚待现场核对，当前角色沿用旧配对记录。',
+        ))
 
     for index, role in enumerate(selected):
         camera = mapping[role]
         if role == 'top':
-            arguments = {
+            parameters = {
                 'camera_namespace': camera['camera_name'],
                 'camera_name': 'D455',
                 'serial_no': '_' + camera['serial'],
                 'rgb_camera.color_profile': '640,480,30',
                 'depth_module.depth_profile': '640,480,30',
-                'enable_color': 'true',
-                'enable_depth': 'true',
-                'align_depth.enable': 'true',
-                'enable_sync': 'true',
-                'enable_infra1': 'false',
-                'enable_infra2': 'false',
-                'pointcloud.enable': 'false',
+                'enable_color': True,
+                'enable_depth': True,
+                'align_depth.enable': True,
+                'enable_sync': True,
+                'enable_infra1': False,
+                'enable_infra2': False,
+                'enable_infra': False,
+                'enable_gyro': False,
+                'enable_accel': False,
+                'enable_motion': False,
+                'pointcloud.enable': False,
             }
-            launch_path = (Path(get_package_share_directory('realsense2_camera'))
-                           / 'launch' / 'rs_launch.py')
-            camera_action = IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(str(launch_path)),
-                launch_arguments=arguments.items(),
+            camera_action = Node(
+                package='realsense2_camera',
+                executable='realsense2_camera_node',
+                namespace=camera['camera_name'],
+                name='D455',
+                parameters=[parameters],
+                prefix='setsid',
+                output='screen',
             )
         else:
             parameters = {
@@ -91,17 +112,21 @@ def _start_cameras(context):
                 namespace=camera['camera_name'],
                 name=camera['camera_name'],
                 parameters=[parameters],
-                # The terminal signals launch; launch then signals this process once.
+                # Keep each camera outside launch's terminal signal group.
                 prefix='setsid',
                 # Orbbec can need longer than launch's 5 s default to stop.
                 sigterm_timeout='15',
                 output='screen',
             )
+        nodes.append(camera_action)
         group = GroupAction(actions=[
             LogInfo(msg=f'启动 {role}：{camera["serial"]}，640x480 @ 30 fps RGB-D 流'),
             camera_action,
         ], scoped=True, forwarding=False)
         actions.append(TimerAction(period=float(index * 4), actions=[group]))
+    actions.insert(0, RegisterEventHandler(OnShutdown(
+        on_shutdown=lambda event, ctx: _signal_isolated_cameras(event, ctx, nodes),
+    )))
     return actions
 
 
