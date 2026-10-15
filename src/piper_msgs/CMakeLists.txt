@@ -9,6 +9,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 
 find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -17,9 +18,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PiperEnableStatusMsg.msg"
   "msg/PiperTeleopStatusMsg.msg"
   "msg/PiperDirectCanFrame.msg"
+  "msg/PiperArmVector.msg"
   "srv/Enable.srv"
   "srv/StartEpisode.srv"
-  DEPENDENCIES std_msgs
+  DEPENDENCIES std_msgs builtin_interfaces
 )
 
 if(BUILD_TESTING)
