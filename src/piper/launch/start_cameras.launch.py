@@ -93,6 +93,8 @@ def _start_cameras(context):
                 parameters=[parameters],
                 # The terminal signals launch; launch then signals this process once.
                 prefix='setsid',
+                # Orbbec can need longer than launch's 5 s default to stop.
+                sigterm_timeout='15',
                 output='screen',
             )
         group = GroupAction(actions=[
