@@ -51,8 +51,8 @@ def test_four_can_frames_form_ordered_vector_with_provenance(side, kind):
     assert result['source_can_ids'] == FRAME_IDS[kind]
     assert result['source_stamps_ns'] == timestamps
     assert result['stamp_ns'] == timestamps[-1]
-    assert result['joint_names'] == ('joint1', 'joint2', 'joint3', 'joint4',
-                                      'joint5', 'joint6', 'gripper')
+    expected_names = tuple(f'joint{i}' for i in range(1, 7)) + ('gripper',)
+    assert result['joint_names'] == expected_names
     for pair in range(3):
         assert result['position'][pair * 2] == pytest.approx(
             (pair + 1) * 1000 * math.pi / 180000)
