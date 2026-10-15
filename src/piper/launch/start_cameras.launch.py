@@ -57,7 +57,8 @@ def _start_cameras(context):
                 'enable_infra2': 'false',
                 'pointcloud.enable': 'false',
             }
-            launch_path = Path(get_package_share_directory('realsense2_camera')) / 'launch' / 'rs_launch.py'
+            launch_path = (Path(get_package_share_directory('realsense2_camera'))
+                           / 'launch' / 'rs_launch.py')
             camera_action = IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(str(launch_path)),
                 launch_arguments=arguments.items(),
