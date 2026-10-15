@@ -49,6 +49,20 @@
 
 离线接口通过后仍需依次完成：S0 控制模式、限位、停机与安全路径；S1 标定、跨源时间误差和数据质量；S2 单臂 `pick`/`place` 隔离测试集与逐级实机验收；S3 左右臂独立技能与共享空间检查。对象数量、类别和桌面范围按指南 MVP 目标准备，但没有数据或机械臂时不得宣称技能成功率、同步精度或安全能力。
 
+## 只读观测快照与 RGB-D 几何旁路
+
+`tools/vla_observation/snapshot.py` 从已保存的 Episode `bag` 或实时 ROS 话题读取三台相机的 RGB、对齐深度、对应 `CameraInfo` 和 `/joint_left`、`/joint_right`。程序仅订阅或读取，不发布控制话题。示例：
+
+```bash
+python3 tools/vla_observation/snapshot.py bag /path/to/episode/bag --config config/vla_observation.example.json --arm-mode LEFT --output /tmp/snapshots.jsonl
+python3 tools/vla_observation/snapshot.py live --config config/vla_observation.example.json --arm-mode LEFT --output /tmp/live-snapshots.jsonl
+python3 -m unittest discover -s tools/vla_observation -p 'test_*.py'
+```
+
+每行包含快照锚点、来源 Header 时间、age/stale、相机角色、标定版本、拒绝原因和各相机的 `roi_depth`。先在每台相机内按 Header 容差寻找 RGB-D 对，再从配对帧中选择最接近顶部 RGB 锚点的帧；关节状态也按 Header 时间查找，不按到达顺序拼接。顶部 RGB 锚点后的配对窗口由 `max_cross_camera_skew_ns` 控制；过期阈值和深度单位须在现场测量后修改示例配置。`CameraInfo` 的尺寸和针孔内参、深度编码、数据长度、光学帧名以及 ROI 均接受校验。ROI 摘要只报告相机 optical frame 中的有效像素比例、深度统计和点云中位点；零深度与非有限数不参与计算。
+
+只有 RGB 与对应臂状态均有效时，离线输出才包含符合 v1 形状的 `observation`。`rosbag2://...#message=...` URI 标识原始 bag 中的帧，使用前应保存并固定整个 Episode；实时 `ros://` URI 不是不可变图像，因此实时输出不声称符合离线 v1 契约。深度缺失不会伪造 ROI；相机外参、手眼标定和对应时间的 TF 未在此工具中验收，所有 `world_geometry.valid` 始终为 `false`，不得将相机光学坐标点解释为机器人基座中的安全距离。当前 `config/episode_recorder.example.json` 未录制 `/joint_left`、`/joint_right`；用于完整离线观测时需在录制前加入两话题，并确认发布源为实测反馈。现场还需确认三机深度单位、内参、RGB-D 对齐误差、跨源时钟、最大年龄、手眼与外参、共同坐标系以及 TF 链。
+
 ## 确定性安全监督与离线仿真
 
 运行 `python3 tools/vla_contract/offline_simulator.py` 演练正常动作、陈旧动作、反馈掉线、双臂共享区冲突、单侧故障联动与显式复位。运行 `python3 -m unittest discover -s tools/vla_contract -p 'test_*.py'` 检查边界条件。`action_supervisor.py` 只接受通过本契约校验的 `action_chunk`，不包含 ROS、CAN 或驱动发送入口；仿真使用虚构参数，不得用于真机。
