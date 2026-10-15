@@ -131,7 +131,7 @@ class Recorder:
         self.current = None
         self._recover()
         self.node.create_service(StartEpisode, "/collection/start", self._service_start)
-        for action in ("stop", "save", "discard", "status"):
+        for action in ("stop", "save", "discard", "status", "list"):
             self.node.create_service(Trigger, f"/collection/{action}", self._trigger(action))
 
     def _service_start(self, request, response):
@@ -308,9 +308,11 @@ class Recorder:
         self._write_current()
         return self.status()
 
-    def save(self):
+    def save(self, outcome=None):
         if self.current is None or self.metadata["state"] != "stopped":
             raise ValueError("只能保存已停止且通过完整性核验的 Episode")
+        if outcome is not None and outcome not in ("success", "failure"):
+            raise ValueError("outcome 必须为 success 或 failure")
         inspect_bag(self.current / "bag", self.metadata["topics"],
                     self.metadata.get("frame_topics", []), self.metadata.get("expected_fps", {}))
         counter = self.root / ".next_id"
@@ -320,6 +322,7 @@ class Recorder:
         destination = self.root / f"episode_{number:06d}"
         self.metadata["state"] = "saved"
         self.metadata["episode_number"] = number
+        self.metadata["outcome"] = outcome
         self.metadata["saved_at_unix_ns"] = time.time_ns()
         self._event("saved")
         self.current.rename(destination)
@@ -368,6 +371,20 @@ class Recorder:
         pending = [str(p) for p in self.staging.iterdir() if p.is_dir()]
         return {"state": "idle", "pending": pending, "free_bytes": self._available()}
 
+    def list(self):
+        episodes = []
+        for directory in sorted(self.root.glob("episode_[0-9]*"), reverse=True):
+            metadata_file = directory / "episode.json"
+            if not metadata_file.is_file():
+                continue
+            metadata = load_json(metadata_file)
+            episodes.append({key: metadata.get(key) for key in (
+                "episode_id", "episode_number", "state", "mode", "task", "skill",
+                "outcome", "started_at_unix_ns", "saved_at_unix_ns")})
+            episodes[-1]["language_instruction"] = metadata.get("task_metadata", {}).get("language_instruction")
+            episodes[-1]["path"] = str(directory)
+        return {"episodes": episodes}
+
     def close(self):
         if self.process:
             if self.current and self.metadata["state"] == "recording":
@@ -413,9 +430,14 @@ def serve(config):
                 try:
                     request = json.loads(connection.recv(1_000_000).decode())
                     action = request.pop("action")
-                    if action not in ("start", "stop", "save", "discard", "status"):
+                    if action not in ("start", "stop", "save", "discard", "status", "list"):
                         raise ValueError("未知操作")
-                    result = getattr(recorder, action)(request) if action == "start" else getattr(recorder, action)()
+                    if action == "start":
+                        result = recorder.start(request)
+                    elif action == "save":
+                        result = recorder.save(request.get("outcome"))
+                    else:
+                        result = getattr(recorder, action)()
                     response = {"ok": True, "result": result}
                 except (ValueError, OSError, KeyError, json.JSONDecodeError) as error:
                     response = {"ok": False, "error": str(error)}
@@ -428,12 +450,13 @@ def serve(config):
 
 def main():
     parser = argparse.ArgumentParser(description="ROS 2 Episode SQLite 录制器")
-    parser.add_argument("action", choices=["serve", "start", "stop", "save", "discard", "status"])
+    parser.add_argument("action", choices=["serve", "start", "stop", "save", "discard", "status", "list"])
     parser.add_argument("--config", required=True, help="JSON 配置文件")
     parser.add_argument("--mode", choices=["task", "skill"])
     parser.add_argument("--task")
     parser.add_argument("--skill")
     parser.add_argument("--metadata", help="JSON 任务元数据文件")
+    parser.add_argument("--outcome", choices=["success", "failure"], help="保存时的结果标签")
     args = parser.parse_args()
     config = load_json(args.config)
     if args.action == "serve":
@@ -445,6 +468,8 @@ def main():
     if args.action == "start":
         request.update(mode=args.mode, task=args.task, skill=args.skill,
                        metadata=load_json(args.metadata) if args.metadata else {})
+    if args.action == "save":
+        request["outcome"] = args.outcome
     with socket.socket(socket.AF_UNIX) as connection:
         connection.connect(str(path))
         connection.sendall(json.dumps(request, ensure_ascii=False).encode())

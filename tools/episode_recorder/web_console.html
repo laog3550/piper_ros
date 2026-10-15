@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数据采集控制台</title>
+<style>
+:root { color-scheme: dark; font-family: system-ui, sans-serif; background:#10151d; color:#edf3f8; }
+body { max-width:1200px; margin:0 auto; padding:24px; }
+header { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px; }
+h1 { font-size:1.6rem; margin:0; }
+.badge { border-radius:999px; padding:6px 12px; background:#273240; }
+.badge.recording { background:#922d39; color:white; animation:pulse 1.5s infinite; }
+@keyframes pulse { 50% { opacity:.65; } }
+section { background:#1b2530; border:1px solid #334354; border-radius:12px; padding:18px; margin-top:18px; }
+h2 { font-size:1.05rem; margin:0 0 14px; }
+.grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+.camera { background:#10151d; border-radius:8px; overflow:hidden; }
+.camera img { width:100%; aspect-ratio:16/9; object-fit:contain; display:block; }
+.camera p { padding:0 12px; font-size:.9rem; }
+.muted { color:#aab8c8; }
+label { display:block; margin:12px 0 6px; }
+input,textarea,select { width:100%; box-sizing:border-box; border:1px solid #607187; border-radius:7px; background:#111922; color:white; padding:10px; font:inherit; }
+textarea { min-height:75px; resize:vertical; }
+button { background:#3979dc; border:0; color:white; border-radius:7px; padding:10px 16px; cursor:pointer; font:inherit; margin:8px 8px 0 0; }
+button.secondary { background:#41546b; }
+button.danger { background:#a23644; }
+button:disabled { opacity:.45; cursor:not-allowed; }
+.row { display:flex; flex-wrap:wrap; align-items:end; gap:10px; }
+.row > * { flex:1; min-width:160px; }
+.notice { min-height:1.5em; color:#ffd47b; }
+.error { color:#ff9aa5; }
+.tablewrap { overflow-x:auto; }
+table { border-collapse:collapse; width:100%; font-size:.9rem; }
+th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
+@media(max-width:700px){ .grid { grid-template-columns:1fr; } body { padding:12px; } }
+</style>
+</head>
+<body>
+<header><h1>数据采集控制台</h1><span id="state" class="badge">连接中</span></header>
+<p class="muted">录制由独立的 Episode 服务执行。关闭本页不会中断录制；Rerun 可独立查看详细数据。</p>
+<section><h2>三路相机</h2><div id="cameras" class="grid"></div></section>
+<section>
+<h2>录制操作</h2>
+<div id="current" class="muted">正在读取状态…</div>
+<label for="task">任务名</label><input id="task" maxlength="120" placeholder="例如：拾取杯子">
+<label for="instruction">语言指令</label><textarea id="instruction" maxlength="2000" placeholder="例如：把桌上的杯子放入收纳盒"></textarea>
+<div class="row"><button id="start">开始录制</button><button id="stop" class="secondary">停止录制</button></div>
+<div class="row"><div><label for="outcome">结果标签</label><select id="outcome"><option value="">请选择</option><option value="success">成功</option><option value="failure">失败</option></select></div><button id="save">保存 Episode</button><button id="discard" class="danger">丢弃 Episode</button></div>
+<p id="notice" class="notice" role="status"></p>
+</section>
+<section><h2>已保存 Episode</h2><div class="tablewrap"><table><thead><tr><th>编号</th><th>任务</th><th>语言指令</th><th>结果</th><th>开始时间</th><th>路径</th></tr></thead><tbody id="episodes"></tbody></table></div></section>
+<script>
+const $ = id => document.getElementById(id);
+const labels = {idle:'空闲',starting:'启动中',recording:'录制中',stopped:'已停止，待保存',failed:'失败，待丢弃',interrupted:'意外中断，待丢弃',saved:'已保存',discarded:'已丢弃'};
+const cameraNodes = [];
+for (let i=0;i<3;i++) {
+  const card = document.createElement('div'); card.className='camera';
+  const img = document.createElement('img'); img.alt=['左腕预览','右腕预览','顶部预览'][i];
+  const status = document.createElement('p'); status.textContent='等待图像…';
+  card.append(img,status); $('cameras').append(card); cameraNodes.push({img,status});
+}
+let busy = false, state = 'unknown';
+function notice(text, error=false) { $('notice').textContent=text; $('notice').className=error?'notice error':'notice'; }
+async function readJson(response) { const data=await response.json(); if(!response.ok || !data.ok) throw Error(data.error || '操作失败'); return data; }
+function updateButtons() {
+  $('start').disabled=busy || state!=='idle'; $('stop').disabled=busy || state!=='recording';
+  $('save').disabled=busy || state!=='stopped' || !$('outcome').value;
+  $('discard').disabled=busy || !['stopped','failed','interrupted','recording','starting'].includes(state);
+}
+async function refresh() {
+  try {
+    const data=await readJson(await fetch('/api/status', {cache:'no-store'}));
+    const result=data.result; state=result.state;
+    $('state').textContent=labels[state] || state; $('state').className='badge '+(state==='recording'?'recording':'');
+    const meta=result.metadata || {};
+    $('current').textContent=meta.episode_id ? `Episode ${meta.episode_id} · ${meta.task || ''} · ${meta.error || labels[state]}` : (result.pending?.length ? `有 ${result.pending.length} 个未处理暂存 Episode，请丢弃后重试` : '当前无活动 Episode');
+    for(let i=0;i<3;i++) {
+      const camera=data.cameras[i], item=cameraNodes[i];
+      item.status.textContent=`${camera.name}：${camera.online?'在线':'无新画面'}${camera.error?' · '+camera.error:''}`;
+      if(camera.online) item.img.src=`/camera/${i}.jpg?t=${Date.now()}`; else item.img.removeAttribute('src');
+    }
+    updateButtons();
+  } catch(error) { state='unknown'; $('state').textContent='录制服务未连接'; $('state').className='badge'; $('current').textContent=error.message; updateButtons(); }
+}
+async function loadEpisodes() {
+  try {
+    const data=await readJson(await fetch('/api/episodes', {cache:'no-store'}));
+    const body=$('episodes'); body.replaceChildren();
+    for(const episode of data.result.episodes) {
+      const tr=document.createElement('tr');
+      const values=[episode.episode_number,episode.task,episode.language_instruction,episode.outcome==='success'?'成功':episode.outcome==='failure'?'失败':'未标注',episode.started_at_unix_ns?new Date(episode.started_at_unix_ns/1e6).toLocaleString():'',episode.path];
+      for(const value of values) { const td=document.createElement('td'); td.textContent=value ?? ''; tr.append(td); }
+      body.append(tr);
+    }
+    if(!data.result.episodes.length) { const tr=document.createElement('tr'), td=document.createElement('td'); td.colSpan=6; td.textContent='暂无已保存 Episode'; tr.append(td); body.append(tr); }
+  } catch(error) { notice(error.message,true); }
+}
+async function action(name, payload={}) {
+  busy=true; updateButtons(); notice('正在执行…');
+  try {
+    await readJson(await fetch(`/api/${name}`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}));
+    notice(({start:'已开始录制',stop:'已停止录制',save:'已保存 Episode',discard:'已丢弃 Episode'})[name]);
+    if(name==='save') { $('task').value=''; $('instruction').value=''; $('outcome').value=''; }
+    await refresh(); if(name==='save' || name==='discard') await loadEpisodes();
+  } catch(error) { notice(error.message,true); await refresh(); }
+  finally { busy=false; updateButtons(); }
+}
+$('start').onclick=()=>action('start',{task:$('task').value,language_instruction:$('instruction').value});
+$('stop').onclick=()=>action('stop');
+$('save').onclick=()=>action('save',{outcome:$('outcome').value});
+$('discard').onclick=()=>{ if(confirm('确定丢弃当前 Episode？录制数据将被删除。')) action('discard'); };
+$('outcome').onchange=updateButtons;
+refresh(); loadEpisodes(); setInterval(refresh,1500); setInterval(loadEpisodes,10000);
+</script>
+</body>
+</html>
