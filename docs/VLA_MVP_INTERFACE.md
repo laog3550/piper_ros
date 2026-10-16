@@ -101,7 +101,7 @@ python3 -m venv /tmp/piper-lerobot-env
 
 ## 官方 π0.5-DROID 离线基线边界
 
-固定上游源码为 [openpi commit `215abfb217dbac7d5f1273282331b9b1866c0479`](https://github.com/Physical-Intelligence/openpi/tree/215abfb217dbac7d5f1273282331b9b1866c0479)，依赖按该 commit 的 `uv.lock` 安装，配置为 `pi05_droid`，权重路径为 `gs://openpi-assets/checkpoints/pi05_droid`。上游代码采用 Apache-2.0，仓库另含 `LICENSE_GEMMA.txt` 中的 Gemma 使用条款；获取、使用及再分发权重前应核对这些条款。该 checkpoint 是 DROID 策略，不是 Piper 策略。
+固定上游源码为 [openpi commit `215abfb217dbac7d5f1273282331b9b1866c0479`](https://github.com/Physical-Intelligence/openpi/tree/215abfb217dbac7d5f1273282331b9b1866c0479)，依赖按该 commit 的 `uv.lock` 安装，配置为 `pi05_droid`，权重路径为 `gs://openpi-assets/checkpoints/pi05_droid`。上游代码采用 Apache-2.0，仓库另含 `LICENSE_GEMMA.txt` 中的 Gemma 使用条款；公开权重目录中未见单独的许可文件，因此不能把权重直接概括为 Apache-2.0。本次仅在本地下载并运行官方 smoke，未再分发权重。该 checkpoint 是 DROID 策略，不是 Piper 策略。
 
 该配置的模型内部 action 为 `15×32`，上游 `DroidOutputs` 截取前 8 维，公开 DROID 执行示例把这 8 维解释为 **7 维关节速度加 1 维夹爪位置**；上游示例中的旧 `10×8` 注释与当前 `pi05_droid` 配置的 15 步不一致，以固定 commit 的配置与运行输出为准。DROID 输入需要 7 维关节位置和 1 维夹爪位置，而 Piper 契约状态只有 6 个关节角加夹爪开口。两个机器人的关节数、动作语义和夹爪标度不同，不能直接重排、补零、积分或把原输出标为 `absolute_joint_position_7`。官方 DROID 图像槽位为一张外部 RGB 和一张腕部 RGB，第三槽位用掩码屏蔽；本契约单臂 RGB 可供图像预检查，但不能据此宣称策略适配完成。
 
@@ -113,8 +113,14 @@ python3 tools/vla_contract/openpi05_offline.py --smoke --openpi-root /path/to/op
 python3 -m unittest discover -s tools/vla_contract -p 'test_openpi05_offline.py' -v
 ```
 
-`sample_input.json` 顶层只含 `observation` 和 `skill_goal`，图像 `uri` 为 `--image-dir` 内的本地相对路径。预检查要求契约版本、引用、RGB 文件、`640×480`、单臂、源间 Header 偏差与明确的最大观测年龄均通过；结果只返回校验元数据和缺失的语义桥接项，**不会生成 `action_chunk`**。`--smoke` 仅以官方随机 DROID 样例检查完整本地 checkpoint 的输出形状、有限性与首轮耗时；随机输出不可用作 Piper 策略。两种入口都不连接 ROS/CAN。
+`sample_input.json` 顶层只含 `observation` 和 `skill_goal`，图像 `uri` 为 `--image-dir` 内的本地相对路径。预检查要求契约版本、引用、RGB 文件、`640×480`、单臂、源间 Header 偏差与明确的最大观测年龄均通过；结果只返回校验元数据和缺失的语义桥接项，**不会生成 `action_chunk`**。`--smoke` 仅以官方随机 DROID 样例检查完整本地 checkpoint 的输出形状、有限性、模型加载及推理耗时和进程峰值显存；随机输出不可用作 Piper 策略。两种入口都不连接 ROS/CAN。
 
-本次环境检查：Ubuntu 目标机的 RTX 5880 Ada 显存约 48 GB，驱动 595.99.02，磁盘空闲约 822 GB；但系统 Python 为 3.10.12，未找到 Python 3.11 或 `uv`，未发现本地 `pi05_droid` 权重。上游要求 Python ≥3.11，并建议 `uv`；公开对象清单合计约 12.43 GB。
+本次环境检查：Ubuntu 目标机的 RTX 5880 Ada 显存约 48 GB，驱动 595.99.02，磁盘空闲约 822 GB；系统原有 Python 为 3.10.12。已在本独立 worktree 的 `.offline/` 内安装 Python 3.11.17、`uv 0.13.1`，并用固定 `uv.lock` 执行 `GIT_LFS_SKIP_SMUDGE=1 uv sync --frozen --no-dev`。官方 checkpoint 下载到同一 `.offline/` 目录，共 20 个对象、12,429,488,598 字节；每个文件大小和 MD5 均与公开 GCS 元数据一致。`tools/vla_contract/pi05_droid.sha256` 固定各文件的 SHA-256；进入 checkpoint 根目录后运行 `sha256sum -c /path/to/piper_ros/tools/vla_contract/pi05_droid.sha256` 可重新核对。`.offline/` 不纳入 Git。
+
+在 `XLA_PYTHON_CLIENT_PREALLOCATE=false` 下，以官方随机 DROID 样例运行一次完整 smoke，JAX 后端为 `cuda:0`，输出 `15×8` 且全为有限数。该次实测加载 18,191.4 ms，首次推理 23,922.0 ms（含首次编译），后续两次推理为 89.7、98.4 ms；`nvidia-smi` 按进程采样的峰值显存为 8,556 MiB。测试前整卡占用约 1,179 MiB，模型退出后恢复约 1,213 MiB。上述时间仅代表该机器、该 checkpoint、随机输入和这一次 smoke，未包含 Piper 数据适配，也未测长期吞吐或任务成功率。复现命令：
+
+```bash
+XLA_PYTHON_CLIENT_PREALLOCATE=false .offline/openpi/.venv/bin/python tools/vla_contract/openpi05_offline.py --smoke --openpi-root .offline/openpi --checkpoint .offline/checkpoint/pi05_droid
+```
 
 只读检查另一个工作区 `/home/mips/piper_tjp/data` 的 `metadata.yaml`：其中有 6 次录制，4 次只有相机/事件话题；`scene-a05` 的 2 次录制包含左侧 `/dataset/can_left/action_target`、`feedback_observed` 与三路 JPEG RGB。`banana-direct-a05-002` 的候选清单记录了 139 个对齐样本，但最长内部缺口为 1.235 s、`training_ready=false`，并列出反馈实体归属、夹爪零点/执行映射及最终动作节拍待核对。这些是已有的左侧候选示教材料，不能据此推断双臂或完整 `pick`/`place` 训练集已经具备。`/dataset/...` 话题与本契约话题不同，JPEG 与本契约原始 `rgb8` 帧也不同；本离线工具不会隐式转换。仍缺少经过验证的契约映射、标定版本、Piper 归一化统计与适配 checkpoint。只有这些条件和动作空间转换经验证后，才可能生成符合本契约的真实动作块；离线 smoke 不能替代该验证。上述检查没有修改 `/home/mips/piper_tjp`。

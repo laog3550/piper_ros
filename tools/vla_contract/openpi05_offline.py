@@ -3,8 +3,10 @@
 
 import argparse
 import json
+import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -72,21 +74,53 @@ def smoke(openpi_root, checkpoint):
     if not checkpoint.is_dir() or not (checkpoint / "assets").is_dir() or not (checkpoint / "params").exists():
         raise ValueError("需要完整本地 pi05_droid checkpoint（assets 与 params）")
     sys.path.insert(0, str(root / "src"))
+    import jax
     import numpy as np
     from openpi.policies import droid_policy, policy_config
     from openpi.training import config
 
-    policy = policy_config.create_trained_policy(config.get_config(CONFIG), checkpoint)
-    example = droid_policy.make_droid_example()
-    started = time.monotonic()
-    output = policy.infer(example)
-    elapsed_ms = (time.monotonic() - started) * 1000
-    actions = np.asarray(output["actions"])
-    if actions.shape != (15, 8) or not np.isfinite(actions).all():
-        raise ValueError(f"官方输出形状或有限性异常：{actions.shape}")
+    if jax.default_backend() != "gpu":
+        raise ValueError(f"JAX 未使用 GPU：{jax.devices()}")
+
+    peak_mib = [0]
+    stop = threading.Event()
+
+    def watch_gpu():
+        while not stop.is_set():
+            result = subprocess.run(
+                ["nvidia-smi", "--query-compute-apps=pid,used_gpu_memory", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, check=False,
+            )
+            for line in result.stdout.splitlines():
+                parts = [part.strip() for part in line.split(",")]
+                if len(parts) == 2 and parts[0] == str(os.getpid()) and parts[1].isdigit():
+                    peak_mib[0] = max(peak_mib[0], int(parts[1]))
+            stop.wait(0.2)
+
+    watcher = threading.Thread(target=watch_gpu, daemon=True)
+    watcher.start()
+    try:
+        load_start = time.monotonic()
+        policy = policy_config.create_trained_policy(config.get_config(CONFIG), checkpoint)
+        load_ms = (time.monotonic() - load_start) * 1000
+        example = droid_policy.make_droid_example()
+        timings = []
+        for _ in range(3):
+            started = time.monotonic()
+            output = policy.infer(example)
+            timings.append((time.monotonic() - started) * 1000)
+            actions = np.asarray(output["actions"])
+            if actions.shape != (15, 8) or not np.isfinite(actions).all():
+                raise ValueError(f"官方输出形状或有限性异常：{actions.shape}")
+    finally:
+        stop.set()
+        watcher.join(timeout=2)
     return {"status": "official_smoke_only", "official_commit": revision, "config": CONFIG,
+            "jax_device": str(jax.devices()[0]),
             "output_shape": list(actions.shape), "output_space": RAW_ACTION_SPACE,
-            "elapsed_ms_first_call": round(elapsed_ms, 1),
+            "load_ms": round(load_ms, 1), "first_infer_ms": round(timings[0], 1),
+            "warm_infer_ms": [round(value, 1) for value in timings[1:]],
+            "gpu_peak_mib_process": peak_mib[0] or None,
             "note": "随机 DROID 输入仅验证官方推理；输出不属于 Piper action_chunk"}
 
 

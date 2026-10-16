@@ -17,3 +17,4 @@ oculus_reader
 oculus_reader/oculus_reader
 **/__pycache__/
 .thumbs
+.offline/
