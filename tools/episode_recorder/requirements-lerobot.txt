@@ -1,0 +1,6 @@
+# Python 3.10；LeRobotDataset v3.0 离线转换的固定顶层版本。
+# 请在隔离虚拟环境中安装；不从仓库顶层 requirements.txt 安装训练依赖。
+lerobot==0.4.4
+rosbags==0.11.7
+numpy==2.2.6
+Pillow==11.3.0
