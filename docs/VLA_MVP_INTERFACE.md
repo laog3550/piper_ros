@@ -72,3 +72,19 @@ python3 -m unittest discover -s tools/vla_observation -p 'test_*.py'
 安全配置必须明确提供两侧各自七维位置、速度、加速度限值，动作、观测及快照各源的最大年龄、反馈最大年龄、watchdog、动作最长时限、调度延迟、反馈位置容差，以及能覆盖整段轨迹的扫掠碰撞检查器和共享区段占用检查器。缺项、未知检查结果、版本不符、时钟倒退和任一越界均拒绝。动作预检包括当前反馈与观测一致性、每步速度和加速度、终点静止、双臂同一时间段的共享区互斥。执行期对新反馈的运动段再次做限位、碰撞和共享区检查；最后一个目标也必须收到对应的新反馈才进入 `HOLD`。反馈掉线、超时、故障或越界进入锁存 `STOP`，两臂同时停止发出新目标；仅在新鲜反馈和静态安全检查通过后允许显式 `reset` 回到 `HOLD`。`HOLD` 和 `STOP` 都不输出目标。
 
 实机接入前仍须现场测定并审核：左右臂各关节与夹爪的物理限位、允许速度/加速度、制动行为及停机距离、反馈时间误差、控制周期与 watchdog 阈值、末端和夹爪几何、环境障碍、连续扫掠碰撞模型、双臂共享区边界与坐标标定。当前仓库没有这些可靠参数，也没有证明 `HOLD`、`STOP` 或 `ESTOP` 在驱动硬件上的效果；因此不得把离线测试通过解释为真机安全许可。
+
+## Episode → LeRobot v3 转换
+
+离线转换器为 `tools/episode_recorder/to_lerobot.py`。它要求保存的 Episode bag 中具有 `/joint_left` 或 `/joint_right` 实测状态、三路 RGB 中的顶视与执行臂腕视，以及 `/demonstration/action_left` 或 `/demonstration/action_right` 的示教动作。动作消息使用 `sensor_msgs/msg/JointState`，Header 为 Unix 时间，`name` 恰为 `joint1`…`joint6`, `gripper`（可重排），`position` 前六项为绝对关节目标 `rad`，末项为夹爪开口 `m`。动作话题是采集端需要提供的接口，并非现有录制器自动生成。原始 CAN 帧、控制回显或下一时刻反馈都不能替代它。采集时须将状态与动作话题加入录制配置的 `topics`；旧示例配置本身不满足转换条件。
+
+启动 Episode 时，`metadata_json` 应显式提供 `arm_mode`（`LEFT`、`RIGHT` 或 `BIMANUAL`）、`time_domain: "unix_ns"`、`action_space: "absolute_joint_position_7"`、`action_provenance: "human_demonstration"`，以及非空的 `calibration_version`、`normalization_version`。这些字段是采集声明，转换器只能核对其存在与数据形状，不能证明动作确由人示教。现场还须核对夹爪开口方向、位置单位和动作发布时刻。转换器严格按 Header 对齐：以动作帧为基准，状态与 RGB 只能取不晚于动作且在 `--max-age-ms` 内的最近帧；动作采样周期必须符合 `--fps` 与 `--jitter-ms`。缺帧、超窗、时间戳异常、维度错误及非有限数会让整批转换失败。
+
+安装环境使用 `tools/episode_recorder/requirements-lerobot.lock.txt`（Python 3.10、Linux x86_64、CPU，完整固定间接依赖）；`requirements-lerobot.txt` 是重新解析锁文件的顶层输入。目标是 `lerobot==0.4.4` 所写的 LeRobotDataset v3.0。命令示例：
+
+```bash
+python3 -m venv /tmp/piper-lerobot-env
+/tmp/piper-lerobot-env/bin/pip install -r tools/episode_recorder/requirements-lerobot.lock.txt
+/tmp/piper-lerobot-env/bin/python tools/episode_recorder/to_lerobot.py /path/to/episodes /path/to/output --repo-id local/piper_demo --arm-mode LEFT --fps 10 --max-age-ms 100
+```
+
+输入目录须至少有两个 `episode_*`；每个必须是 `state=saved` 的完整 Episode。转换前先核验全部 Episode，再按 `episode_id` 的 SHA-256 排序，将指定比例的完整 Episode 分入 `test`，其余进入 `train`，不会把同一 Episode 的帧分到两边。输出为两个本地 LeRobotDataset、含来源摘要的 `conversion_manifest.json` 以及逐帧原始 Header 时间的 `source_timestamps.jsonl`。LeRobot 内部 `timestamp` 由 `--fps` 形成均匀训练时基；原始 Header 时间不被它取代。转换器只处理本地文件，不上传数据；`use_videos=False` 保留原始 RGB 为图像，不再进行有损视频编码。生成的数据仍需独立检查标定、动作真实性与物理可行性，不能直接视为可用于实机训练或执行的示教集。
