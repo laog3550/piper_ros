@@ -99,6 +99,8 @@ python3 -m venv /tmp/piper-lerobot-env
 
 此离线接口以同步调用模拟时间。未来接入真实策略、相机与执行设备时，仍需为可能阻塞的外部调用提供独立的超时与取消机制，并完成前述标定、安全参数和实机验收；当前代码没有驱动发送入口。
 
+`tools/vla_contract/vlm_critic_adapter.py` 为可选的离线评估适配器。调用方须提供 `sample_builder(skill, post_observation)`，显式取出同一次技能的执行前 RGB、执行后 RGB 和有来源的几何摘要，并提供返回 critic 结果对象的 `evaluator(sample)`。适配器检查当前技能、执行臂、目标、标定版本、观测 ID 与本地后帧引用，再用 critic 契约核对结果及 `recommended_transition`。当前 critic 的结果均要求 `HUMAN_REVIEW`；适配器原样返回该建议，使编排器进入锁存 `SAFE_STOP`、取消执行器，且不进入 `RECOVER` 或下一技能。`SUCCESS` 也不能自动放行。`UNKNOWN`、无效结果或引用不一致同样不会继续动作。此适配器不采集前帧，不验证几何摘要真实性，也没有人工批准后恢复动作的入口。运行 `python3 -m unittest discover -s tools/vla_contract -p 'test_vlm_critic_adapter.py'` 可用合成输出检查上述状态转移；测试不证明模型真实分类能力。
+
 ## 官方 π0.5-DROID 离线基线边界
 
 固定上游源码为 [openpi commit `215abfb217dbac7d5f1273282331b9b1866c0479`](https://github.com/Physical-Intelligence/openpi/tree/215abfb217dbac7d5f1273282331b9b1866c0479)，依赖按该 commit 的 `uv.lock` 安装，配置为 `pi05_droid`，权重路径为 `gs://openpi-assets/checkpoints/pi05_droid`。上游代码采用 Apache-2.0，仓库另含 `LICENSE_GEMMA.txt` 中的 Gemma 使用条款；公开权重目录中未见单独的许可文件，因此不能把权重直接概括为 Apache-2.0。本次仅在本地下载并运行官方 smoke，未再分发权重。该 checkpoint 是 DROID 策略，不是 Piper 策略。

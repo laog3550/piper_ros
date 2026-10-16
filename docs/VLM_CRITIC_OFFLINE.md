@@ -46,4 +46,6 @@ python3 -c "from huggingface_hub import snapshot_download; print(snapshot_downlo
 
 验证命令：`python3 -m unittest tools.vlm_critic.test_critic -v`。当前测试只使用合成图像与人工设置的几何摘要，用于检查输入、规则、输出契约和回退路径。真实识别率、失败类型准确率和阈值须等真实标注数据与独立测试集具备后再评估。
 
+若把离线结果交给 `TaskOrchestrator`，须使用 `tools/vla_contract/vlm_critic_adapter.py` 的显式适配器。它核对当前技能和后帧引用，保留 `HUMAN_REVIEW`，使编排器停在 `SAFE_STOP`；`SUCCESS`、`FAILURE`、`UNKNOWN` 均不会触发自动继续或重试。执行前帧与几何摘要仍须由调用方提供并验证来源。
+
 2026-10-16 的本机烟雾测试使用上述 SmolVLM 固定 revision 和合成红球前后图。权重 SHA256 已校验为 `74dea5904032e5ae99a2e0eef5179e6ac0f1dedc3ab0c7c2a5d4d387c843203e`。一次完整模型调用约 11–13 秒；轮询 `nvidia-smi` 看到整卡占用由约 1178 MiB 升至约 3370 MiB（增量约 2192 MiB，非专属进程精确测量）。模型生成了非 JSON 文本，正式 CLI 将该结果判为 `UNKNOWN` 并要求人工复核。此样例只证明图像推理链路可运行及降级生效，不证明技能识别能力。
