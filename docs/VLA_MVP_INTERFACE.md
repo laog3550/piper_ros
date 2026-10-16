@@ -75,16 +75,18 @@ python3 -m unittest discover -s tools/vla_observation -p 'test_*.py'
 
 ## Episode → LeRobot v3 转换
 
-离线转换器为 `tools/episode_recorder/to_lerobot.py`。它要求保存的 Episode bag 中具有 `/joint_left` 或 `/joint_right` 实测状态、三路 RGB 中的顶视与执行臂腕视，以及 `/demonstration/action_left` 或 `/demonstration/action_right` 的示教动作。动作消息使用 `sensor_msgs/msg/JointState`，Header 为 Unix 时间，`name` 恰为 `joint1`…`joint6`, `gripper`（可重排），`position` 前六项为绝对关节目标 `rad`，末项为夹爪开口 `m`。动作话题是采集端需要提供的接口，并非现有录制器自动生成。原始 CAN 帧、控制回显或下一时刻反馈都不能替代它。采集时须将状态与动作话题加入录制配置的 `topics`；旧示例配置本身不满足转换条件。
+离线转换器为 `tools/episode_recorder/to_lerobot.py`，必须显式选择 `--input-format`。`joint-state` 模式要求 `/joint_left` 或 `/joint_right` 实测状态，以及 `/demonstration/action_left` 或 `/demonstration/action_right` 的 `sensor_msgs/msg/JointState` 示教动作；动作话题需由采集端提供，录制器不会自动生成。`can-vector` 模式直接读取 `/piper_vector/{left,right}/slave_feedback` 作为状态、`/piper_vector/{left,right}/master_target` 作为主臂示教目标，消息类型为 `piper_msgs/msg/PiperArmVector`。两种模式都要求顶视与执行臂腕视 RGB，七维顺序为 `joint1`…`joint6`, `gripper`，前六维为绝对关节目标 `rad`，夹爪为开口宽度 `m`。原始 CAN 帧、控制回显或下一时刻反馈不能代替示教动作。
 
-启动 Episode 时，`metadata_json` 应显式提供 `arm_mode`（`LEFT`、`RIGHT` 或 `BIMANUAL`）、`time_domain: "unix_ns"`、`action_space: "absolute_joint_position_7"`、`action_provenance: "human_demonstration"`，以及非空的 `calibration_version`、`normalization_version`。这些字段是采集声明，转换器只能核对其存在与数据形状，不能证明动作确由人示教。现场还须核对夹爪开口方向、位置单位和动作发布时刻。转换器严格按 Header 对齐：以动作帧为基准，状态与 RGB 只能取不晚于动作且在 `--max-age-ms` 内的最近帧；动作采样周期必须符合 `--fps` 与 `--jitter-ms`。缺帧、超窗、时间戳异常、维度错误及非有限数会让整批转换失败。
+`can-vector` 模式逐条要求 `valid=true`、`gripper_mapping_verified=true`、没有 `missing`、`stale` 或 `time_inconsistent`，并核对左右臂、`source_topic`、四个 CAN ID、四个 `source_stamps` 与 Header 的关系。缺失、冲突或未核实的向量会拒绝整段 Episode。适配器默认 `gripper_mapping_verified=false`，因此默认采集不能被转换器认作有效示教；必须先在现场核实开口宽度、零位和符号，再显式启用该标志。四路向量可能以高于训练帧率重复发布；转换器先按 Header 合并完全相同的快照，再按 `--fps` 建立均匀时基，逐点选取不晚于该时刻且未超过 `--max-age-ms` 的最新主臂目标、从臂反馈和 RGB。`--max-can-skew-ms` 约束每个向量内部四个原始 CAN 时间的跨度。
+
+启动 Episode 时，`metadata_json` 应显式提供 `arm_mode`（`LEFT`、`RIGHT` 或 `BIMANUAL`）、`time_domain: "unix_ns"`、`action_space: "absolute_joint_position_7"`、`action_provenance: "human_demonstration"`，以及非空的 `calibration_version`、`normalization_version`。这些字段是采集声明，转换器只能核对其存在与数据形状，不能证明动作确由人示教。现场还须核对夹爪开口方向、位置单位和动作发布时刻。转换器严格按 Header 对齐：状态与 RGB 只能取不晚于训练时刻且在 `--max-age-ms` 内的最近帧；`joint-state` 模式的动作采样周期另须符合 `--fps` 与 `--jitter-ms`。缺帧、超窗、时间戳异常、维度错误及非有限数会让整批转换失败。
 
 安装环境使用 `tools/episode_recorder/requirements-lerobot.lock.txt`（Python 3.10、Linux x86_64、CPU，完整固定间接依赖）；`requirements-lerobot.txt` 是重新解析锁文件的顶层输入。目标是 `lerobot==0.4.4` 所写的 LeRobotDataset v3.0。命令示例：
 
 ```bash
 python3 -m venv /tmp/piper-lerobot-env
 /tmp/piper-lerobot-env/bin/pip install -r tools/episode_recorder/requirements-lerobot.lock.txt
-/tmp/piper-lerobot-env/bin/python tools/episode_recorder/to_lerobot.py /path/to/episodes /path/to/output --repo-id local/piper_demo --arm-mode LEFT --fps 10 --max-age-ms 100
+/tmp/piper-lerobot-env/bin/python tools/episode_recorder/to_lerobot.py /path/to/episodes /path/to/output --repo-id local/piper_demo --arm-mode LEFT --input-format can-vector --fps 10 --max-age-ms 100 --max-can-skew-ms 30
 ```
 
-输入目录须至少有两个 `episode_*`；每个必须是 `state=saved` 的完整 Episode。转换前先核验全部 Episode，再按 `episode_id` 的 SHA-256 排序，将指定比例的完整 Episode 分入 `test`，其余进入 `train`，不会把同一 Episode 的帧分到两边。输出为两个本地 LeRobotDataset、含来源摘要的 `conversion_manifest.json` 以及逐帧原始 Header 时间的 `source_timestamps.jsonl`。LeRobot 内部 `timestamp` 由 `--fps` 形成均匀训练时基；原始 Header 时间不被它取代。转换器只处理本地文件，不上传数据；`use_videos=False` 保留原始 RGB 为图像，不再进行有损视频编码。生成的数据仍需独立检查标定、动作真实性与物理可行性，不能直接视为可用于实机训练或执行的示教集。
+输入目录须至少有两个 `episode_*`；每个必须是 `state=saved` 的完整 Episode。转换前先核验全部 Episode，再按 `episode_id` 的 SHA-256 排序，将指定比例的完整 Episode 分入 `test`，其余进入 `train`，不会把同一 Episode 的帧分到两边。输出为两个本地 LeRobotDataset、含来源摘要的 `conversion_manifest.json` 以及逐帧原始 Header 时间的 `source_timestamps.jsonl`；`can-vector` 模式还记录所选四帧的原始 CAN 时间。LeRobot 内部 `timestamp` 由 `--fps` 形成均匀训练时基；原始 Header 时间不被它取代。转换器只处理本地文件，不上传数据；`use_videos=False` 保留原始 RGB 为图像，不再进行有损视频编码。生成的数据仍需独立检查标定、动作真实性与物理可行性，不能直接视为可用于实机训练或执行的示教集。
