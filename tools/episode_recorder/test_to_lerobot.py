@@ -138,7 +138,8 @@ def test_episode_split_does_not_leak_frames(tmp_path, monkeypatch):
     sys.modules["lerobot.datasets.lerobot_dataset"].LeRobotDataset = FakeDataset
     output = tmp_path / "output"
     args = SimpleNamespace(input_dir=source, output_dir=output, repo_id="local/piper",
-                           arm_mode="LEFT", fps=10, max_age_ms=20, jitter_ms=2, test_percent=50)
+                           arm_mode="LEFT", input_format="joint-state", fps=10, max_age_ms=20,
+                           jitter_ms=2, max_can_skew_ms=30, test_percent=50)
     converter.convert(args)
     manifest = json.loads((output / "conversion_manifest.json").read_text(encoding="utf-8"))
     stamps = [json.loads(line) for line in (output / "source_timestamps.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -149,3 +150,127 @@ def test_episode_split_does_not_leak_frames(tmp_path, monkeypatch):
     assert len(saved["train"]) == len(saved["test"]) == 1
     assert len(saved["train"][0]) == len(saved["test"][0]) == 2
     assert len({item["episode_id"] for item in manifest["episodes"]}) == 2
+
+
+def vector_fixture(root, name, *, verified=True, valid=True, wrong_source=False,
+                   bad_can_skew=False, missing_action=False, outside_episode=False,
+                   duplicate_vector=False):
+    """写入录制配置的 20 路话题，模拟 50 Hz 向量与相机流。"""
+    from rosbags.typesys import get_types_from_msg
+
+    episode = root / name
+    bag = episode / "bag"
+    episode.mkdir()
+    base = 1_800_000_100_000_000_000
+    (episode / "episode.json").write_text(json.dumps({
+        "schema_version": 1, "state": "saved", "episode_id": name, "task": "抓取方块",
+        "started_at_unix_ns": base - 20_000_000,
+        "stopped_at_unix_ns": base + 140_000_000,
+        "task_metadata": {"arm_mode": "BIMANUAL", "time_domain": "unix_ns",
+                          "action_space": "absolute_joint_position_7",
+                          "action_provenance": "human_demonstration",
+                          "calibration_version": "synthetic-calibration",
+                          "normalization_version": "synthetic-normalization"}}), encoding="utf-8")
+    s = converter.TYPESTORE
+    direct_type = "piper_msgs/msg/PiperDirectCanFrame"
+    s.register(get_types_from_msg(
+        (Path(__file__).parents[2] / "src/piper_msgs/msg/PiperDirectCanFrame.msg").read_text(),
+        direct_type))
+    Header = s.types["std_msgs/msg/Header"]
+    Time = s.types["builtin_interfaces/msg/Time"]
+    Vector = s.types[converter.VECTOR_TYPE]
+    Direct = s.types[direct_type]
+    Image = s.types["sensor_msgs/msg/Image"]
+    CameraInfo = s.types["sensor_msgs/msg/CameraInfo"]
+    ROI = s.types["sensor_msgs/msg/RegionOfInterest"]
+    direct_topics = [f"/piper_direct/{arm}/{kind}" for arm in ("left", "right")
+                     for kind in ("master_target", "slave_feedback")]
+    vector_topics = [f"/piper_vector/{arm}/{kind}" for arm in ("left", "right")
+                     for kind in ("master_target", "slave_feedback")]
+    camera_bases = ["/camera_top/D455", "/camera_wrist_left", "/camera_wrist_right"]
+    extra = []
+    for camera in camera_bases:
+        extra += [f"{camera}/color/image_raw", f"{camera}/color/camera_info"]
+        depth = "/aligned_depth_to_color" if camera.endswith("D455") else "/depth"
+        extra += [f"{camera}{depth}/image_raw", f"{camera}{depth}/camera_info"]
+    types = {**{topic: direct_type for topic in direct_topics},
+             **{topic: converter.VECTOR_TYPE for topic in vector_topics},
+             **{topic: "sensor_msgs/msg/Image" if topic.endswith("image_raw") else "sensor_msgs/msg/CameraInfo"
+                for topic in extra}}
+    assert len(types) == 20
+    with Writer(bag, version=Writer.VERSION_LATEST) as writer:
+        connections = {topic: writer.add_connection(topic, msgtype, typestore=s)
+                       for topic, msgtype in types.items()}
+        for index in range(6):
+            t = base + index * 20_000_000
+            stamp = Time(t // 1_000_000_000, t % 1_000_000_000)
+            for topic, msgtype in types.items():
+                if missing_action and topic == converter.CAN_ACTIONS["left"]:
+                    continue
+                arm = "left" if "/left/" in topic else "right"
+                header = Header(stamp, f"can_{arm}" if topic in vector_topics + direct_topics else "synthetic_camera")
+                if topic in vector_topics:
+                    kind = topic.rsplit("/", 1)[-1]
+                    offsets = ([40, 2, 1, 0] if bad_can_skew else
+                               [24, 2, 1, 0] if outside_episode and index == 0 else
+                               [3, 2, 1, 0])
+                    sources = [Time((t - offset * 1_000_000) // 1_000_000_000,
+                                    (t - offset * 1_000_000) % 1_000_000_000) for offset in offsets]
+                    source_topic = f"/piper_direct/{arm}/{kind}"
+                    if wrong_source and topic == converter.CAN_ACTIONS["left"]:
+                        source_topic = f"/piper_direct/{arm}/slave_feedback"
+                    positions = np.arange(7, dtype=np.float64) / 10
+                    positions += (1 if kind == "master_target" else 0) + (2 if arm == "right" else 0)
+                    message = Vector(header, source_topic, converter.JOINTS,
+                                     positions,
+                                     np.array(converter.CAN_IDS[kind], dtype=np.uint32), sources,
+                                     np.zeros(4, dtype=np.bool_), np.zeros(4, dtype=np.bool_),
+                                     False, valid, verified)
+                elif topic in direct_topics:
+                    message = Direct(header, 0x155, np.zeros(8, dtype=np.uint8), 1,
+                                     np.zeros(2, dtype=np.float64), 0.0, 0.0, 0, 0)
+                elif topic.endswith("image_raw"):
+                    if "/color/" in topic:
+                        message = Image(header, 480, 640, "rgb8", 0, 640 * 3,
+                                        np.full(480 * 640 * 3, index, dtype=np.uint8))
+                    else:
+                        message = Image(header, 1, 1, "16UC1", 0, 2, np.zeros(2, dtype=np.uint8))
+                else:
+                    message = CameraInfo(header, 1, 1, "plumb_bob", np.zeros(5), np.zeros(9),
+                                         np.zeros(9), np.zeros(12), 0, 0, ROI(0, 0, 0, 0, False))
+                writer.write(connections[topic], t + 1000, s.serialize_cdr(message, msgtype))
+                if duplicate_vector and topic in vector_topics:
+                    writer.write(connections[topic], t + 2000, s.serialize_cdr(message, msgtype))
+    return episode
+
+
+def test_twenty_topic_can_vector_episode(tmp_path):
+    episode = vector_fixture(tmp_path, "episode_000001", duplicate_vector=True)
+    from rosbags.rosbag2 import Reader
+    with Reader(episode / "bag") as reader:
+        assert len(reader.connections) == 20
+    meta, frames = converter.read_episode(episode, ["left", "right"], 10, 30_000_000, 2_000_000,
+                                          input_format="can-vector")
+    assert meta["episode_id"] == "episode_000001"
+    assert len(frames) == 2
+    assert frames[0]["action"].shape == (14,)
+    assert frames[0]["observation.state"].shape == (14,)
+    assert frames[0]["action"][[0, 7]].tolist() == [1.0, 3.0]
+    assert frames[0]["observation.state"][[0, 7]].tolist() == [0.0, 2.0]
+    assert set(frames[0]["__source_can_stamps_ns__"]) == set(converter.CAN_ACTIONS.values()) | set(converter.CAN_STATES.values())
+    assert len(frames[0]["__source_header_ns__"]) == 7
+
+
+@pytest.mark.parametrize("kwargs,match", [
+    ({"verified": False}, "夹爪映射未核实"),
+    ({"valid": False}, "valid=false"),
+    ({"wrong_source": True}, "CAN 来源话题"),
+    ({"bad_can_skew": True}, "四帧来源时间"),
+    ({"outside_episode": True}, "CAN 来源时间不在 Episode"),
+    ({"missing_action": True}, "没有消息"),
+])
+def test_can_vector_rejects_untrusted_sources(tmp_path, kwargs, match):
+    episode = vector_fixture(tmp_path, "episode_000001", **kwargs)
+    with pytest.raises(ValueError, match=match):
+        converter.read_episode(episode, ["left", "right"], 10, 30_000_000, 2_000_000,
+                               input_format="can-vector")
