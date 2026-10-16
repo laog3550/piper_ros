@@ -5,6 +5,7 @@ import unittest
 
 from offline_task_demo import make_task
 from task_orchestrator import Skill, SnapshotObserverAdapter
+from validate_contract import synthetic
 
 
 class TaskOrchestratorTests(unittest.TestCase):
@@ -24,11 +25,46 @@ class TaskOrchestratorTests(unittest.TestCase):
 
     def test_snapshot_adapter_rejects_invalid_record(self):
         class Builder:
+            buffers = {SnapshotObserverAdapter.TOP_RGB: [(10, object(), "frame-10")]}
+
             def build(self, mode, anchor, now):
                 return {"contract_observation_valid": False, "rejection_reasons": ["missing_frame"]}
 
         with self.assertRaisesRegex(ValueError, "missing_frame"):
-            SnapshotObserverAdapter(Builder(), None).observe(Skill("pick", "x"), "LEFT", 1)
+            SnapshotObserverAdapter(Builder(), None).observe(Skill("pick", "x"), "LEFT", 12)
+
+    def test_snapshot_adapter_uses_top_rgb_header_anchor(self):
+        class Builder:
+            buffers = {SnapshotObserverAdapter.TOP_RGB: [(10, object(), "old"), (20, object(), "new"),
+                                                         (40, object(), "future")]}
+            args = None
+
+            def build(self, mode, anchor, now):
+                self.args = (mode, anchor, now)
+                return {"contract_observation_valid": True,
+                        "observation": synthetic(mode)["observation"]}
+
+        class Feedback:
+            def read(self, arm, now):
+                return ([0.0] * 6 + [0.04], [0.0] * 7, now, True)
+
+        builder = Builder()
+        obs, feedback = SnapshotObserverAdapter(builder, Feedback()).observe(Skill("pick", "x"), "LEFT", 30)
+        self.assertEqual(builder.args, ("LEFT", 20, 30))
+        self.assertEqual(obs["arm_mode"], "LEFT")
+        self.assertIn("left", feedback)
+
+    def test_snapshot_adapter_rejects_live_uri(self):
+        class Builder:
+            buffers = {SnapshotObserverAdapter.TOP_RGB: [(10, object(), "frame")]}
+
+            def build(self, mode, anchor, now):
+                obs = synthetic(mode)["observation"]
+                obs["images"]["top_rgb"]["uri"] = "ros://live"
+                return {"contract_observation_valid": True, "observation": obs}
+
+        with self.assertRaisesRegex(ValueError, "实时帧 URI"):
+            SnapshotObserverAdapter(Builder(), None).observe(Skill("pick", "x"), "LEFT", 12)
 
     def test_failed_verification_reobserves_and_recovers(self):
         task, world = make_task(results=("FAIL", "SUCCESS"), skills=(Skill("pick", "object-1"),))
@@ -120,6 +156,16 @@ class TaskOrchestratorTests(unittest.TestCase):
         self.assertEqual(board.phase, "SAFE_STOP")
         self.assertEqual(task.supervisor.state, "STOP")
         self.assertIn("取消执行器失败", board.reason)
+
+    def test_human_takeover_cancel_failure_latches_stop(self):
+        task, world = make_task()
+        world.cancel = lambda: (_ for _ in ()).throw(RuntimeError("合成取消故障"))
+        task.request_takeover()
+        board = task.run()
+        self.assertEqual(board.phase, "SAFE_STOP")
+        self.assertEqual(task.supervisor.state, "STOP")
+        self.assertEqual(world.dispatched, [])
+        self.assertIn("人工接管取消执行器失败", board.reason)
 
 
 if __name__ == "__main__":
