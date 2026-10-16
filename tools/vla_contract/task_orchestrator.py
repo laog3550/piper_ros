@@ -40,13 +40,21 @@ class Blackboard:
 class SnapshotObserverAdapter:
     """对接只读 SnapshotBuilder.build；反馈由独立来源提供。"""
 
+    TOP_RGB = "/camera_top/D455/color/image_raw"
+
     def __init__(self, builder, feedback_provider):
         self.builder, self.feedback_provider = builder, feedback_provider
 
     def observe(self, skill, mode, now_ns):
-        record = self.builder.build(mode, now_ns, now_ns)
+        anchors = (stamp for stamp, *_ in self.builder.buffers[self.TOP_RGB] if stamp <= now_ns)
+        anchor = max(anchors, default=None)
+        if anchor is None:
+            raise ValueError("缺少可用的顶部 RGB Header 锚点")
+        record = self.builder.build(mode, anchor, now_ns)
         if not record["contract_observation_valid"]:
             raise ValueError(f"快照无效：{record['rejection_reasons']}")
+        if any(frame["uri"].startswith("ros://") for frame in record["observation"]["images"].values()):
+            raise ValueError("实时帧 URI 不可作为不可变离线观测")
         arm = mode.lower()
         return record["observation"], {arm: self.feedback_provider.read(arm, now_ns)}
 
@@ -79,7 +87,12 @@ class TaskOrchestrator:
         try:
             self.sink.cancel()
         except Exception as exc:
-            self.board.reason += f"；取消执行器失败：{exc}"
+            if human:
+                failure = f"人工接管取消执行器失败：{exc}"
+                self.supervisor.stop(failure)
+                self._transition("SAFE_STOP", failure)
+            else:
+                self.board.reason += f"；取消执行器失败：{exc}"
 
     def _check_deadline(self):
         if self.clock.now_ns() > self.board.attempt_deadline_ns:

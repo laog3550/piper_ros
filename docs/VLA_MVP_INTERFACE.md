@@ -95,6 +95,6 @@ python3 -m venv /tmp/piper-lerobot-env
 
 运行 `python3 tools/vla_contract/offline_task_demo.py` 可执行合成四步序列：`pick(object-1)` → `place(region-1)` → `pick(object-2)` → `place(region-2)`。运行 `python3 -m unittest discover -s tools/vla_contract -p 'test_*.py'` 覆盖验证失败后重新观测并有限重试、重试耗尽、执行超时、动作预检拒绝、评估 `UNKNOWN`、人工接管、反馈 STOP 后禁止评估，以及取消失败时保持 STOP。所有输入、限位和碰撞检查均为合成数据；成功仅表示离线控制流通过。
 
-`task_orchestrator.py` 使用 `OBSERVE` → `PLAN` → `EXECUTE` → `VERIFY` → `RECOVER` / `DONE` / `SAFE_STOP` 的状态机，`Blackboard` 记录当前臂、技能、尝试次数、观测、目标、动作、截止时间和状态历史。观测器、策略、评估器、执行器和时钟均以接口注入；执行器仅能收到 `ActionSupervisor.tick()` 返回的单个获准目标。每次重试重新观测、重新规划，且再次经过完整安全预检。`SnapshotObserverAdapter` 可接收观测分支 `SnapshotBuilder.build()` 的返回记录，并要求另行提供独立反馈来源；无效快照直接拒绝。人工接管进入 `HUMAN_TAKEOVER` 并请求取消；未知评估结果、碰撞风险、反馈故障及超时进入锁存 STOP。当前仅接受 `LEFT` 或 `RIGHT` 单臂任务；左右臂可分别构造编排器，尚未提供双臂协同调度。
+`task_orchestrator.py` 使用 `OBSERVE` → `PLAN` → `EXECUTE` → `VERIFY` → `RECOVER` / `DONE` / `SAFE_STOP` 的状态机，`Blackboard` 记录当前臂、技能、尝试次数、观测、目标、动作、截止时间和状态历史。观测器、策略、评估器、执行器和时钟均以接口注入；执行器仅能收到 `ActionSupervisor.tick()` 返回的单个获准目标。每次重试重新观测、重新规划，且再次经过完整安全预检。`SnapshotObserverAdapter` 可接收观测分支 `SnapshotBuilder.build()` 的返回记录，以不晚于当前时间的最新顶部 RGB Header 为锚点，并要求另行提供独立反馈来源；无效快照和实时 `ros://` URI 直接拒绝。人工接管成功取消后进入 `HUMAN_TAKEOVER`；取消失败时锁存 STOP。未知评估结果、碰撞风险、反馈故障及超时也进入锁存 STOP。当前仅接受 `LEFT` 或 `RIGHT` 单臂任务；左右臂可分别构造编排器，尚未提供双臂协同调度。
 
 此离线接口以同步调用模拟时间。未来接入真实策略、相机与执行设备时，仍需为可能阻塞的外部调用提供独立的超时与取消机制，并完成前述标定、安全参数和实机验收；当前代码没有驱动发送入口。
