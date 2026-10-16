@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Piper VLM critic 离线结果",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "sample_id", "skill", "target_id", "result", "failure_type", "confidence", "evidence", "backend", "recommended_transition", "frame_refs", "calibration_id"],
+  "properties": {
+    "schema_version": {"const": "piper_vlm_critic/1.0"},
+    "sample_id": {"type": "string", "minLength": 1},
+    "skill": {"enum": ["left_pick", "right_pick", "left_place", "right_place"]},
+    "target_id": {"type": "string", "minLength": 1},
+    "result": {"enum": ["SUCCESS", "FAILURE", "UNKNOWN"]},
+    "failure_type": {"enum": ["NONE", "EMPTY_GRASP", "SLIP", "PLACE_MISS", "WRONG_OBJECT", "COLLISION_RISK", "OCCLUDED", "DEPTH_INVALID", "OUT_OF_WORKSPACE", "TIMEOUT", "UNKNOWN"]},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "evidence": {
+      "type": "array", "minItems": 1, "maxItems": 8,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["source", "observation"],
+        "properties": {
+          "source": {"enum": ["geometry", "pre_rgb", "post_rgb", "system"]},
+          "observation": {"type": "string", "minLength": 1, "maxLength": 300}
+        }
+      }
+    },
+    "backend": {"type": "string", "minLength": 1},
+    "recommended_transition": {"const": "HUMAN_REVIEW"},
+    "frame_refs": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pre_rgb", "post_rgb"],
+      "properties": {
+        "pre_rgb": {"type": "string", "minLength": 1},
+        "post_rgb": {"type": "string", "minLength": 1}
+      }
+    },
+    "calibration_id": {"type": "string", "minLength": 1}
+  },
+  "allOf": [
+    {"if": {"properties": {"result": {"const": "SUCCESS"}}}, "then": {"properties": {"failure_type": {"const": "NONE"}}}},
+    {"if": {"properties": {"result": {"const": "UNKNOWN"}}}, "then": {"properties": {"failure_type": {"const": "UNKNOWN"}, "confidence": {"const": 0}}}},
+    {"if": {"properties": {"result": {"const": "FAILURE"}}}, "then": {"properties": {"failure_type": {"not": {"enum": ["NONE", "UNKNOWN"]}}}}}
+  ]
+}
