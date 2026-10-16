@@ -101,6 +101,25 @@ python3 -m venv /tmp/piper-lerobot-env
 
 `tools/vla_contract/vlm_critic_adapter.py` 为可选的离线评估适配器。调用方须提供 `sample_builder(skill, post_observation)`，显式取出同一次技能的执行前 RGB、执行后 RGB 和有来源的几何摘要，并提供返回 critic 结果对象的 `evaluator(sample)`。适配器检查当前技能、执行臂、目标、标定版本、观测 ID 与本地后帧引用，再用 critic 契约核对结果及 `recommended_transition`。当前 critic 的结果均要求 `HUMAN_REVIEW`；适配器原样返回该建议，使编排器进入锁存 `SAFE_STOP`、取消执行器，且不进入 `RECOVER` 或下一技能。`SUCCESS` 也不能自动放行。`UNKNOWN`、无效结果或引用不一致同样不会继续动作。此适配器不采集前帧，不验证几何摘要真实性，也没有人工批准后恢复动作的入口。运行 `python3 -m unittest discover -s tools/vla_contract -p 'test_vlm_critic_adapter.py'` 可用合成输出检查上述状态转移；测试不证明模型真实分类能力。
 
+## ROS 2 Humble 影子运行
+
+影子入口为 `tools/vla_contract/shadow_run.py`。`live` 只订阅 `snapshot.py` 已定义的三路 RGB-D、`CameraInfo` 与 `/joint_left`、`/joint_right`，在 `/vla_shadow/diagnostics` 发布 JSON 诊断，专用 `/vla_shadow/proposed_action` 仅保留给经过安全监督的拟议目标。入口没有驱动、CAN、控制服务或控制话题的发送路径。现场配置仍是示例值时，运行应停在拒绝状态；空的拟议动作话题是预期结果。
+
+```bash
+python3 tools/vla_contract/shadow_run.py live --config config/vla_observation.example.json --arm-mode LEFT
+python3 tools/vla_observation/snapshot.py bag /path/to/episode/bag --config config/vla_observation.example.json --arm-mode LEFT --output /tmp/shadow-snapshots.jsonl
+python3 tools/vla_contract/shadow_run.py replay --snapshots /tmp/shadow-snapshots.jsonl --now-ns 1800000000105000000
+python3 tools/vla_contract/shadow_run.py fixture
+python3 tools/vla_contract/shadow_run.py fixture --publish-ros --hold-sec 5
+python3 -m unittest discover -s tools/vla_contract -p 'test_shadow_run.py' -v
+```
+
+`OBSERVE` 检查快照契约、Header 时间、年龄及跨源偏差；输出观测 ID 或缺源、过期等原因。`CALIBRATION` 检查三维几何、夹爪映射、标定与 TF 的已验证证据；任一未知即拒绝。现有 `SnapshotBuilder` 始终将世界几何标为无效，因而真实 `live` 和由它生成的 Episode 快照会在这一阶段停止。现场布尔声明不是标定文件或 TF 链的替代品。`POLICY_INPUT` 使用 `openpi05_offline.preflight()` 检查不可变本地图像、契约和时间；`ros://` 实时 URI、未提取的 `rosbag2://` URI 均不能作为该入口的图像文件。即使预检通过，`PLAN` 也明确拒绝 `pi05_droid` 的 `droid_joint_velocity_7_gripper_position_1` 与 Piper 契约的 `absolute_joint_position_7` 动作空间差异，不生成真实目标。缺少独立健康反馈、安全限位、扫掠碰撞与共享区标定，也不能为实机实例化安全监督器。
+
+`fixture` 是明确隔离的合成验收：它构造不可变本地图像，通过相同的 DROID 输入预检，再注入**合成 Piper 绝对目标**、合成反馈和合成安全参数。`TaskOrchestrator` 只把 `ActionSupervisor.tick()` 批准的目标交给内存中的 `ProposalOnlySink`，输出拟议目标与 `OBSERVE`、`POLICY_INPUT`、`PLAN`、`EXECUTE`、`VERIFY` 状态。`OfflineVlmCriticAdapter` 检查前后帧引用并返回 `HUMAN_REVIEW`，任务随后进入锁存 `SAFE_STOP`，不自动继续或重试。这个验收验证接口与拒绝路径，不代表真实模型、TF、碰撞检查或硬件安全通过。
+
+真机前还需确认七维夹爪与关节反馈映射、相机手眼与外参及同时刻 TF、三机深度单位和时间同步、Piper 数据归一化及已适配 checkpoint、动作空间与周期、物理限位及扫掠碰撞模型。当前影子入口不提供这些参数，也不接入任何执行驱动。
+
 ## 官方 π0.5-DROID 离线基线边界
 
 固定上游源码为 [openpi commit `215abfb217dbac7d5f1273282331b9b1866c0479`](https://github.com/Physical-Intelligence/openpi/tree/215abfb217dbac7d5f1273282331b9b1866c0479)，依赖按该 commit 的 `uv.lock` 安装，配置为 `pi05_droid`，权重路径为 `gs://openpi-assets/checkpoints/pi05_droid`。上游代码采用 Apache-2.0，仓库另含 `LICENSE_GEMMA.txt` 中的 Gemma 使用条款；公开权重目录中未见单独的许可文件，因此不能把权重直接概括为 Apache-2.0。本次仅在本地下载并运行官方 smoke，未再分发权重。该 checkpoint 是 DROID 策略，不是 Piper 策略。
