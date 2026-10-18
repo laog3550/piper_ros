@@ -1,0 +1,35 @@
+{
+  "output_dir": "/tmp/piper_camera_episodes",
+  "topics": [
+    "/camera_wrist_left/color/image_raw",
+    "/camera_wrist_left/color/camera_info",
+    "/camera_wrist_left/depth/image_raw",
+    "/camera_wrist_left/depth/camera_info",
+    "/camera_wrist_right/color/image_raw",
+    "/camera_wrist_right/color/camera_info",
+    "/camera_wrist_right/depth/image_raw",
+    "/camera_wrist_right/depth/camera_info",
+    "/camera_top/D455/color/image_raw",
+    "/camera_top/D455/color/camera_info",
+    "/camera_top/D455/aligned_depth_to_color/image_raw",
+    "/camera_top/D455/aligned_depth_to_color/camera_info"
+  ],
+  "frame_topics": [
+    "/camera_wrist_left/color/image_raw",
+    "/camera_wrist_left/depth/image_raw",
+    "/camera_wrist_right/color/image_raw",
+    "/camera_wrist_right/depth/image_raw",
+    "/camera_top/D455/color/image_raw",
+    "/camera_top/D455/aligned_depth_to_color/image_raw"
+  ],
+  "expected_fps": {
+    "/camera_wrist_left/color/image_raw": 30,
+    "/camera_wrist_left/depth/image_raw": 30,
+    "/camera_wrist_right/color/image_raw": 30,
+    "/camera_wrist_right/depth/image_raw": 30,
+    "/camera_top/D455/color/image_raw": 30,
+    "/camera_top/D455/aligned_depth_to_color/image_raw": 30
+  },
+  "min_free_gb": 20,
+  "startup_timeout_sec": 15
+}

@@ -700,6 +700,16 @@ python3 tools/episode_recorder/episode_recorder.py stop --config /path/to/config
 python3 tools/episode_recorder/episode_recorder.py save --config /path/to/config.json
 ```
 
+未连接机械臂时，先只采三机 RGB-D。各终端均在本仓库根目录执行 `source /opt/ros/humble/setup.bash` 和 `source install/setup.bash`；先完成一次 `colcon build --symlink-install`。依次启动：
+
+```bash
+ros2 launch piper start_cameras.launch.py camera_map:=$PWD/config/camera_map.json
+python3 tools/episode_recorder/episode_recorder.py serve --config config/episode_recorder.camera_only.json
+python3 tools/episode_recorder/web_console.py --config config/episode_recorder.camera_only.json
+```
+
+在 `http://127.0.0.1:8765/` 用任务模式开始、停止并保存 Episode；应先保存再停止相机。`config/episode_recorder.camera_only.json` 只录三机的 RGB、对齐深度、CameraInfo 和自动追加的 `/collection/events`，默认保存到 `/tmp/piper_camera_episodes`，长期采集前请改到有足够空间的磁盘。此 Episode 可用于相机检查与 Rerun 回放，但不含关节状态和示教动作，现有 `to_lerobot.py` 会明确拒绝将其转换为动作数据集。
+
 轻量级 Web 控制台另起一个进程，使用同一配置文件：
 
 ```bash
@@ -719,3 +729,11 @@ Rerun 示例映射 `tools/rerun_bridge.example.json` 对应上述 CAN、相机�
 /tmp/piper-rerun-bridge-venv/bin/python -m pip install rerun-sdk==0.39.0
 /tmp/piper-rerun-bridge-venv/bin/python tools/rerun_bridge.py --config tools/rerun_bridge.example.json --save /tmp/episode.rrd replay /path/to/episode_000001
 ```
+
+只有包含**真实示教动作**、实测关节状态、已核实夹爪映射和采集元数据的完整 Episode 才进入 LeRobot 转换；输入目录至少要有两个 `episode_*`。选择实际来源格式后执行，例如已核实的 `PiperArmVector`：
+
+```bash
+/path/to/lerobot-env/bin/python tools/episode_recorder/to_lerobot.py /path/to/episodes /path/to/lerobot-output --repo-id local/piper_demo --arm-mode LEFT --input-format can-vector --fps 10 --max-age-ms 100 --max-can-skew-ms 30
+```
+
+依赖安装、`joint-state` 模式及元数据字段见 [VLA MVP 接口说明](docs/VLA_MVP_INTERFACE.md#episode--lerobot-v3-转换)。当前本机相机被动 Episode 缺关节状态与示教动作，转换器按预期拒绝；不要给它补造动作。2026-10-18 复验中，真实三机被动 Episode 的 12 路相机话题和事件均通过 SQLite 与 Header 检查；Web 控台合成采集、ROS 服务 `start/stop/save/list`、Rerun 实时及回放均通过。LeRobot 合成双臂 CAN 向量夹具转换 2 个 Episode、4 帧，重新读取的 `train`/`test` 各为 1 个 Episode、2 帧，状态和动作均为 14 维。此结果验证转换链路，不代表已有合格真实示教数据。
