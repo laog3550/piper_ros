@@ -146,6 +146,20 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false .offline/openpi/.venv/bin/python tools/vla_c
 
 只读检查另一个工作区 `/home/mips/piper_tjp/data` 的 `metadata.yaml`：其中有 6 次录制，4 次只有相机/事件话题；`scene-a05` 的 2 次录制包含左侧 `/dataset/can_left/action_target`、`feedback_observed` 与三路 JPEG RGB。`banana-direct-a05-002` 的候选清单记录了 139 个对齐样本，但最长内部缺口为 1.235 s、`training_ready=false`，并列出反馈实体归属、夹爪零点/执行映射及最终动作节拍待核对。这些是已有的左侧候选示教材料，不能据此推断双臂或完整 `pick`/`place` 训练集已经具备。`/dataset/...` 话题与本契约话题不同，JPEG 与本契约原始 `rgb8` 帧也不同；本离线工具不会隐式转换。仍缺少经过验证的契约映射、标定版本、Piper 归一化统计与适配 checkpoint。只有这些条件和动作空间转换经验证后，才可能生成符合本契约的真实动作块；离线 smoke 不能替代该验证。上述检查没有修改 `/home/mips/piper_tjp`。
 
+2026-10-18 补充只读证据盘点，命令如下；默认只打印 JSON，`--output` 仅写指定报告路径，不改动源录制：
+
+```bash
+python3 tools/episode_recorder/audit_real_data.py /home/mips/piper_tjp/data \
+  --episode-root /tmp/piper_passive_episodes_20261015 \
+  --output /tmp/piper-real-data-audit.json
+```
+
+盘点范围为六段 `/home/mips/piper_tjp/data` 原始 bag 和一段已知的本机被动相机 Episode；排除 `/tmp` 中测试生成的合成 Episode。四段静态 bag（`banana-a01-001` 至 `banana-a04-001`）均有 RGB/深度，缺示教动作与实测关节反馈。`banana-direct-a05-001` 有 2,765 条三机 RGB、10,786 条左侧动作目标和 37,508 条反馈，`banana-direct-a05-002` 相应为 1,675、4,895、22,942；两段均未录深度。这里的计数是各话题消息数之和，**不是**对齐训练帧数。两段直连录制的标签为 `banana_into_box` 回合级 `success`，并非独立 `pick`、`place` 技能标签。`banana-direct-a05-001` 的标签已用原工作区的只读校验器核对通过；其源目录未保存清单，因此自动报告里的 `recording_validated` 为 `null`。
+
+已有 `banana-direct-a05-002-candidate-v2` 的 `aligned_candidate.npz` 实际包含 139 条七维状态、七维动作、五路源 Header 时间和每条三张 JPEG；三路图像各 139 张。其采样网格分为 17 个连续片段，最长源时间内部缺口 1.235 s；候选清单给出长度 5/10/25/50 的片段内动作窗口分别为 84/48/7/0。该候选标记 `training_ready=false`、`source_frame_ids=can_left:*_unverified`，尚无反馈实体归属、夹爪开口零点/方向与执行映射证据，不能把 139 条候选当作合格真实训练帧。被动相机 Episode 有顶部 RGB/深度各 518 帧、左右腕 RGB/深度各 492 帧，缺动作、关节反馈及标定/动作来源元数据。
+
+因此本轮符合 Piper `to_lerobot.py` 契约的真实 Episode/帧数均为 **0**，`train`/`test` 均为 **0**，`pick`/`place` 技能覆盖为空，没有生成真实 LeRobot 数据集。后续补录应按 `episode.json` 契约提供不可变来源、Unix Header 时间、执行臂和技能标签、实测反馈、主臂目标、经核实的夹爪映射及标定/归一化版本；再由 `to_lerobot.py` 逐帧验收并按完整 Episode 划分，不能将当前 `/dataset/...` JPEG 或候选 NPZ 直接改名接入。
+
 ## 2026-10-18 集成验收记录
 
 在 `codex/humble-integration` 分支合入离线 critic、π0.5-DROID 基线、保守适配器和影子诊断后，执行以下命令：
