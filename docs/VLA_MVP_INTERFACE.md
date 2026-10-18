@@ -177,3 +177,11 @@ python3 tools/vla_contract/shadow_run.py fixture
 结果：8 个 ROS 包构建完成；编排、监督、预检、适配及影子测试 40 项通过，critic 测试 6 项通过，观测快照测试 8 项通过，契约自测 3 个正例与 10 个负例通过。合成整链从观测和输入预检进入安全监督，仅向内存 `ProposalOnlySink` 交付 2 个拟议目标；critic 返回 `HUMAN_REVIEW` 后进入锁存 `SAFE_STOP` 并取消执行器。另在本机 ROS 2 中运行 `fixture --publish-ros --hold-sec 5`，订阅影子专用话题收到 6 条诊断及 2 条拟议目标，其中包含 `SAFE_STOP`。此 ROS 发布仅来自合成夹具，未启动相机或机械臂，也未发 CAN/运动命令。
 
 尚未通过真实任务验收：可选 SmolVLM 的一次合成图像 smoke 输出无效 JSON，已正确降级为 `UNKNOWN`，没有分类准确率证据；官方 π0.5-DROID 仅完成随机输入的 GPU 推理 smoke，其 7 关节速度动作与 Piper 6 关节绝对目标不兼容。还缺 Piper 适配 checkpoint、可用的 `pick`/`place` 标注示教、归一化与动作映射、经核对的夹爪反馈、三机与手眼标定、世界几何/碰撞参数和实机安全验收。实时影子诊断在这些现场门槛不满足时应拒绝进入动作规划，不能据此声称真实技能成功。
+
+## 真实 Piper 技能离线验收
+
+运行 `python3 tools/vla_contract/real_skill_acceptance.py /home/mips/piper_tjp/data` 可只读盘点原始 Episode 与候选对齐包；没有真实评估清单时退出码为 `2`，明确输出 `FAIL`。有模型预测后追加 `--evaluation /path/to/evaluation.json`。评估清单版本为 `piper_real_skill_eval_v1`，顶层须含 `action_space=absolute_joint_position_7`、`state_space=piper_joint_position_7`、`checkpoint`、`normalization`、`normalization_version`、`checkpoint_normalization_sha256` 和 `episodes`。两个文件引用均为 `{path, sha256}`。每个 Episode 指定 `episode_id`、`split`（`train` 或 `validation`）、`source_manifest` 和 `source_bag` 的文件引用；验证 Episode 还须指定 `aligned_data`、`predictions`、`skill_labels` 的文件引用，以及绑定预测文件的 `prediction_checkpoint_sha256`、`prediction_normalization_sha256`。预测 NPZ 须有与源数据逐条一致的 `timestamp_ns`、`action`（`N×7`）、`latency_ms`、`error`（逐条 `0`/`1`）。标签 JSON 须有 `episode_id`、`verified=true`、`source_manifest_sha256` 与长度为 `N` 的逐条 `pick`/`place` 标签。人工标签的真实性仍须由标注者核对，布尔声明不能替代核查记录。
+
+验收拒绝训练与验证复用 Episode 或 bag、验证集缺任一技能、缺实测状态或示教动作、数据质量清单未通过、缺口超过 `1.5 / requested_fps` 秒、模型/归一化版本未绑定、预测时间戳不一致及维度错误。通过证据门槛时输出按技能的验证 Episode 数、样本数、错误率、6 关节平均绝对误差（`rad`）、夹爪平均绝对误差（`m`）和延迟 `p50/p95`（`ms`）。这些是开环动作拟合指标，不是闭环 `pick`/`place` 成功率；没有预先制定的任务性能阈值和真实执行结果时不得报告技能通过。
+
+2026-10-18 对 `/home/mips/piper_tjp/data` 只读运行：发现 6 段原始 bag、5 份 `episode_manifest.json`，其中只有 `banana-direct-a05-002` 的清单声明含左臂动作与反馈；`banana-direct-a05-001` 也有左侧动作与反馈，但未保存该清单。`banana-direct-a05-002` 的两个候选包各记录 139 个对齐样本，均为 `training_ready=false`，v2 最大内部缺口为 `1.235 s`，且没有核实的逐条 `pick`/`place` 标签。目录内没有 Piper 适配 checkpoint。此次真实技能验收结论为 **FAIL（证据不足）**，有效验证样本数为 `0`，错误率、动作误差和延迟均不可计算。最少还需来源独立的训练与验证 Episode、验证集两种技能的逐样本核实标签、通过质量核验的 Piper 状态/示教动作、Piper checkpoint 与绑定的归一化文件，以及由该 checkpoint 对验证集生成的逐样本预测和耗时。已有的 139 条候选记录不能计为通过的验证样本。
