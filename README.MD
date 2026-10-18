@@ -700,13 +700,21 @@ python3 tools/episode_recorder/episode_recorder.py stop --config /path/to/config
 python3 tools/episode_recorder/episode_recorder.py save --config /path/to/config.json
 ```
 
-轻量级 Web 控制台另起一个进程，使用同一配置文件。先在独立终端启动三路相机驱动；若当前工作区尚未构建 `piper`，先运行 `colcon build --packages-select piper --symlink-install` 并重新 `source install/setup.bash`：
+本地可视化控制台直接显示 ROS 图像，适合在采集电脑上查看三路接近 30 fps 的实时画面。先在独立终端启动三路相机驱动；若当前工作区尚未构建 `piper`，先运行 `colcon build --packages-select piper --symlink-install` 并重新 `source install/setup.bash`：
 
 ```bash
 ros2 launch piper start_cameras.launch.py camera_map:=/path/to/camera_map.json
 ```
 
-确认三路彩色图像话题均有发布者，再按上文命令启动录制器，并运行 Web 控制台：
+确认三路彩色图像话题均有发布者，再按上文命令启动录制器，并在另一终端运行本地控制台（需要系统 Python 的 `PyQt5`、`numpy` 和 `cv2`）：
+
+```bash
+python3 tools/episode_recorder/desktop_console.py --config /path/to/config.json
+```
+
+关闭本地窗口不影响独立录制器的当前录制；重新打开可继续操作。本地界面显示各路实际预览帧率，任务名、语言指令、开始、停止、结果标签、保存、丢弃及 Episode 列表均沿用录制器的 socket 接口。无机械臂验收可运行 `tools/episode_recorder/test_desktop_console_integration.py`；它只发布合成 ROS 数据，不连接 CAN 设备。
+
+需要浏览器访问时，仍可另起 Web 控制台进程。其预览经过 JPEG 编码和低频刷新，实时操作优先使用本地控制台：
 
 ```bash
 python3 tools/episode_recorder/web_console.py --config /path/to/config.json
