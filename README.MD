@@ -691,7 +691,7 @@ sudo apt install ros-$ROS_DISTRO-xacro
 
 ## ROS 2 数据采集与回放（Humble）
 
-先 `source /opt/ros/humble/setup.bash`、`colcon build --symlink-install`、`source install/setup.bash`。只读 CAN 节点发布左右主臂目标和从臂反馈；另运行 `ros2 run piper piper_arm_vector`，可从这四路帧组装带原始时间及缺帧、过期标记的七维话题。夹爪开口换算仍待现场核对，发布向量默认 `valid=false`；使用方法见 `docs/VLA_MVP_INTERFACE.md`。三路 RGB-D 的序列号、话题及尚未完成的停机和低延迟验收见 `docs/CAMERA_PAIRING.md`。录制器示例配置 `config/episode_recorder.example.json` 含四路原始 CAN、四路七维向量、三台相机的 RGB/Depth 与 CameraInfo；按实际磁盘路径和空间余量修改后使用：
+先 `source /opt/ros/humble/setup.bash`、`colcon build --symlink-install`、`source install/setup.bash`。只读 CAN 节点发布左右主臂目标和从臂反馈；另运行 `ros2 run piper piper_arm_vector`，可从这四路帧组装带原始时间及缺帧、过期标记的七维话题。夹爪开口换算仍待现场核对，发布向量默认 `valid=false`；使用方法见 `docs/VLA_MVP_INTERFACE.md`。三路 RGB-D 的序列号、话题及三小时出流与停机复验（含少量帧异常）见 `docs/CAMERA_PAIRING.md`。录制器示例配置 `config/episode_recorder.example.json` 含四路原始 CAN、四路七维向量、三台相机的 RGB/Depth 与 CameraInfo；按实际磁盘路径和空间余量修改后使用：
 
 ```bash
 python3 tools/episode_recorder/episode_recorder.py serve --config /path/to/config.json
