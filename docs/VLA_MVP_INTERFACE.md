@@ -145,3 +145,21 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false .offline/openpi/.venv/bin/python tools/vla_c
 ```
 
 只读检查另一个工作区 `/home/mips/piper_tjp/data` 的 `metadata.yaml`：其中有 6 次录制，4 次只有相机/事件话题；`scene-a05` 的 2 次录制包含左侧 `/dataset/can_left/action_target`、`feedback_observed` 与三路 JPEG RGB。`banana-direct-a05-002` 的候选清单记录了 139 个对齐样本，但最长内部缺口为 1.235 s、`training_ready=false`，并列出反馈实体归属、夹爪零点/执行映射及最终动作节拍待核对。这些是已有的左侧候选示教材料，不能据此推断双臂或完整 `pick`/`place` 训练集已经具备。`/dataset/...` 话题与本契约话题不同，JPEG 与本契约原始 `rgb8` 帧也不同；本离线工具不会隐式转换。仍缺少经过验证的契约映射、标定版本、Piper 归一化统计与适配 checkpoint。只有这些条件和动作空间转换经验证后，才可能生成符合本契约的真实动作块；离线 smoke 不能替代该验证。上述检查没有修改 `/home/mips/piper_tjp`。
+
+## 2026-10-18 集成验收记录
+
+在 `codex/humble-integration` 分支合入离线 critic、π0.5-DROID 基线、保守适配器和影子诊断后，执行以下命令：
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install
+python3 -m unittest discover -s tools/vla_contract -p 'test_*.py'
+python3 -m unittest tools.vlm_critic.test_critic
+python3 tools/vla_contract/validate_contract.py --self-test
+python3 -m unittest discover -s tools/vla_observation -p 'test_*.py'
+python3 tools/vla_contract/shadow_run.py fixture
+```
+
+结果：8 个 ROS 包构建完成；编排、监督、预检、适配及影子测试 40 项通过，critic 测试 6 项通过，观测快照测试 8 项通过，契约自测 3 个正例与 10 个负例通过。合成整链从观测和输入预检进入安全监督，仅向内存 `ProposalOnlySink` 交付 2 个拟议目标；critic 返回 `HUMAN_REVIEW` 后进入锁存 `SAFE_STOP` 并取消执行器。另在本机 ROS 2 中运行 `fixture --publish-ros --hold-sec 5`，订阅影子专用话题收到 6 条诊断及 2 条拟议目标，其中包含 `SAFE_STOP`。此 ROS 发布仅来自合成夹具，未启动相机或机械臂，也未发 CAN/运动命令。
+
+尚未通过真实任务验收：可选 SmolVLM 的一次合成图像 smoke 输出无效 JSON，已正确降级为 `UNKNOWN`，没有分类准确率证据；官方 π0.5-DROID 仅完成随机输入的 GPU 推理 smoke，其 7 关节速度动作与 Piper 6 关节绝对目标不兼容。还缺 Piper 适配 checkpoint、可用的 `pick`/`place` 标注示教、归一化与动作映射、经核对的夹爪反馈、三机与手眼标定、世界几何/碰撞参数和实机安全验收。实时影子诊断在这些现场门槛不满足时应拒绝进入动作规划，不能据此声称真实技能成功。
