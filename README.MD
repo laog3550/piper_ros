@@ -700,7 +700,13 @@ python3 tools/episode_recorder/episode_recorder.py stop --config /path/to/config
 python3 tools/episode_recorder/episode_recorder.py save --config /path/to/config.json
 ```
 
-轻量级 Web 控制台另起一个进程，使用同一配置文件：
+轻量级 Web 控制台另起一个进程，使用同一配置文件。先在独立终端启动三路相机驱动；若当前工作区尚未构建 `piper`，先运行 `colcon build --packages-select piper --symlink-install` 并重新 `source install/setup.bash`：
+
+```bash
+ros2 launch piper start_cameras.launch.py camera_map:=/path/to/camera_map.json
+```
+
+确认三路彩色图像话题均有发布者，再按上文命令启动录制器，并运行 Web 控制台：
 
 ```bash
 python3 tools/episode_recorder/web_console.py --config /path/to/config.json
