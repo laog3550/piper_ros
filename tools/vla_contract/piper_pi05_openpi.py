@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""注册 Piper π0.5 本地训练/推理配置并核验真实数据；运行：python3 tools/vla_contract/piper_pi05_openpi.py --help。"""
+
+import argparse
+import dataclasses
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from contextlib import redirect_stderr, redirect_stdout
+
+from piper_pi05_adapter import ACTION_HORIZON, PiperInputs, PiperOutputs
+
+
+OPENPI_COMMIT = "215abfb217dbac7d5f1273282331b9b1866c0479"
+CONFIG_NAME = "pi05_piper_absolute_7"
+ASSET_ID = "local/piper_train"
+
+
+def digest(path):
+    result = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            result.update(block)
+    return result.hexdigest()
+
+
+def checkpoint_hashes(directory):
+    files = sorted(path for path in directory.rglob("*") if path.is_file())
+    if not files:
+        raise ValueError("训练结束后没有 checkpoint 文件")
+    return {str(path.relative_to(directory)): digest(path) for path in files}
+
+
+def episode_source_digest(directory):
+    files = [directory / "episode.json", directory / "bag" / "metadata.yaml",
+             *sorted((directory / "bag").glob("*.db3"))]
+    if len(files) < 3 or any(not path.is_file() for path in files):
+        raise ValueError(f"{directory}: Episode 来源文件不完整")
+    result = hashlib.sha256()
+    for path in files:
+        result.update(path.name.encode())
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                result.update(block)
+    return result.hexdigest()
+
+
+def check_openpi(root, base_checkpoint):
+    revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    if revision != OPENPI_COMMIT:
+        raise ValueError(f"openpi commit 不符：{revision}")
+    if not (base_checkpoint / "params").is_dir() or not (base_checkpoint / "assets").is_dir():
+        raise ValueError("缺少完整的官方 pi05_droid checkpoint")
+    sys.path.insert(0, str(root / "src"))
+    return revision
+
+
+def verify_base_checkpoint(base_checkpoint):
+    manifest = Path(__file__).with_name("pi05_droid.sha256")
+    rows = manifest.read_text(encoding="utf-8").splitlines()
+    if len(rows) != 20:
+        raise ValueError("官方 checkpoint SHA-256 清单不完整")
+    for row in rows:
+        expected, relative = row.split("  ", 1)
+        file = (base_checkpoint / relative).resolve()
+        if not file.is_relative_to(base_checkpoint.resolve()) or digest(file) != expected:
+            raise ValueError(f"官方 checkpoint SHA-256 不匹配：{relative}")
+
+
+def check_dataset(dataset, evidence, audit_report):
+    """只接受由 Episode 转换器产出的本地 LeRobot v3 与独立核验凭据。"""
+    manifest_path = dataset / "conversion_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    proof = json.loads(evidence.read_text(encoding="utf-8"))
+    audit = json.loads(audit_report.read_text(encoding="utf-8"))
+    if (manifest.get("format") != "LeRobotDataset v3.0"
+            or manifest.get("arm_mode") not in ("LEFT", "RIGHT")
+            or manifest.get("action_space") != "absolute_joint_position_7"
+            or manifest.get("joint_names") != [f"{manifest.get('arm_mode', '').lower()}.joint{i}" for i in range(1, 7)]
+            + [f"{manifest.get('arm_mode', '').lower()}.gripper"]):
+        raise ValueError("LeRobot 转换清单不是单臂 Piper 绝对 7 维数据")
+    episodes = manifest.get("episodes")
+    if not isinstance(episodes, list) or not episodes:
+        raise ValueError("转换清单没有 Episode")
+    if (proof.get("status") != "verified_for_piper_pi05_training"
+            or proof.get("conversion_manifest_sha256") != digest(manifest_path)
+            or proof.get("source_audit_sha256") != digest(audit_report)
+            or proof.get("action_space") != "absolute_joint_position_7"
+            or proof.get("arm_mode") != manifest["arm_mode"]
+            or proof.get("action_provenance") != "human_demonstration"
+            or proof.get("gripper_mapping_verified") is not True
+            or proof.get("calibration_verified") is not True):
+        raise ValueError("缺少与数据清单匹配的独立 Piper 训练核验证据")
+    ids = {row.get("episode_id") for row in episodes}
+    if None in ids or len(ids) != len(episodes):
+        raise ValueError("Episode ID 缺失或重复")
+    if (audit.get("schema_version") != "piper_real_data_audit_v1"
+            or audit.get("eligible_episode_count", 0) < len(ids)
+            or ids - {row.get("episode_id") for row in audit.get("sources", []) if row.get("eligible") is True}):
+        raise ValueError("独立来源审计未核准所有训练 Episode")
+    labels = proof.get("episode_skills")
+    if not isinstance(labels, dict) or set(labels) != ids or set(labels.values()) - {"pick", "place"}:
+        raise ValueError("核验证据必须逐 Episode 标注 pick/place")
+    counts = {(split, skill): 0 for split in ("train", "test") for skill in ("pick", "place")}
+    for row in episodes:
+        split = row.get("split")
+        if split not in ("train", "test") or not isinstance(row.get("frames"), int) or row["frames"] < ACTION_HORIZON:
+            raise ValueError("Episode 划分或连续帧数不满足 16 步训练")
+        source = Path(row.get("source", ""))
+        if not source.is_absolute() or row.get("source_sha256") != episode_source_digest(source):
+            raise ValueError("Episode 来源文件摘要不匹配")
+        if not row.get("calibration_version") or not row.get("normalization_version"):
+            raise ValueError("Episode 缺标定或归一化版本")
+        counts[split, labels[row["episode_id"]]] += 1
+    for field in ("calibration_version", "normalization_version"):
+        versions = {row[field] for row in episodes}
+        if len(versions) != 1 or proof.get(field) != next(iter(versions)):
+            raise ValueError(f"{field} 在 Episode 和核验证据中不一致")
+    if any(counts["train", skill] < 10 or counts["test", skill] < 3 for skill in ("pick", "place")):
+        raise ValueError(f"每种技能至少需要 10 个训练 Episode 和 3 个测试 Episode：{counts}")
+    for split in ("train", "test"):
+        if not (dataset / split / "meta" / "info.json").is_file():
+            raise ValueError(f"{split} LeRobot v3 数据集不存在")
+    return {"arm_mode": manifest["arm_mode"], "counts": {f"{a}_{b}": v for (a, b), v in counts.items()},
+            "conversion_manifest_sha256": digest(manifest_path), "evidence_sha256": digest(evidence),
+            "source_audit_sha256": digest(audit_report)}
+
+
+def build_config(repo_id, base_checkpoint, work_dir, steps, batch_size, arm_mode):
+    """openpi 官方 API：独立图像槽、7 维绝对位置、Piper 专属归一化。"""
+    from openpi import transforms
+    from openpi.models.pi0_config import Pi0Config
+    from openpi.training import config as cfg
+    from openpi.training import weight_loaders
+
+    if arm_mode not in ("LEFT", "RIGHT"):
+        raise ValueError("仅支持单臂 Piper")
+    repack = transforms.Group(inputs=[transforms.RepackTransform({
+        "images": {"top_rgb": "observation.images.top_rgb",
+                   "wrist_rgb": f"observation.images.{arm_mode.lower()}_wrist_rgb"},
+        "state": "observation.state", "actions": "action", "prompt": "task",
+    })])
+
+    @dataclasses.dataclass(frozen=True)
+    class PiperTransformFactory:
+        def __call__(self, model_config):
+            if not getattr(model_config, "pi05", False) or model_config.action_dim != 32:
+                raise ValueError("Piper 适配仅支持 π0.5 的 32 维内部动作")
+            return transforms.Group(inputs=[PiperInputs(arm_mode.lower())], outputs=[PiperOutputs()])
+
+    data = cfg.SimpleDataConfig(
+        repo_id=repo_id,
+        assets=cfg.AssetsConfig(asset_id=ASSET_ID),
+        base_config=cfg.DataConfig(action_sequence_keys=("action",), prompt_from_task=False,
+                                   repack_transforms=repack),
+        data_transforms=PiperTransformFactory(),
+    )
+    result = cfg.TrainConfig(
+        name=CONFIG_NAME, exp_name="verified_piper", model=Pi0Config(pi05=True, action_dim=32,
+                                                                       action_horizon=ACTION_HORIZON),
+        data=data, weight_loader=weight_loaders.CheckpointWeightLoader(str(base_checkpoint / "params")),
+        assets_base_dir=str(work_dir / "assets"), checkpoint_base_dir=str(work_dir / "checkpoints"),
+        num_train_steps=steps, batch_size=batch_size, save_interval=min(1000, steps),
+        log_interval=min(50, steps), wandb_enabled=False,
+        policy_metadata={"robot": "Piper", "action_space": "absolute_joint_position_7",
+                         "state": "joint1..joint6 rad; gripper m", "action": "absolute joint1..joint6 rad; gripper m"},
+    )
+    cfg._CONFIGS_DICT[CONFIG_NAME] = result
+    return result
+
+
+def load_validated_policy(openpi_root, checkpoint, record_path, evaluation_path):
+    """推理入口：只加载有训练来源、逐文件摘要及独立留出集评估的 Piper 权重。"""
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+    if record.get("status") != "trained_unvalidated" or evaluation.get("status") != "piper_offline_validated":
+        raise ValueError("Piper 权重尚未完成独立离线评估")
+    if record.get("checkpoint_sha256") != checkpoint_hashes(checkpoint):
+        raise ValueError("Piper checkpoint 文件摘要不匹配")
+    if evaluation.get("training_record_sha256") != digest(record_path):
+        raise ValueError("离线评估未绑定此训练记录")
+    check_openpi(openpi_root, Path(record["base_checkpoint"]))
+    verify_base_checkpoint(Path(record["base_checkpoint"]))
+    from openpi.policies import policy_config
+    config = build_config("local/piper_train", Path(record["base_checkpoint"]),
+                          record_path.parent, record["steps"], record["batch_size"], record["arm_mode"])
+    return policy_config.create_trained_policy(config, checkpoint)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Piper π0.5 离线训练门禁与配置；不连接 ROS/CAN")
+    parser.add_argument("--openpi-root", type=Path, required=True)
+    parser.add_argument("--base-checkpoint", type=Path, required=True)
+    parser.add_argument("--dataset", type=Path, required=True)
+    parser.add_argument("--evidence", type=Path, required=True)
+    parser.add_argument("--audit-report", type=Path, required=True)
+    parser.add_argument("--work-dir", type=Path, required=True)
+    parser.add_argument("--steps", type=int, default=20000)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--train", action="store_true", help="门禁通过后计算归一化并微调")
+    args = parser.parse_args()
+    if args.steps <= 0 or args.batch_size <= 0:
+        parser.error("steps 和 batch-size 必须为正整数")
+    try:
+        evidence = check_dataset(args.dataset, args.evidence, args.audit_report)
+        revision = check_openpi(args.openpi_root, args.base_checkpoint)
+        if not args.train:
+            print(json.dumps({"status": "ready_for_training", "openpi_commit": revision,
+                              **evidence}, ensure_ascii=False, indent=2))
+            return 0
+        verify_base_checkpoint(args.base_checkpoint)
+        if args.work_dir.exists() and any(args.work_dir.iterdir()):
+            raise ValueError("训练目录必须为空，防止混入旧 checkpoint")
+        # LeRobot 的本地 repo_id 解析依赖 HF_LEROBOT_HOME；只建立到经核验数据的只读引用。
+        home = args.work_dir / "lerobot"
+        repo = home / "local" / "piper_train"
+        repo.parent.mkdir(parents=True)
+        repo.symlink_to((args.dataset / "train").resolve(), target_is_directory=True)
+        os.environ["HF_LEROBOT_HOME"] = str(home)
+        cfg = build_config("local/piper_train", args.base_checkpoint, args.work_dir,
+                           args.steps, args.batch_size, evidence["arm_mode"])
+        from importlib.util import module_from_spec, spec_from_file_location
+        with (args.work_dir / "training.log").open("w", encoding="utf-8") as log:
+            with redirect_stdout(log), redirect_stderr(log):
+                for name, script in (("piper_norm", "compute_norm_stats.py"), ("piper_train", "train.py")):
+                    spec = spec_from_file_location(name, args.openpi_root / "scripts" / script)
+                    module = module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    if name == "piper_norm":
+                        module.main(CONFIG_NAME)
+                    else:
+                        module.main(cfg)
+                log.flush()
+        steps = sorted((path for path in cfg.checkpoint_dir.iterdir() if path.is_dir() and path.name.isdigit()),
+                       key=lambda path: int(path.name))
+        if not steps:
+            raise ValueError("openpi 训练未生成 checkpoint")
+        checkpoint = steps[-1]
+        hashes = checkpoint_hashes(checkpoint)
+        record = {"status": "trained_unvalidated", "openpi_commit": revision,
+                  "base_checkpoint": str(args.base_checkpoint.resolve()), **evidence,
+                  "config": CONFIG_NAME, "steps": args.steps, "batch_size": args.batch_size,
+                  "checkpoint_dir": str(checkpoint), "checkpoint_sha256": hashes,
+                  "training_log_sha256": digest(args.work_dir / "training.log")}
+        (args.work_dir / "training_record.json").write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps(record, ensure_ascii=False, indent=2))
+        return 0
+    except (ValueError, FileNotFoundError, KeyError, OSError) as error:
+        print(f"拒绝：{error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

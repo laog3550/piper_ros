@@ -118,6 +118,26 @@ python3 -m unittest discover -s tools/vla_contract -p 'test_shadow_run.py' -v
 
 `fixture` 是明确隔离的合成验收：它构造不可变本地图像，通过相同的 DROID 输入预检，再注入**合成 Piper 绝对目标**、合成反馈和合成安全参数。`TaskOrchestrator` 只把 `ActionSupervisor.tick()` 批准的目标交给内存中的 `ProposalOnlySink`，输出拟议目标与 `OBSERVE`、`POLICY_INPUT`、`PLAN`、`EXECUTE`、`VERIFY` 状态。`OfflineVlmCriticAdapter` 检查前后帧引用并返回 `HUMAN_REVIEW`，任务随后进入锁存 `SAFE_STOP`，不自动继续或重试。这个验收验证接口与拒绝路径，不代表真实模型、TF、碰撞检查或硬件安全通过。
 
+## Piper π0.5 动作适配与训练门禁
+
+`tools/vla_contract/piper_pi05_adapter.py` 明确规定单臂输入为 `top_rgb`、对应侧的 `wrist_rgb`、`joint1`～`joint6` 绝对角 `rad`、夹爪开口 `m` 和非空任务文本；训练目标为每步相同单位的 7 维绝对位置。`tools/vla_contract/piper_pi05_openpi.py` 在固定的上游 openpi commit 上构建独立配置 `pi05_piper_absolute_7`：16 步、模型内部 32 维、Piper 专属归一化资产 `local/piper_train`，不采用 DROID 速度动作、DROID 归一化统计，也不虚构 Piper 的第七个关节。左臂与右臂的腕部图像分别进入对应槽位，另一腕部槽位掩码关闭。训练前由 openpi 从已核验的训练集计算 `state` 与 `actions` 的分位数统计；推理时只从同一 Piper checkpoint 加载其统计。`PiperOutputs` 截取内部前 7 维并检查形状、有限性和夹爪非负，输出仍须经离线任务验收及安全监督，不得直连控制话题。
+
+训练入口要求 `to_lerobot.py` 生成的单臂 LeRobot v3 `conversion_manifest.json`、逐 Episode 来源摘要与 `pick`/`place` 标签，并要求独立核验文件包含 `status=verified_for_piper_pi05_training`、转换清单及来源审计报告的 SHA-256、`action_provenance=human_demonstration`、`gripper_mapping_verified=true`、`calibration_verified=true`、一致的 `calibration_version`、`normalization_version`、`arm_mode` 与 `action_space`。来源审计报告须把每个训练 Episode 标为 `eligible=true`，转换器所记的来源 SHA-256 也必须与当前来源文件相符。每种技能的训练/测试集至少分别有 10/3 个完整 Episode，单个 Episode 至少 16 帧；这是启动微调的最低门槛，不代表技能质量充分。测试集须按 Episode 隔离，不能用训练帧替代。训练成功后保存 openpi checkpoint、逐文件 SHA-256、日志摘要和 `training_record.json`，记录状态为 `trained_unvalidated`；只有独立留出集评估记录绑定该训练记录并标记 `piper_offline_validated`，`load_validated_policy()` 才允许加载。该标记本身不等于真机安全许可。
+
+复现适配与门禁检查：
+
+```bash
+python3 tools/vla_contract/piper_pi05_adapter.py --self-test
+python3 -m unittest discover -s tools/vla_contract -p 'test_piper_pi05_adapter.py' -v
+/path/to/openpi/.venv/bin/python tools/vla_contract/piper_pi05_openpi.py \
+  --openpi-root /path/to/openpi --base-checkpoint /path/to/pi05_droid \
+  --dataset /path/to/validated_lerobot --evidence /path/to/independent_evidence.json \
+  --audit-report /path/to/independent_audit.json \
+  --work-dir /path/to/new_training_run
+```
+
+数据核验通过后，在同一命令末尾加 `--train` 才会计算归一化统计并启动微调。`--work-dir` 必须为空；命令仅操作本地文件和 GPU，不连接 ROS/CAN。当前 `/home/mips/piper_tjp/data` 的只读核验结果见 `/tmp/piper-real-data-audit.json`：7 个来源中符合本仓库 Episode/LeRobot 契约的真实 Episode 为 0、有效训练帧为 0、`pick`/`place` 覆盖为空。静态场景缺示教动作及反馈；直接采集的 139 帧候选尚缺实体归属、夹爪映射、标定、动作来源与时间域等核验。因此当前训练门禁拒绝，未生成 Piper 微调 checkpoint，也没有真实技能成功率证据。
+
 真机前还需确认七维夹爪与关节反馈映射、相机手眼与外参及同时刻 TF、三机深度单位和时间同步、Piper 数据归一化及已适配 checkpoint、动作空间与周期、物理限位及扫掠碰撞模型。当前影子入口不提供这些参数，也不接入任何执行驱动。
 
 ## 官方 π0.5-DROID 离线基线边界
