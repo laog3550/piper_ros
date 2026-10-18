@@ -112,7 +112,7 @@ def recorder_request(socket_path, request):
     return json.loads(data)
 
 
-def handler_factory(socket_path, preview):
+def handler_factory(socket_path, preview, default_save_dir):
     class Handler(BaseHTTPRequestHandler):
         def respond(self, status, payload, content_type="application/json; charset=utf-8"):
             if not isinstance(payload, bytes):
@@ -136,6 +136,7 @@ def handler_factory(socket_path, preview):
                         event = preview.event
                     result["cameras"] = preview.snapshot()
                     result["event"] = event
+                    result["default_save_dir"] = str(default_save_dir)
                     return self.respond(200, result)
                 except (OSError, ValueError, json.JSONDecodeError) as exc:
                     return self.respond(503, {"ok": False, "error": str(exc), "cameras": preview.snapshot()})
@@ -179,7 +180,8 @@ def handler_factory(socket_path, preview):
                     request = {"action": action, "mode": "task", "task": task, "skill": None,
                                "metadata": {"language_instruction": instruction}}
                 elif action == "save":
-                    request = {"action": action, "outcome": body.get("outcome")}
+                    request = {"action": action, "outcome": body.get("outcome"),
+                               "save_dir": body.get("save_dir")}
                     if request["outcome"] not in ("success", "failure"):
                         raise ValueError("请选择成功或失败标签")
                 else:
@@ -212,7 +214,7 @@ def main():
 
     spin = threading.Thread(target=spin_preview, daemon=True)
     spin.start()
-    server = ThreadingHTTPServer((args.host, args.port), handler_factory(socket_path, preview))
+    server = ThreadingHTTPServer((args.host, args.port), handler_factory(socket_path, preview, root))
     def shutdown(_signum, _frame):
         threading.Thread(target=server.shutdown, daemon=True).start()
     signal.signal(signal.SIGTERM, shutdown)

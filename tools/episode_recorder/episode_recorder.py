@@ -308,26 +308,69 @@ class Recorder:
         self._write_current()
         return self.status()
 
-    def save(self, outcome=None):
+    def save(self, outcome=None, save_dir=None):
         if self.current is None or self.metadata["state"] != "stopped":
             raise ValueError("只能保存已停止且通过完整性核验的 Episode")
         if outcome is not None and outcome not in ("success", "failure"):
             raise ValueError("outcome 必须为 success 或 failure")
+        if save_dir is not None and (not isinstance(save_dir, str) or not save_dir.strip()
+                                     or not Path(save_dir).expanduser().is_absolute()):
+            raise ValueError("save_dir 必须为非空的绝对目录路径")
+        destination_root = Path(save_dir).expanduser().resolve() if save_dir else self.root
+        if destination_root == self.staging or self.staging in destination_root.parents:
+            raise ValueError("保存目录不能位于录制暂存目录内")
         inspect_bag(self.current / "bag", self.metadata["topics"],
                     self.metadata.get("frame_topics", []), self.metadata.get("expected_fps", {}))
+        destination_root.mkdir(parents=True, exist_ok=True)
         counter = self.root / ".next_id"
         stored = int(counter.read_text()) if counter.exists() else 1
-        existing = [int(p.name[8:]) for p in self.root.glob("episode_[0-9]*") if p.name[8:].isdigit()]
+        existing = [int(p.name[8:]) for p in self._saved_paths() if p.name[8:].isdigit()]
         number = max([stored, *(value + 1 for value in existing)])
-        destination = self.root / f"episode_{number:06d}"
+        destination = destination_root / f"episode_{number:06d}"
+        if destination.exists() or destination.is_symlink():
+            raise ValueError(f"保存目标已存在: {destination}")
+        same_device = self.current.stat().st_dev == destination_root.stat().st_dev
+        if not same_device:
+            required = sum(path.stat().st_size for path in self.current.rglob("*") if path.is_file())
+            if shutil.disk_usage(destination_root).free < required + self.min_free_bytes:
+                raise ValueError("目标磁盘剩余空间不足以保存 Episode")
+        previous = dict(self.metadata)
+        previous["events"] = list(self.metadata.get("events", []))
         self.metadata["state"] = "saved"
         self.metadata["episode_number"] = number
         self.metadata["outcome"] = outcome
         self.metadata["saved_at_unix_ns"] = time.time_ns()
-        self._event("saved")
-        self.current.rename(destination)
-        atomic_json(counter, number + 1)
+        self.metadata["save_directory"] = str(destination_root)
+        event = {"episode_id": self.metadata["episode_id"], "event": "saved",
+                 "time": time.time_ns(), "time_unit": "unix_ns"}
+        self.metadata.setdefault("events", []).append(event)
+        self._write_current()
+        temporary = destination_root / f".{destination.name}.copy-{uuid.uuid4().hex}"
+        try:
+            if destination_root != self.root:
+                index = self.root / ".episode_index.json"
+                paths = load_json(index)["paths"] if index.exists() else []
+                atomic_json(index, {"paths": [*paths, str(destination)]})
+            atomic_json(counter, number + 1)
+            if same_device:
+                self.current.rename(destination)
+            else:
+                shutil.copytree(self.current, temporary)
+                temporary.rename(destination)
+                cleanup = self.root / f".saved_cleanup_{self.current.name}_{uuid.uuid4().hex}"
+                self.current.rename(cleanup)
+                shutil.rmtree(cleanup, ignore_errors=True)
+        except (OSError, ValueError):
+            if temporary.exists():
+                shutil.rmtree(temporary, ignore_errors=True)
+            if self.current.exists():
+                if destination.exists():
+                    shutil.rmtree(destination, ignore_errors=True)
+                self.metadata = previous
+                self._write_current()
+            raise
         self.current = None
+        self.event_publisher.publish(String(data=json.dumps(event, ensure_ascii=False)))
         return {"state": "saved", "path": str(destination), "episode_number": number}
 
     def discard(self):
@@ -371,9 +414,16 @@ class Recorder:
         pending = [str(p) for p in self.staging.iterdir() if p.is_dir()]
         return {"state": "idle", "pending": pending, "free_bytes": self._available()}
 
+    def _saved_paths(self):
+        paths = list(self.root.glob("episode_[0-9]*"))
+        index = self.root / ".episode_index.json"
+        if index.exists():
+            paths.extend(Path(path) for path in load_json(index)["paths"])
+        return list(dict.fromkeys(paths))
+
     def list(self):
         episodes = []
-        for directory in sorted(self.root.glob("episode_[0-9]*"), reverse=True):
+        for directory in self._saved_paths():
             metadata_file = directory / "episode.json"
             if not metadata_file.is_file():
                 continue
@@ -383,6 +433,7 @@ class Recorder:
                 "outcome", "started_at_unix_ns", "saved_at_unix_ns")})
             episodes[-1]["language_instruction"] = metadata.get("task_metadata", {}).get("language_instruction")
             episodes[-1]["path"] = str(directory)
+        episodes.sort(key=lambda entry: entry.get("episode_number") or 0, reverse=True)
         return {"episodes": episodes}
 
     def close(self):
@@ -435,7 +486,7 @@ def serve(config):
                     if action == "start":
                         result = recorder.start(request)
                     elif action == "save":
-                        result = recorder.save(request.get("outcome"))
+                        result = recorder.save(request.get("outcome"), request.get("save_dir"))
                     else:
                         result = getattr(recorder, action)()
                     response = {"ok": True, "result": result}
@@ -457,6 +508,7 @@ def main():
     parser.add_argument("--skill")
     parser.add_argument("--metadata", help="JSON 任务元数据文件")
     parser.add_argument("--outcome", choices=["success", "failure"], help="保存时的结果标签")
+    parser.add_argument("--save-dir", help="保存 Episode 的绝对目录路径")
     args = parser.parse_args()
     config = load_json(args.config)
     if args.action == "serve":
@@ -470,6 +522,7 @@ def main():
                        metadata=load_json(args.metadata) if args.metadata else {})
     if args.action == "save":
         request["outcome"] = args.outcome
+        request["save_dir"] = args.save_dir
     with socket.socket(socket.AF_UNIX) as connection:
         connection.connect(str(path))
         connection.sendall(json.dumps(request, ensure_ascii=False).encode())

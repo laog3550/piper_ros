@@ -95,8 +95,10 @@ def main():
             web = subprocess.Popen(web_command, env=env)
             wait_for(lambda: http(port, "/api/status")["result"]["state"] == "recording")
             assert http(port, "/api/stop", {})["result"]["state"] == "stopped"
-            saved = http(port, "/api/save", {"outcome": "success"})["result"]
+            selected_dir = root / "selected_episodes"
+            saved = http(port, "/api/save", {"outcome": "success", "save_dir": str(selected_dir)})["result"]
             assert saved["state"] == "saved"
+            assert Path(saved["path"]).parent == selected_dir
             entries = http(port, "/api/episodes")["result"]["episodes"]
             assert len(entries) == 1 and entries[0]["outcome"] == "success"
             assert entries[0]["language_instruction"] == "拿起测试物体"

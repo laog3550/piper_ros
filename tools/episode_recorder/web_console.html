@@ -45,6 +45,7 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <div id="current" class="muted">正在读取状态…</div>
 <label for="task">任务名</label><input id="task" maxlength="120" placeholder="例如：拾取杯子">
 <label for="instruction">语言指令</label><textarea id="instruction" maxlength="2000" placeholder="例如：把桌上的杯子放入收纳盒"></textarea>
+<label for="save_dir">Episode 保存目录（每次保存可修改）</label><input id="save_dir" placeholder="绝对路径；自动创建 episode_000001 等目录">
 <div class="row"><button id="start">开始录制</button><button id="stop" class="secondary">停止录制</button></div>
 <div class="row"><div><label for="outcome">结果标签</label><select id="outcome"><option value="">请选择</option><option value="success">成功</option><option value="failure">失败</option></select></div><button id="save">保存 Episode</button><button id="discard" class="danger">丢弃 Episode</button></div>
 <p id="notice" class="notice" role="status"></p>
@@ -72,6 +73,7 @@ async function refresh() {
   try {
     const data=await readJson(await fetch('/api/status', {cache:'no-store'}));
     const result=data.result; state=result.state;
+    if (!$('save_dir').value) $('save_dir').value=data.default_save_dir || '';
     $('state').textContent=labels[state] || state; $('state').className='badge '+(state==='recording'?'recording':'');
     const meta=result.metadata || {};
     $('current').textContent=meta.episode_id ? `Episode ${meta.episode_id} · ${meta.task || ''} · ${meta.error || labels[state]}` : (result.pending?.length ? `有 ${result.pending.length} 个未处理暂存 Episode，请丢弃后重试` : '当前无活动 Episode');
@@ -108,7 +110,7 @@ async function action(name, payload={}) {
 }
 $('start').onclick=()=>action('start',{task:$('task').value,language_instruction:$('instruction').value});
 $('stop').onclick=()=>action('stop');
-$('save').onclick=()=>action('save',{outcome:$('outcome').value});
+$('save').onclick=()=>action('save',{outcome:$('outcome').value,save_dir:$('save_dir').value.trim()});
 $('discard').onclick=()=>{ if(confirm('确定丢弃当前 Episode？录制数据将被删除。')) action('discard'); };
 $('outcome').onchange=updateButtons;
 refresh(); loadEpisodes(); setInterval(refresh,1500); setInterval(loadEpisodes,10000);

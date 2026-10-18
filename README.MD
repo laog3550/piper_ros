@@ -712,7 +712,7 @@ ros2 launch piper start_cameras.launch.py camera_map:=/path/to/camera_map.json
 python3 tools/episode_recorder/desktop_console.py --config /path/to/config.json
 ```
 
-关闭本地窗口不影响独立录制器的当前录制；重新打开可继续操作。本地界面显示各路实际预览帧率，任务名、语言指令、开始、停止、结果标签、保存、丢弃及 Episode 列表均沿用录制器的 socket 接口。无机械臂验收可运行 `tools/episode_recorder/test_desktop_console_integration.py`；它只发布合成 ROS 数据，不连接 CAN 设备。
+关闭本地窗口不影响独立录制器的当前录制；重新打开可继续操作。本地界面显示各路实际预览帧率，任务名、语言指令、开始、停止、结果标签、保存、丢弃及 Episode 列表均沿用录制器的 socket 接口。保存前可在“Episode 保存目录”中为这次采集输入绝对路径或选择文件夹；录制器会在该目录下生成 `episode_000001` 等文件夹，列表显示实际位置。录制时数据仍写入配置的 `output_dir/.staging`；若保存目录位于其他文件系统，停止后保存需要复制整段数据，完成前不会删除暂存文件。CLI 也可用 `save --save-dir /绝对/目录` 指定位置。无机械臂验收可运行 `tools/episode_recorder/test_desktop_console_integration.py`；它只发布合成 ROS 数据，不连接 CAN 设备。
 
 需要浏览器访问时，仍可另起 Web 控制台进程。其预览经过 JPEG 编码和低频刷新，实时操作优先使用本地控制台：
 
@@ -720,7 +720,7 @@ python3 tools/episode_recorder/desktop_console.py --config /path/to/config.json
 python3 tools/episode_recorder/web_console.py --config /path/to/config.json
 ```
 
-浏览器打开 `http://127.0.0.1:8765/`。页面显示三路彩色相机的低帧率预览和录制状态，可填写任务名、语言指令，执行开始、停止、保存或丢弃，并查看已保存的 Episode。保存时选择成功或失败标签；录制器分别将语言指令写入 `task_metadata.language_instruction`，将标签写入 `outcome`。录制器新增只读 `/collection/list` 服务和同名 socket 操作；socket 的 `save` 操作接受可选的 `outcome`，旧的 `/collection/save` Trigger 与 CLI 保存方式仍可使用，未传标签时 `outcome` 为 `null`。Web 服务默认仅监听本机，录制器独立运行，关闭浏览器或重启 Web 服务不会中断录制。预览仅支持常见 8 位彩色或灰度 `sensor_msgs/Image`；深度图及 CAN 数据仍交给独立的 Rerun 查看。
+浏览器打开 `http://127.0.0.1:8765/`。页面显示三路彩色相机的低帧率预览和录制状态，可填写任务名、语言指令及保存目录，执行开始、停止、保存或丢弃，并查看已保存的 Episode。保存时选择成功或失败标签；录制器分别将语言指令写入 `task_metadata.language_instruction`，将标签写入 `outcome`。录制器新增只读 `/collection/list` 服务和同名 socket 操作；socket 的 `save` 操作接受可选的 `outcome` 与 `save_dir`，旧的 `/collection/save` Trigger 与 CLI 保存方式仍可使用，未传标签时 `outcome` 为 `null`。Web 服务默认仅监听本机，录制器独立运行，关闭浏览器或重启 Web 服务不会中断录制。预览仅支持常见 8 位彩色或灰度 `sensor_msgs/Image`；深度图及 CAN 数据仍交给独立的 Rerun 查看。
 
 无机械臂验收可构建 `piper_msgs` 后运行 `tools/episode_recorder/test_web_console_integration.py`。测试仅发布合成相机和字符串反馈话题，不连接 CAN 设备。
 

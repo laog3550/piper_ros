@@ -43,7 +43,9 @@ def publish(node, stop):
 
 
 def main():
-    with tempfile.TemporaryDirectory(prefix="piper-desktop-test-") as temp:
+    with (tempfile.TemporaryDirectory(prefix="piper-desktop-test-") as temp,
+          tempfile.TemporaryDirectory(prefix="piper-save-test-", dir="/dev/shm") as target):
+        target_dir = Path(target)
         config_path = Path(temp) / "config.json"
         config = {"output_dir": str(Path(temp) / "episodes"),
                   "topics": [*TOPICS, "/synthetic/feedback"],
@@ -82,12 +84,25 @@ def main():
                 elif stage[0] == "reopened" and window.state == "recording":
                     window.stop.click(); stage[0] = "stopping"
                 elif stage[0] == "stopping" and window.state == "stopped":
+                    collision = target_dir / "episode_000001"
+                    collision.mkdir()
+                    try:
+                        recorder_request(socket_path, {"action": "save", "outcome": "success",
+                                                       "save_dir": str(target_dir)})
+                        raise AssertionError("现有 Episode 目录未被拒绝")
+                    except ValueError as exc:
+                        assert "已存在" in str(exc)
+                    assert recorder_request(socket_path, {"action": "status"})["state"] == "stopped"
+                    collision.rmdir()
+                    window.save_dir.setText(str(target_dir))
                     window.outcome.setCurrentIndex(1)
                     window.save.click(); stage[0] = "saving"
                 elif stage[0] == "saving" and window.state == "idle":
                     episodes = recorder_request(socket_path, {"action": "list"})["episodes"]
                     assert len(episodes) == 1 and episodes[0]["outcome"] == "success"
                     assert episodes[0]["language_instruction"] == "拿起合成物体"
+                    assert Path(episodes[0]["path"]).parent == target_dir
+                    assert (Path(episodes[0]["path"]) / "bag" / "metadata.yaml").is_file()
                     window.task.setText("丢弃测试")
                     window.instruction.setPlainText("测试")
                     window.start.click(); stage[0] = "discard_start"
@@ -107,6 +122,20 @@ def main():
             app.exec_()
             if failure:
                 raise failure[0]
+            recorder.terminate(); recorder.wait(timeout=8)
+            recorder = subprocess.Popen([sys.executable, str(HERE / "episode_recorder.py"),
+                                         "serve", "--config", str(config_path)])
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                try:
+                    episodes = recorder_request(socket_path, {"action": "list"})["episodes"]
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            else:
+                raise AssertionError("重启录制器后无法查询 Episode")
+            assert len(episodes) == 1 and Path(episodes[0]["path"]).parent == target_dir
+            print("重启录制器后仍能列出跨磁盘保存的 Episode：通过")
         finally:
             timer.stop(); window.close()
             stop.set(); feeder.join(timeout=2)

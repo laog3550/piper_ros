@@ -16,7 +16,7 @@ import numpy as np
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
-    QApplication, QComboBox, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
+    QApplication, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QTableWidget,
     QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget, QSizePolicy,
 )
@@ -161,6 +161,15 @@ class Console(QMainWindow):
         self.instruction = QTextEdit()
         self.instruction.setMaximumHeight(74)
         fields.addWidget(self.instruction, 1, 1)
+        fields.addWidget(QLabel("Episode 保存目录"), 2, 0)
+        save_location = QHBoxLayout()
+        self.save_dir = QLineEdit(str(root))
+        self.save_dir.setToolTip("保存时在此目录下自动创建 episode_000001 等目录；每个 Episode 可单独修改")
+        browse = QPushButton("选择文件夹…")
+        browse.clicked.connect(self.choose_save_dir)
+        save_location.addWidget(self.save_dir, 1)
+        save_location.addWidget(browse)
+        fields.addLayout(save_location, 2, 1)
         fields.setColumnStretch(1, 1)
 
         controls = QHBoxLayout()
@@ -233,7 +242,16 @@ class Console(QMainWindow):
     def save_recording(self):
         outcome = (None, "success", "failure")[self.outcome.currentIndex()]
         if outcome:
-            self.action("save", outcome=outcome)
+            path = self.save_dir.text().strip()
+            if not path:
+                self.message.setText("请填写 Episode 保存目录")
+                return
+            self.action("save", outcome=outcome, save_dir=path)
+
+    def choose_save_dir(self):
+        selected = QFileDialog.getExistingDirectory(self, "选择 Episode 保存目录", self.save_dir.text())
+        if selected:
+            self.save_dir.setText(selected)
 
     def discard_recording(self):
         if QMessageBox.question(self, "确认丢弃", "确定丢弃当前 Episode？录制数据将被删除。") == QMessageBox.Yes:
@@ -261,7 +279,8 @@ class Console(QMainWindow):
                 elif key == "list":
                     self.show_episodes(result["episodes"])
                 else:
-                    self.message.setText("操作完成")
+                    self.message.setText(f"已保存至 {result['path']}" if result.get("state") == "saved"
+                                         else "操作完成")
                     if result.get("state") == "saved":
                         self.task.clear(); self.instruction.clear(); self.outcome.setCurrentIndex(0)
                     self.refresh(); self.refresh_list()
