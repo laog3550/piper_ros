@@ -26,7 +26,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import Image
-from preview_depth import camera_topics, depth_to_bgr
+from preview_depth import camera_topics, depth_to_bgr, overlay_color_edges
 
 
 CAMERA_NAMES = ("左腕", "右腕", "顶部")
@@ -73,6 +73,12 @@ def to_pixmap(message):
     raise ValueError(f"不支持的图像编码: {message.encoding}")
 
 
+def render_depth(message, color_message):
+    bgr = depth_to_bgr(message, max_dimension=400)
+    overlay_color_edges(bgr, color_message, (message.width, message.height))
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+
 class Cameras:
     def __init__(self, config):
         self.node = rclpy.create_node("piper_collection_desktop_preview")
@@ -110,9 +116,12 @@ class Console(QMainWindow):
         root = Path(config["output_dir"]).expanduser().resolve()
         self.socket_path = Path(config.get("socket_path", str(root / "recorder.sock"))).expanduser().resolve()
         self.pool = ThreadPoolExecutor(max_workers=1)
+        self.depth_pool = ThreadPoolExecutor(max_workers=2)
         self.pending = {}
         self.state = "unknown"
         self.last_sequence = [[0] * 3 for _ in range(2)]
+        self.depth_draw_at = [0.0] * 3
+        self.depth_jobs = [None] * 3
         self.rendered = [0] * 3
         self.display_fps = [0] * 3
         self.fps_at = time.monotonic()
@@ -138,7 +147,7 @@ class Console(QMainWindow):
             image.setStyleSheet("background: #10151d; color: white")
             info = QLabel(self.cameras.topics[index])
             info.setWordWrap(True)
-            depth_title = QLabel("深度 · 紫蓝近（0 米），黄红远（1 米），黑色无效")
+            depth_title = QLabel("深度 · 0–1 米；灰色超距，黑色无效，白线为彩色轮廓")
             depth_image = QLabel("等待深度图…")
             depth_image.setAlignment(Qt.AlignCenter)
             depth_image.setMinimumWidth(260)
@@ -333,20 +342,36 @@ class Console(QMainWindow):
             images = self.images if kind == 0 else self.depth_images
             labels = self.camera_labels if kind == 0 else self.depth_labels
             for index, (message, sequence, received_at) in enumerate(frames):
+                if kind == 1:
+                    job = self.depth_jobs[index]
+                    if job is not None and job.done():
+                        self.depth_jobs[index] = None
+                        try:
+                            rgb = job.result()
+                            pixmap = QPixmap.fromImage(QImage(rgb.data, rgb.shape[1], rgb.shape[0],
+                                                              rgb.strides[0], QImage.Format_RGB888))
+                            images[index].setPixmap(pixmap.scaled(images[index].size(),
+                                                                  Qt.KeepAspectRatio, Qt.FastTransformation))
+                        except (ValueError, cv2.error) as exc:
+                            labels[index].setText(f"{CAMERA_NAMES[index]}：{exc}")
+                    if (sequence != self.last_sequence[kind][index] and message is not None
+                            and self.depth_jobs[index] is None and now - self.depth_draw_at[index] >= 0.2):
+                        color_message, _, color_received_at = snapshot[0][index]
+                        if now - color_received_at >= 0.25:
+                            color_message = None
+                        self.depth_jobs[index] = self.depth_pool.submit(render_depth, message, color_message)
+                        self.depth_draw_at[index] = now
+                        self.last_sequence[kind][index] = sequence
+                    if now - received_at > 2 and received_at:
+                        labels[index].setText(f"{CAMERA_NAMES[index]}：画面中断")
+                    continue
                 if sequence != self.last_sequence[kind][index] and message is not None:
                     self.last_sequence[kind][index] = sequence
                     try:
-                        if kind == 0:
-                            pixmap = to_pixmap(message)
-                        else:
-                            bgr = depth_to_bgr(message, max_dimension=400)
-                            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                            pixmap = QPixmap.fromImage(QImage(rgb.data, rgb.shape[1], rgb.shape[0],
-                                                              rgb.strides[0], QImage.Format_RGB888))
+                        pixmap = to_pixmap(message)
                         images[index].setPixmap(pixmap.scaled(images[index].size(),
                                                               Qt.KeepAspectRatio, Qt.FastTransformation))
-                        if kind == 0:
-                            self.rendered[index] += 1
+                        self.rendered[index] += 1
                     except (ValueError, cv2.error) as exc:
                         labels[index].setText(f"{CAMERA_NAMES[index]}：{exc}")
                 if now - received_at > 2 and received_at:
@@ -368,6 +393,7 @@ class Console(QMainWindow):
     def closeEvent(self, event):
         self.frames_timer.stop(); self.status_timer.stop(); self.list_timer.stop(); self.work_timer.stop()
         self.pool.shutdown(wait=False, cancel_futures=True)
+        self.depth_pool.shutdown(wait=False, cancel_futures=True)
         super().closeEvent(event)
 
 

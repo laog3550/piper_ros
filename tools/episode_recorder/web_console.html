@@ -63,7 +63,7 @@ for (let i=0;i<3;i++) {
   const colorTitle = document.createElement('p'); colorTitle.textContent='彩色';
   const colorImg = document.createElement('img'); colorImg.alt=`${title.textContent}彩色预览`;
   const colorStatus = document.createElement('p'); colorStatus.textContent='等待彩色画面…';
-  const depthTitle = document.createElement('p'); depthTitle.textContent='深度 · 紫蓝近（0 米），黄红远（1 米），黑色无效';
+  const depthTitle = document.createElement('p'); depthTitle.textContent='深度 · 0–1 米；灰色超距，黑色无效，白线为彩色轮廓';
   const depthImg = document.createElement('img'); depthImg.alt=`${title.textContent}深度预览`;
   const depthStatus = document.createElement('p'); depthStatus.textContent='等待深度画面…';
   card.append(title,colorTitle,colorImg,colorStatus,depthTitle,depthImg,depthStatus);

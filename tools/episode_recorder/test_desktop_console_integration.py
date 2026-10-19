@@ -35,7 +35,7 @@ def publish(node, stop):
     images = [node.create_publisher(Image, topic, qos_profile_sensor_data) for topic in TOPICS]
     depth = Image()
     depth.width, depth.height, depth.step, depth.encoding = 64, 48, 128, "16UC1"
-    depth.data = (1500).to_bytes(2, "little") * (depth.width * depth.height)
+    depth.data = (500).to_bytes(2, "little") * (depth.width * depth.height)
     depths = [node.create_publisher(Image, topic, qos_profile_sensor_data) for topic in DEPTH_TOPICS]
     feedback = node.create_publisher(String, "/synthetic/feedback", 10)
     next_frame = time.monotonic()

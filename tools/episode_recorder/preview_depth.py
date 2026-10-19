@@ -6,6 +6,7 @@ import numpy as np
 
 CAMERA_MARKERS = ("camera_wrist_left", "camera_wrist_right", "camera_top")
 DEPTH_MAX_METERS = 1.0
+FAR_COLOR_BGR = (52, 52, 52)
 
 
 def camera_topics(config):
@@ -38,9 +39,39 @@ def depth_to_bgr(message, max_dimension=None):
     if max_dimension and max(width, height) > max_dimension:
         scale = max_dimension / max(width, height)
         meters = cv2.resize(meters, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
-    valid = np.isfinite(meters) & (meters > 0)
-    scaled = np.clip(np.where(valid, meters, 0), 0, DEPTH_MAX_METERS) * (254 / DEPTH_MAX_METERS)
-    indices = np.where(valid, scaled.astype(np.uint8) + 1, 0).astype(np.uint8)
+    meters = cv2.medianBlur(np.where(np.isfinite(meters), meters, 0).astype(np.float32), 5)
+    near = (meters > 0) & (meters <= DEPTH_MAX_METERS)
+    far = meters > DEPTH_MAX_METERS
+    scaled = np.clip(np.where(near, meters, 0), 0, DEPTH_MAX_METERS) * (254 / DEPTH_MAX_METERS)
+    indices = np.where(near, scaled.astype(np.uint8) + 1, 0).astype(np.uint8)
     colored = cv2.applyColorMap(indices, cv2.COLORMAP_TURBO)
-    colored[~valid] = 0
+    colored[~near] = 0
+    colored[far] = FAR_COLOR_BGR
     return colored
+
+
+def overlay_color_edges(depth_bgr, color_message, depth_size):
+    if color_message is None or (color_message.width, color_message.height) != depth_size:
+        return depth_bgr
+    channels = {"rgb8": 3, "bgr8": 3, "rgba8": 4, "bgra8": 4,
+                "mono8": 1, "yuyv": 2, "yuv422_yuy2": 2}
+    encoding = color_message.encoding
+    count = channels.get(encoding)
+    width, height, step = color_message.width, color_message.height, color_message.step
+    if count is None or step < width * count or len(color_message.data) < step * height:
+        return depth_bgr
+    pixels = np.frombuffer(color_message.data, dtype=np.uint8, count=step * height)
+    pixels = pixels.reshape(height, step)[:, :width * count].reshape(height, width, count)
+    if encoding in ("mono8", "yuyv", "yuv422_yuy2"):
+        gray = pixels[:, :, 0]
+    else:
+        conversion = {"rgb8": cv2.COLOR_RGB2GRAY, "bgr8": cv2.COLOR_BGR2GRAY,
+                      "rgba8": cv2.COLOR_RGBA2GRAY, "bgra8": cv2.COLOR_BGRA2GRAY}[encoding]
+        gray = cv2.cvtColor(pixels, conversion)
+    if gray.shape != depth_bgr.shape[:2]:
+        gray = cv2.resize(gray, (depth_bgr.shape[1], depth_bgr.shape[0]),
+                          interpolation=cv2.INTER_AREA)
+    edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 80, 160) > 0
+    near = np.any(depth_bgr != FAR_COLOR_BGR, axis=2) & np.any(depth_bgr != 0, axis=2)
+    depth_bgr[edges & near] = (235, 235, 235)
+    return depth_bgr

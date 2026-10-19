@@ -18,7 +18,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
-from preview_depth import camera_topics, depth_to_bgr
+from preview_depth import camera_topics, depth_to_bgr, overlay_color_edges
 
 
 PAGE = Path(__file__).with_name("web_console.html").read_bytes()
@@ -50,8 +50,9 @@ def encode_image(message):
     return encoded.tobytes()
 
 
-def encode_depth(message):
+def encode_depth(message, color_message=None):
     frame = depth_to_bgr(message, max_dimension=640)
+    overlay_color_edges(frame, color_message, (message.width, message.height))
     ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
     if not ok:
         raise ValueError("深度图 JPEG 编码失败")
@@ -66,6 +67,8 @@ class Preview:
         self.times = [[0.0] * 3 for _ in range(2)]
         self.errors = [[None] * 3 for _ in range(2)]
         self.event = None
+        self.color_messages = [None] * 3
+        self.color_times = [0.0] * 3
         pairs = camera_topics(config)
         self.topics = [color for color, _ in pairs]
         self.depth_topics = [depth for _, depth in pairs]
@@ -79,10 +82,14 @@ class Preview:
     def on_image(self, kind, index, message):
         now = time.monotonic()
         with self.lock:
+            if kind == 0:
+                self.color_messages[index], self.color_times[index] = message, now
             if now - self.times[kind][index] < 0.4:
                 return
+            color_message = (self.color_messages[index] if kind == 1
+                             and now - self.color_times[index] < 0.25 else None)
         try:
-            frame = encode_image(message) if kind == 0 else encode_depth(message)
+            frame = encode_image(message) if kind == 0 else encode_depth(message, color_message)
             error = None
         except (ValueError, cv2.error) as exc:
             frame, error = None, str(exc)

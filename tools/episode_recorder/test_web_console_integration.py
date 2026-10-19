@@ -53,7 +53,7 @@ def publisher(node, stop):
     images = [node.create_publisher(Image, topic, qos_profile_sensor_data) for topic in TOPICS]
     depth = Image()
     depth.height, depth.width, depth.encoding, depth.step = 24, 32, "16UC1", 64
-    depth.data = (1200).to_bytes(2, "little") * (depth.height * depth.width)
+    depth.data = (700).to_bytes(2, "little") * (depth.height * depth.width)
     depths = [node.create_publisher(Image, topic, qos_profile_sensor_data) for topic in DEPTH_TOPICS]
     can = node.create_publisher(String, "/synthetic/can_feedback", 10)
     while not stop.is_set():
