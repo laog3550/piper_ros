@@ -18,7 +18,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
-from preview_depth import camera_topics, depth_to_bgr, overlay_color_edges
+from preview_depth import DEPTH_MAX_METERS, camera_topics, depth_to_bgr, overlay_color_edges
 
 
 PAGE = Path(__file__).with_name("web_console.html").read_bytes()
@@ -50,8 +50,8 @@ def encode_image(message):
     return encoded.tobytes()
 
 
-def encode_depth(message, color_message=None):
-    frame = depth_to_bgr(message, max_dimension=640)
+def encode_depth(message, index, color_message=None):
+    frame = depth_to_bgr(message, max_dimension=640, max_meters=DEPTH_MAX_METERS[index])
     overlay_color_edges(frame, color_message, (message.width, message.height))
     ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
     if not ok:
@@ -89,7 +89,7 @@ class Preview:
             color_message = (self.color_messages[index] if kind == 1
                              and now - self.color_times[index] < 0.25 else None)
         try:
-            frame = encode_image(message) if kind == 0 else encode_depth(message, color_message)
+            frame = encode_image(message) if kind == 0 else encode_depth(message, index, color_message)
             error = None
         except (ValueError, cv2.error) as exc:
             frame, error = None, str(exc)
@@ -115,7 +115,8 @@ class Preview:
     def _stream_status(self, kind, index, topic, now):
         return {"topic": topic, "online": bool(self.frames[kind][index]) and now - self.times[kind][index] < 3,
                 "age_sec": round(now - self.times[kind][index], 1) if self.times[kind][index] else None,
-                "error": self.errors[kind][index]}
+                "error": self.errors[kind][index],
+                "max_meters": DEPTH_MAX_METERS[index] if kind == 1 else None}
 
 
 def recorder_request(socket_path, request):

@@ -26,7 +26,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import Image
-from preview_depth import camera_topics, depth_to_bgr, overlay_color_edges
+from preview_depth import DEPTH_MAX_METERS, camera_topics, depth_to_bgr, overlay_color_edges
 
 
 CAMERA_NAMES = ("左腕", "右腕", "顶部")
@@ -73,8 +73,8 @@ def to_pixmap(message):
     raise ValueError(f"不支持的图像编码: {message.encoding}")
 
 
-def render_depth(message, color_message):
-    bgr = depth_to_bgr(message, max_dimension=400)
+def render_depth(message, color_message, index):
+    bgr = depth_to_bgr(message, max_dimension=400, max_meters=DEPTH_MAX_METERS[index])
     overlay_color_edges(bgr, color_message, (message.width, message.height))
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
@@ -147,7 +147,7 @@ class Console(QMainWindow):
             image.setStyleSheet("background: #10151d; color: white")
             info = QLabel(self.cameras.topics[index])
             info.setWordWrap(True)
-            depth_title = QLabel("深度 · 0–1 米；灰色超距，黑色无效，白线为彩色轮廓")
+            depth_title = QLabel(f"深度 · 0–{DEPTH_MAX_METERS[index]:g} 米；灰色超距，黑色无效，白线为彩色轮廓")
             depth_image = QLabel("等待深度图…")
             depth_image.setAlignment(Qt.AlignCenter)
             depth_image.setMinimumWidth(260)
@@ -359,7 +359,7 @@ class Console(QMainWindow):
                         color_message, _, color_received_at = snapshot[0][index]
                         if now - color_received_at >= 0.25:
                             color_message = None
-                        self.depth_jobs[index] = self.depth_pool.submit(render_depth, message, color_message)
+                        self.depth_jobs[index] = self.depth_pool.submit(render_depth, message, color_message, index)
                         self.depth_draw_at[index] = now
                         self.last_sequence[kind][index] = sequence
                     if now - received_at > 2 and received_at:

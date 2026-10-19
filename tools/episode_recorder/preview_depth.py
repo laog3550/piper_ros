@@ -5,7 +5,7 @@ import numpy as np
 
 
 CAMERA_MARKERS = ("camera_wrist_left", "camera_wrist_right", "camera_top")
-DEPTH_MAX_METERS = 1.0
+DEPTH_MAX_METERS = (0.5, 0.5, 1.0)
 FAR_COLOR_BGR = (52, 52, 52)
 MAX_HOLE_PIXELS_AT_640 = 250
 
@@ -43,7 +43,7 @@ def filter_depth(meters):
     return smoothed
 
 
-def depth_to_bgr(message, max_dimension=None):
+def depth_to_bgr(message, max_dimension=None, max_meters=1.0):
     width, height, step = message.width, message.height, message.step
     if message.encoding not in ("16UC1", "32FC1"):
         raise ValueError(f"不支持的深度图编码: {message.encoding}")
@@ -61,9 +61,9 @@ def depth_to_bgr(message, max_dimension=None):
         scale = max_dimension / max(width, height)
         meters = cv2.resize(meters, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
     meters = filter_depth(meters)
-    near = (meters > 0) & (meters <= DEPTH_MAX_METERS)
-    far = meters > DEPTH_MAX_METERS
-    scaled = np.clip(np.where(near, meters, 0), 0, DEPTH_MAX_METERS) * (254 / DEPTH_MAX_METERS)
+    near = (meters > 0) & (meters <= max_meters)
+    far = meters > max_meters
+    scaled = np.clip(np.where(near, meters, 0), 0, max_meters) * (254 / max_meters)
     indices = np.where(near, scaled.astype(np.uint8) + 1, 0).astype(np.uint8)
     colored = cv2.applyColorMap(indices, cv2.COLORMAP_TURBO)
     colored[~near] = 0

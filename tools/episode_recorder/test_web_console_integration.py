@@ -90,8 +90,12 @@ def main():
         web = subprocess.Popen(web_command, env=env)
         try:
             wait_for(lambda: http(port, "/api/status")["ok"])
-            wait_for(lambda: all(item["color"]["online"] and item["depth"]["online"]
-                                 for item in http(port, "/api/status")["cameras"]))
+            def online_cameras():
+                items = http(port, "/api/status")["cameras"]
+                return items if all(item["color"]["online"] and item["depth"]["online"]
+                                    for item in items) else None
+            cameras = wait_for(online_cameras)
+            assert [item["depth"]["max_meters"] for item in cameras] == [0.5, 0.5, 1.0]
             with urlopen(f"http://127.0.0.1:{port}/") as response:
                 assert b"<!doctype html>" in response.read()
             for index in range(3):
