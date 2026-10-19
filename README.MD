@@ -700,7 +700,7 @@ python3 tools/episode_recorder/episode_recorder.py stop --config /path/to/config
 python3 tools/episode_recorder/episode_recorder.py save --config /path/to/config.json
 ```
 
-本地可视化控制台直接显示 ROS 图像，适合在采集电脑上查看三路接近 30 fps 的实时画面。先在独立终端启动三路相机驱动；若当前工作区尚未构建 `piper`，先运行 `colcon build --packages-select piper --symlink-install` 并重新 `source install/setup.bash`：
+本地可视化控制台直接显示 ROS 图像，每台相机上方显示彩色画面、下方显示深度画面，适合在采集电脑上查看三路接近 30 fps 的彩色实时画面。深度图使用固定 0–1 米色标，超过 1 米的有效深度显示为最远端颜色，黑色表示无效深度；支持 `16UC1`（毫米）和 `32FC1`（米）。先在独立终端启动三路相机驱动；若当前工作区尚未构建 `piper`，先运行 `colcon build --packages-select piper --symlink-install` 并重新 `source install/setup.bash`：
 
 ```bash
 ros2 launch piper start_cameras.launch.py camera_map:=/path/to/camera_map.json
@@ -722,7 +722,7 @@ python3 tools/episode_recorder/desktop_console.py --config /path/to/config.json
 python3 tools/episode_recorder/web_console.py --config /path/to/config.json
 ```
 
-浏览器打开 `http://127.0.0.1:8765/`。页面显示三路彩色相机的低帧率预览和录制状态，可填写任务名、语言指令及保存目录，执行开始、停止、保存或丢弃，并查看已保存的 Episode。保存时选择成功或失败标签；录制器分别将语言指令写入 `task_metadata.language_instruction`，将标签写入 `outcome`。录制器新增只读 `/collection/list` 服务和同名 socket 操作；socket 的 `save` 操作接受可选的 `outcome` 与 `save_dir`，旧的 `/collection/save` Trigger 与 CLI 保存方式仍可使用，未传标签时 `outcome` 为 `null`。Web 服务默认仅监听本机，录制器独立运行，关闭浏览器或重启 Web 服务不会中断录制。预览仅支持常见 8 位彩色或灰度 `sensor_msgs/Image`；深度图及 CAN 数据仍交给独立的 Rerun 查看。
+浏览器打开 `http://127.0.0.1:8765/`。页面按相机上下显示三路彩色图和深度图的低帧率预览及录制状态，可填写任务名、语言指令及保存目录，执行开始、停止、保存或丢弃，并查看已保存的 Episode。保存时选择成功或失败标签；录制器分别将语言指令写入 `task_metadata.language_instruction`，将标签写入 `outcome`。录制器新增只读 `/collection/list` 服务和同名 socket 操作；socket 的 `save` 操作接受可选的 `outcome` 与 `save_dir`，旧的 `/collection/save` Trigger 与 CLI 保存方式仍可使用，未传标签时 `outcome` 为 `null`。Web 服务默认仅监听本机，录制器独立运行，关闭浏览器或重启 Web 服务不会中断录制。彩色预览支持常见 8 位彩色或灰度 `sensor_msgs/Image`；CAN 数据仍可交给独立的 Rerun 查看。
 
 无机械臂验收可构建 `piper_msgs` 后运行 `tools/episode_recorder/test_web_console_integration.py`。测试仅发布合成相机和字符串反馈话题，不连接 CAN 设备。
 

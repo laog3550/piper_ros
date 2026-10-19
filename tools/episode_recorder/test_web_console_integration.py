@@ -21,6 +21,8 @@ from rclpy.qos import qos_profile_sensor_data
 
 HERE = Path(__file__).parent
 TOPICS = [f"/camera_{name}/color/image_raw" for name in ("wrist_left", "wrist_right", "top")]
+DEPTH_TOPICS = [f"/camera_{name}/depth/image_raw" for name in ("wrist_left", "wrist_right")]
+DEPTH_TOPICS.append("/camera_top/D455/aligned_depth_to_color/image_raw")
 
 
 def wait_for(check, timeout=25):
@@ -49,11 +51,18 @@ def publisher(node, stop):
     image.height, image.width, image.encoding, image.step = 24, 32, "rgb8", 96
     image.data = bytes([50, 100, 200]) * (image.height * image.width)
     images = [node.create_publisher(Image, topic, qos_profile_sensor_data) for topic in TOPICS]
+    depth = Image()
+    depth.height, depth.width, depth.encoding, depth.step = 24, 32, "16UC1", 64
+    depth.data = (1200).to_bytes(2, "little") * (depth.height * depth.width)
+    depths = [node.create_publisher(Image, topic, qos_profile_sensor_data) for topic in DEPTH_TOPICS]
     can = node.create_publisher(String, "/synthetic/can_feedback", 10)
     while not stop.is_set():
         image.header.stamp = node.get_clock().now().to_msg()
         for item in images:
             item.publish(image)
+        depth.header.stamp = image.header.stamp
+        for item in depths:
+            item.publish(depth)
         can.publish(String(data="synthetic; no CAN device"))
         stop.wait(0.1)
 
@@ -63,8 +72,8 @@ def main():
         root = Path(temp)
         config = root / "config.json"
         config.write_text(json.dumps({"output_dir": str(root / "episodes"),
-                                      "topics": [*TOPICS, "/synthetic/can_feedback"],
-                                      "frame_topics": TOPICS, "min_free_gb": 0,
+                                      "topics": [*TOPICS, *DEPTH_TOPICS, "/synthetic/can_feedback"],
+                                      "frame_topics": [*TOPICS, *DEPTH_TOPICS], "min_free_gb": 0,
                                       "startup_timeout_sec": 15}))
         with closing(socket.socket()) as probe:
             probe.bind(("127.0.0.1", 0))
@@ -81,12 +90,14 @@ def main():
         web = subprocess.Popen(web_command, env=env)
         try:
             wait_for(lambda: http(port, "/api/status")["ok"])
-            wait_for(lambda: all(item["online"] for item in http(port, "/api/status")["cameras"]))
+            wait_for(lambda: all(item["color"]["online"] and item["depth"]["online"]
+                                 for item in http(port, "/api/status")["cameras"]))
             with urlopen(f"http://127.0.0.1:{port}/") as response:
                 assert b"<!doctype html>" in response.read()
             for index in range(3):
-                with urlopen(f"http://127.0.0.1:{port}/camera/{index}.jpg") as response:
-                    assert response.read(3) == b"\xff\xd8\xff"
+                for kind in ("color", "depth"):
+                    with urlopen(f"http://127.0.0.1:{port}/camera/{kind}/{index}.jpg") as response:
+                        assert response.read(3) == b"\xff\xd8\xff"
             start = http(port, "/api/start", {"task": "合成拾取", "language_instruction": "拿起测试物体",
                                                 "duration_sec": 3})
             assert start["result"]["state"] == "recording"

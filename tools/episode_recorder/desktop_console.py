@@ -26,24 +26,13 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import Image
+from preview_depth import camera_topics, depth_to_bgr
 
 
 CAMERA_NAMES = ("左腕", "右腕", "顶部")
-CAMERA_MARKERS = ("camera_wrist_left", "camera_wrist_right", "camera_top")
 STATE_NAMES = {"idle": "空闲", "starting": "启动中", "recording": "录制中",
                "stopped": "已停止，待保存", "failed": "失败，待丢弃",
                "interrupted": "意外中断，待丢弃"}
-
-
-def camera_topics(config):
-    available = [topic for topic in config["topics"] if topic.endswith("/color/image_raw")]
-    topics = []
-    for marker in CAMERA_MARKERS:
-        matches = [topic for topic in available if f"/{marker}/" in topic]
-        if len(matches) != 1:
-            raise ValueError(f"{marker} 必须恰有一路 color/image_raw 话题")
-        topics.append(matches[0])
-    return topics
 
 
 def recorder_request(socket_path, request):
@@ -87,27 +76,31 @@ def to_pixmap(message):
 class Cameras:
     def __init__(self, config):
         self.node = rclpy.create_node("piper_collection_desktop_preview")
-        self.topics = camera_topics(config)
+        pairs = camera_topics(config)
+        self.topics = [color for color, _ in pairs]
+        self.depth_topics = [depth for _, depth in pairs]
         self.lock = threading.Lock()
-        self.latest = [None] * 3
-        self.sequence = [0] * 3
-        self.received_at = [0.0] * 3
+        self.latest = [[None] * 3 for _ in range(2)]
+        self.sequence = [[0] * 3 for _ in range(2)]
+        self.received_at = [[0.0] * 3 for _ in range(2)]
         qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
                          reliability=ReliabilityPolicy.BEST_EFFORT,
                          durability=DurabilityPolicy.VOLATILE)
-        for index, topic in enumerate(self.topics):
-            self.node.create_subscription(Image, topic,
-                                          lambda msg, i=index: self.on_image(i, msg), qos)
+        for kind, topics in enumerate((self.topics, self.depth_topics)):
+            for index, topic in enumerate(topics):
+                self.node.create_subscription(Image, topic,
+                                              lambda msg, k=kind, i=index: self.on_image(k, i, msg), qos)
 
-    def on_image(self, index, message):
+    def on_image(self, kind, index, message):
         with self.lock:
-            self.latest[index] = message
-            self.sequence[index] += 1
-            self.received_at[index] = time.monotonic()
+            self.latest[kind][index] = message
+            self.sequence[kind][index] += 1
+            self.received_at[kind][index] = time.monotonic()
 
     def snapshot(self):
         with self.lock:
-            return list(zip(self.latest, self.sequence, self.received_at))
+            return [list(zip(self.latest[kind], self.sequence[kind], self.received_at[kind]))
+                    for kind in range(2)]
 
 
 class Console(QMainWindow):
@@ -119,12 +112,12 @@ class Console(QMainWindow):
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.pending = {}
         self.state = "unknown"
-        self.last_sequence = [0] * 3
+        self.last_sequence = [[0] * 3 for _ in range(2)]
         self.rendered = [0] * 3
         self.display_fps = [0] * 3
         self.fps_at = time.monotonic()
         self.setWindowTitle("Piper 数据采集控制台")
-        self.resize(1500, 890)
+        self.resize(1500, 980)
 
         container = QWidget()
         self.setCentralWidget(container)
@@ -133,24 +126,38 @@ class Console(QMainWindow):
         layout.addWidget(self.state_label)
         camera_grid = QGridLayout()
         layout.addLayout(camera_grid, 3)
-        self.images, self.camera_labels = [], []
+        self.images, self.depth_images, self.camera_labels, self.depth_labels = [], [], [], []
         for index, name in enumerate(CAMERA_NAMES):
             title = QLabel(name)
             title.setStyleSheet("font-weight: bold; font-size: 16px")
             image = QLabel("等待图像…")
             image.setAlignment(Qt.AlignCenter)
-            image.setMinimumWidth(300)
-            image.setFixedHeight(300)
+            image.setMinimumWidth(260)
+            image.setFixedHeight(175)
             image.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             image.setStyleSheet("background: #10151d; color: white")
             info = QLabel(self.cameras.topics[index])
             info.setWordWrap(True)
+            depth_title = QLabel("深度 · 紫蓝近（0 米），黄红远（1 米），黑色无效")
+            depth_image = QLabel("等待深度图…")
+            depth_image.setAlignment(Qt.AlignCenter)
+            depth_image.setMinimumWidth(260)
+            depth_image.setFixedHeight(175)
+            depth_image.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            depth_image.setStyleSheet("background: #10151d; color: white")
+            depth_info = QLabel(self.cameras.depth_topics[index])
+            depth_info.setWordWrap(True)
             camera_grid.addWidget(title, 0, index)
             camera_grid.addWidget(image, 1, index)
             camera_grid.addWidget(info, 2, index)
+            camera_grid.addWidget(depth_title, 3, index)
+            camera_grid.addWidget(depth_image, 4, index)
+            camera_grid.addWidget(depth_info, 5, index)
             camera_grid.setColumnStretch(index, 1)
             self.images.append(image)
+            self.depth_images.append(depth_image)
             self.camera_labels.append(info)
+            self.depth_labels.append(depth_info)
 
         fields = QGridLayout()
         layout.addLayout(fields)
@@ -321,25 +328,40 @@ class Console(QMainWindow):
 
     def draw_frames(self):
         now = time.monotonic()
-        for index, (message, sequence, received_at) in enumerate(self.cameras.snapshot()):
-            if sequence != self.last_sequence[index] and message is not None:
-                self.last_sequence[index] = sequence
-                try:
-                    pixmap = to_pixmap(message)
-                    size = self.images[index].size()
-                    self.images[index].setPixmap(pixmap.scaled(size, Qt.KeepAspectRatio, Qt.FastTransformation))
-                    self.rendered[index] += 1
-                except (ValueError, cv2.error) as exc:
-                    self.camera_labels[index].setText(f"{CAMERA_NAMES[index]}：{exc}")
-            if now - received_at > 2 and received_at:
-                self.camera_labels[index].setText(f"{CAMERA_NAMES[index]}：画面中断")
+        snapshot = self.cameras.snapshot()
+        for kind, frames in enumerate(snapshot):
+            images = self.images if kind == 0 else self.depth_images
+            labels = self.camera_labels if kind == 0 else self.depth_labels
+            for index, (message, sequence, received_at) in enumerate(frames):
+                if sequence != self.last_sequence[kind][index] and message is not None:
+                    self.last_sequence[kind][index] = sequence
+                    try:
+                        if kind == 0:
+                            pixmap = to_pixmap(message)
+                        else:
+                            bgr = depth_to_bgr(message, max_dimension=400)
+                            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                            pixmap = QPixmap.fromImage(QImage(rgb.data, rgb.shape[1], rgb.shape[0],
+                                                              rgb.strides[0], QImage.Format_RGB888))
+                        images[index].setPixmap(pixmap.scaled(images[index].size(),
+                                                              Qt.KeepAspectRatio, Qt.FastTransformation))
+                        if kind == 0:
+                            self.rendered[index] += 1
+                    except (ValueError, cv2.error) as exc:
+                        labels[index].setText(f"{CAMERA_NAMES[index]}：{exc}")
+                if now - received_at > 2 and received_at:
+                    labels[index].setText(f"{CAMERA_NAMES[index]}：画面中断")
         if now - self.fps_at >= 1:
             interval = now - self.fps_at
             self.display_fps = [round(count / interval, 1) for count in self.rendered]
-            for index, (_, _, received_at) in enumerate(self.cameras.snapshot()):
-                if received_at and now - received_at <= 2:
-                    self.camera_labels[index].setText(
-                        f"{CAMERA_NAMES[index]}：预览 {self.display_fps[index]:.1f} fps · {self.cameras.topics[index]}")
+            for kind, frames in enumerate(snapshot):
+                for index, (_, _, received_at) in enumerate(frames):
+                    if received_at and now - received_at <= 2:
+                        if kind == 0:
+                            self.camera_labels[index].setText(
+                                f"彩色：预览 {self.display_fps[index]:.1f} fps · {self.cameras.topics[index]}")
+                        else:
+                            self.depth_labels[index].setText(f"深度：在线 · {self.cameras.depth_topics[index]}")
             self.rendered = [0] * 3
             self.fps_at = now
 

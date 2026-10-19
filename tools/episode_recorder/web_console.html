@@ -16,8 +16,9 @@ section { background:#1b2530; border:1px solid #334354; border-radius:12px; padd
 h2 { font-size:1.05rem; margin:0 0 14px; }
 .grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
 .camera { background:#10151d; border-radius:8px; overflow:hidden; }
-.camera img { width:100%; aspect-ratio:16/9; object-fit:contain; display:block; }
-.camera p { padding:0 12px; font-size:.9rem; }
+.camera img { width:100%; aspect-ratio:16/8; object-fit:contain; display:block; }
+.camera p { padding:0 12px; font-size:.85rem; margin:6px 0 10px; overflow-wrap:anywhere; }
+.camera h3 { padding:0 12px; margin:10px 0 4px; font-size:.95rem; }
 .muted { color:#aab8c8; }
 label { display:block; margin:12px 0 6px; }
 input,textarea,select { width:100%; box-sizing:border-box; border:1px solid #607187; border-radius:7px; background:#111922; color:white; padding:10px; font:inherit; }
@@ -58,9 +59,15 @@ const labels = {idle:'空闲',starting:'启动中',recording:'录制中',stopped
 const cameraNodes = [];
 for (let i=0;i<3;i++) {
   const card = document.createElement('div'); card.className='camera';
-  const img = document.createElement('img'); img.alt=['左腕预览','右腕预览','顶部预览'][i];
-  const status = document.createElement('p'); status.textContent='等待图像…';
-  card.append(img,status); $('cameras').append(card); cameraNodes.push({img,status});
+  const title = document.createElement('h3'); title.textContent=['左腕','右腕','顶部'][i];
+  const colorTitle = document.createElement('p'); colorTitle.textContent='彩色';
+  const colorImg = document.createElement('img'); colorImg.alt=`${title.textContent}彩色预览`;
+  const colorStatus = document.createElement('p'); colorStatus.textContent='等待彩色画面…';
+  const depthTitle = document.createElement('p'); depthTitle.textContent='深度 · 紫蓝近（0 米），黄红远（1 米），黑色无效';
+  const depthImg = document.createElement('img'); depthImg.alt=`${title.textContent}深度预览`;
+  const depthStatus = document.createElement('p'); depthStatus.textContent='等待深度画面…';
+  card.append(title,colorTitle,colorImg,colorStatus,depthTitle,depthImg,depthStatus);
+  $('cameras').append(card); cameraNodes.push({colorImg,colorStatus,depthImg,depthStatus});
 }
 let busy = false, state = 'unknown';
 function notice(text, error=false) { $('notice').textContent=text; $('notice').className=error?'notice error':'notice'; }
@@ -82,8 +89,11 @@ async function refresh() {
     $('current').textContent=meta.episode_id ? `Episode ${meta.episode_id} · ${meta.task || ''} · ${meta.error || labels[state]}${remaining}${timed}` : (result.pending?.length ? `有 ${result.pending.length} 个未处理暂存 Episode，请丢弃后重试` : '当前无活动 Episode');
     for(let i=0;i<3;i++) {
       const camera=data.cameras[i], item=cameraNodes[i];
-      item.status.textContent=`${camera.name}：${camera.online?'在线':'无新画面'}${camera.error?' · '+camera.error:''}`;
-      if(camera.online) item.img.src=`/camera/${i}.jpg?t=${Date.now()}`; else item.img.removeAttribute('src');
+      for(const kind of ['color','depth']) {
+        const stream=camera[kind], image=item[`${kind}Img`], status=item[`${kind}Status`];
+        status.textContent=`${stream.online?'在线':'无新画面'}${stream.error?' · '+stream.error:''} · ${stream.topic}`;
+        if(stream.online) image.src=`/camera/${kind}/${i}.jpg?t=${Date.now()}`; else image.removeAttribute('src');
+      }
     }
     updateButtons();
   } catch(error) { state='unknown'; $('state').textContent='录制服务未连接'; $('state').className='badge'; $('current').textContent=error.message; updateButtons(); }

@@ -24,6 +24,8 @@ from desktop_console import Cameras, Console, recorder_request
 
 HERE = Path(__file__).parent
 TOPICS = [f"/camera_{name}/color/image_raw" for name in ("wrist_left", "wrist_right", "top")]
+DEPTH_TOPICS = [f"/camera_{name}/depth/image_raw" for name in ("wrist_left", "wrist_right")]
+DEPTH_TOPICS.append("/camera_top/D455/aligned_depth_to_color/image_raw")
 
 
 def publish(node, stop):
@@ -31,12 +33,19 @@ def publish(node, stop):
     image.width, image.height, image.step, image.encoding = 64, 48, 192, "rgb8"
     image.data = bytes((40, 100, 210)) * (image.width * image.height)
     images = [node.create_publisher(Image, topic, qos_profile_sensor_data) for topic in TOPICS]
+    depth = Image()
+    depth.width, depth.height, depth.step, depth.encoding = 64, 48, 128, "16UC1"
+    depth.data = (1500).to_bytes(2, "little") * (depth.width * depth.height)
+    depths = [node.create_publisher(Image, topic, qos_profile_sensor_data) for topic in DEPTH_TOPICS]
     feedback = node.create_publisher(String, "/synthetic/feedback", 10)
     next_frame = time.monotonic()
     while not stop.is_set():
         image.header.stamp = node.get_clock().now().to_msg()
         for publisher in images:
             publisher.publish(image)
+        depth.header.stamp = image.header.stamp
+        for publisher in depths:
+            publisher.publish(depth)
         feedback.publish(String(data="synthetic; no CAN device"))
         next_frame += 1 / 30
         stop.wait(max(0, next_frame - time.monotonic()))
@@ -48,8 +57,8 @@ def main():
         target_dir = Path(target)
         config_path = Path(temp) / "config.json"
         config = {"output_dir": str(Path(temp) / "episodes"),
-                  "topics": [*TOPICS, "/synthetic/feedback"],
-                  "frame_topics": TOPICS, "min_free_gb": 0, "startup_timeout_sec": 15}
+                  "topics": [*TOPICS, *DEPTH_TOPICS, "/synthetic/feedback"],
+                  "frame_topics": [*TOPICS, *DEPTH_TOPICS], "min_free_gb": 0, "startup_timeout_sec": 15}
         config_path.write_text(json.dumps(config))
         socket_path = Path(config["output_dir"]) / "recorder.sock"
         rclpy.init()
@@ -76,6 +85,7 @@ def main():
                 if time.monotonic() > deadline:
                     raise AssertionError(f"超时：{stage[0]}，状态 {window.state}，提示 {window.message.text()}")
                 if stage[0] == "ready" and window.state == "idle" and all(fps >= 25 for fps in window.display_fps):
+                    assert all(image.pixmap() for image in window.depth_images)
                     window.task.setText("合成拾取")
                     window.instruction.setPlainText("拿起合成物体")
                     window.duration.setValue(2)
