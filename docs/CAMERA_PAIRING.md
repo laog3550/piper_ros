@@ -2,12 +2,27 @@
 
 ## 2026-10-19 腕部深度驱动滤镜
 
+首次仅开启驱动默认滤镜后，现场画面仍有明显散点和边缘破碎。随后两台腕部
+相机统一调为 `SpatialFilter(alpha=0.25, diff_threshold=120, magnitude=2,
+radius=8)`、`TemporalFilter(diff_threshold=0.1, weight=0.2)`，并启用
+`NoiseRemovalFilter(min_diff=128, max_size=100)`；`HoleFillingFilter` 保持
+`mode=2`。两路驱动的 `/depth_filters/status` 已确认这些值，重启后仍生效。
+短时订阅深度约为左腕 `29.4 fps`、右腕 `28.9 fps`。对约 60 帧中心区域的
+时间标准差做粗略统计，调节前后左腕约 `16.9 → 14.1 mm`、右腕约
+`2.9 → 1.7 mm`；期间画面内容可能变化，这些数字只能用于判断调节方向，
+不能作为固定场景的严格降噪验收。当前画面仍存在残余噪点及边缘缺口。
+重启后的单帧中，左、右腕分别约有 `63%`、`52%` 的像素距离大于
+`0.5 m`；这些区域按采集界面的固定 `0–0.5 m` 色标会落在显示上限之外，
+滤镜参数无法让其在该色标中产生距离层次。该比例随相机姿态和场景变化。
+加大空间滤波和时间平滑会丢失小物体细节、增加运动滞后；正式录制前需
+检查运动中的目标轮廓和深度误差。
+
 两台 Gemini 305 在 `start_cameras.launch.py` 中均启用驱动的
-`SpatialFilter`、`TemporalFilter` 和 `HoleFillingFilter`。驱动报告两路均为
-`enabled: true`；当前参数分别为 `alpha=0.5`、`diff_threshold=160`、
+`SpatialFilter`、`TemporalFilter` 和 `HoleFillingFilter`。首次启用时驱动报告
+两路均为 `enabled: true`；当时的默认参数分别为 `alpha=0.5`、`diff_threshold=160`、
 `magnitude=1`、`radius=1`；`diff_threshold=0.1`、`weight=0.4`；
-`hole_filling_mode=2`。其余滤镜保持驱动原有配置，顶部 D455 不受此设置影响。
-启用后分别订阅两路深度，短时接收速率约为左腕 `29.9 fps`、右腕
+`hole_filling_mode=2`。顶部 D455 不受腕部滤镜设置影响。
+首次启用后分别订阅两路深度，短时接收速率约为左腕 `29.9 fps`、右腕
 `29.0 fps`；左腕彩色约 `29.8 fps`。这仅验证滤镜启用和短时出帧，
 不能据此断言实际任务中的噪点、边缘或长时稳定性已达标。
 
