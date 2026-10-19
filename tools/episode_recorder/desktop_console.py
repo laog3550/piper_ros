@@ -5,6 +5,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import json
+import math
 from pathlib import Path
 import socket
 import sys
@@ -17,7 +18,7 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QMainWindow, QMessageBox, QPushButton, QTableWidget,
+    QLineEdit, QMainWindow, QMessageBox, QPushButton, QSpinBox, QTableWidget,
     QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget, QSizePolicy,
 )
 import rclpy
@@ -170,6 +171,12 @@ class Console(QMainWindow):
         save_location.addWidget(self.save_dir, 1)
         save_location.addWidget(browse)
         fields.addLayout(save_location, 2, 1)
+        fields.addWidget(QLabel("本条时长上限"), 3, 0)
+        self.duration = QSpinBox()
+        self.duration.setRange(1, 86400)
+        self.duration.setValue(60)
+        self.duration.setSuffix(" 秒（到时自动停止）")
+        fields.addWidget(self.duration, 3, 1)
         fields.setColumnStretch(1, 1)
 
         controls = QHBoxLayout()
@@ -184,8 +191,8 @@ class Console(QMainWindow):
             controls.addWidget(widget)
         self.message = QLabel("关闭本窗口不会中断录制；Rerun 可独立查看详细数据。")
         layout.addWidget(self.message)
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(("编号", "任务", "语言指令", "结果", "开始时间", "路径"))
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(("编号", "任务", "语言指令", "结果", "录制时长", "开始时间", "路径"))
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         layout.addWidget(self.table, 2)
@@ -237,7 +244,8 @@ class Console(QMainWindow):
             self.message.setText("请填写任务名和语言指令（指令最多 2000 字）")
             return
         self.action("start", mode="task", task=task, skill=None,
-                    metadata={"language_instruction": instruction})
+                    metadata={"language_instruction": instruction},
+                    duration_sec=self.duration.value())
 
     def save_recording(self):
         outcome = (None, "success", "failure")[self.outcome.currentIndex()]
@@ -274,7 +282,13 @@ class Console(QMainWindow):
                 if key == "status":
                     self.state = result["state"]
                     meta = result.get("metadata") or {}
-                    detail = f" · {meta.get('task', '')} · {meta.get('error', '')}" if meta else ""
+                    detail = f" · {meta.get('task', '')}" if meta else ""
+                    if self.state == "recording" and result.get("remaining_sec") is not None:
+                        detail += f" · 剩余约 {math.ceil(result['remaining_sec'])} 秒"
+                    if meta.get("stop_reason") == "duration_limit":
+                        detail += " · 已到时自动停止"
+                    if meta.get("error"):
+                        detail += f" · {meta['error']}"
                     self.state_label.setText(f"录制状态：{STATE_NAMES.get(self.state, self.state)}{detail}")
                 elif key == "list":
                     self.show_episodes(result["episodes"])
@@ -298,8 +312,10 @@ class Console(QMainWindow):
             started = episode.get("started_at_unix_ns")
             when = datetime.fromtimestamp(started / 1e9).strftime("%Y-%m-%d %H:%M:%S") if started else ""
             outcome = {"success": "成功", "failure": "失败"}.get(episode.get("outcome"), "未标注")
+            duration = episode.get("recorded_duration_sec")
             values = (episode.get("episode_number"), episode.get("task"),
-                      episode.get("language_instruction"), outcome, when, episode.get("path"))
+                      episode.get("language_instruction"), outcome,
+                      f"{duration:.1f} 秒" if duration is not None else "", when, episode.get("path"))
             for column, value in enumerate(values):
                 self.table.setItem(row, column, QTableWidgetItem(str(value or "")))
 

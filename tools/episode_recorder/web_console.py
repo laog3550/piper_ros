@@ -177,8 +177,12 @@ def handler_factory(socket_path, preview, default_save_dir):
                     instruction = body.get("language_instruction", "").strip()
                     if not task or not instruction or len(task) > 120 or len(instruction) > 2000:
                         raise ValueError("请填写任务名和语言指令（任务名最多 120 字，指令最多 2000 字）")
+                    duration = body.get("duration_sec")
+                    if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not 1 <= duration <= 86400:
+                        raise ValueError("时长上限须为 1 至 86400 秒")
                     request = {"action": action, "mode": "task", "task": task, "skill": None,
-                               "metadata": {"language_instruction": instruction}}
+                               "metadata": {"language_instruction": instruction},
+                               "duration_sec": duration}
                 elif action == "save":
                     request = {"action": action, "outcome": body.get("outcome"),
                                "save_dir": body.get("save_dir")}

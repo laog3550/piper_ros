@@ -4,6 +4,7 @@
 import argparse
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -129,6 +130,8 @@ class Recorder:
         self.event_publisher = self.node.create_publisher(String, self.events_topic, 10)
         self.process = None
         self.current = None
+        self.ready_monotonic_ns = None
+        self.deadline_monotonic_ns = None
         self._recover()
         self.node.create_service(StartEpisode, "/collection/start", self._service_start)
         for action in ("stop", "save", "discard", "status", "list"):
@@ -137,8 +140,10 @@ class Recorder:
     def _service_start(self, request, response):
         try:
             fields = json.loads(request.metadata_json or "{}")
+            duration = fields.pop("duration_limit_sec", None) if isinstance(fields, dict) else None
             result = self.start({"mode": request.mode, "task": request.task,
-                                 "skill": request.skill, "metadata": fields})
+                                 "skill": request.skill, "metadata": fields,
+                                 "duration_sec": duration})
             response.success = True
             response.result_json = json.dumps(result, ensure_ascii=False)
         except (ValueError, OSError, KeyError, sqlite3.Error) as error:
@@ -157,9 +162,9 @@ class Recorder:
             return response
         return callback
 
-    def _event(self, name):
+    def _event(self, name, **details):
         event = {"episode_id": self.metadata["episode_id"], "event": name,
-                 "time": time.time_ns(), "time_unit": "unix_ns"}
+                 "time": time.time_ns(), "time_unit": "unix_ns", **details}
         self.metadata.setdefault("events", []).append(event)
         self._write_current()
         self.event_publisher.publish(String(data=json.dumps(event, ensure_ascii=False)))
@@ -224,15 +229,22 @@ class Recorder:
         task = request.get("task")
         skill = request.get("skill")
         fields = request.get("metadata", {})
+        duration = request.get("duration_sec")
         if mode not in ("task", "skill") or not isinstance(task, str) or not task.strip():
             raise ValueError("mode 必须为 task 或 skill，且 task 不能为空")
         if mode == "skill" and (not isinstance(skill, str) or not skill.strip()):
             raise ValueError("原子技能录制需要 skill")
         if not isinstance(fields, dict):
             raise ValueError("metadata 必须是 JSON 对象")
+        if duration is not None and (isinstance(duration, bool)
+                                     or not isinstance(duration, (int, float))
+                                     or not math.isfinite(duration) or not 1 <= duration <= 86400):
+            raise ValueError("duration_sec 必须为 1 至 86400 秒的有限数值")
         free = self._available()
         if free < self.min_free_bytes:
             raise ValueError(f"剩余磁盘空间不足: {free} 字节")
+        self.ready_monotonic_ns = None
+        self.deadline_monotonic_ns = None
         self.current = self.staging / uuid.uuid4().hex
         self.current.mkdir()
         self.metadata = {
@@ -240,6 +252,7 @@ class Recorder:
             "episode_id": self.current.name,
             "task": task, "skill": skill if mode == "skill" else None,
             "task_metadata": fields, "topics": self.topics,
+            "duration_limit_sec": duration,
             "frame_topics": self.frame_topics, "expected_fps": self.expected_fps,
             "started_at_unix_ns": time.time_ns(),
             "timestamp_note": "rosbag2 messages.timestamp 是接收时间；原始消息 header.stamp 保留在 CDR 消息中",
@@ -266,7 +279,13 @@ class Recorder:
                 break
             if self._graph_ready(node_name) and (self.current / "bag").is_dir():
                 self.metadata["state"] = "recording"
-                self.metadata["ready_at_unix_ns"] = time.time_ns()
+                ready = time.time_ns()
+                self.metadata["ready_at_unix_ns"] = ready
+                if duration is not None:
+                    duration_ns = round(duration * 1_000_000_000)
+                    self.ready_monotonic_ns = time.monotonic_ns()
+                    self.deadline_monotonic_ns = self.ready_monotonic_ns + duration_ns
+                    self.metadata["recording_deadline_unix_ns"] = ready + duration_ns
                 self._event("started")
                 return self.status()
         self._terminate()
@@ -285,7 +304,7 @@ class Recorder:
                 self.process.wait(timeout=5)
         self.process = None
 
-    def stop(self):
+    def stop(self, reason="manual"):
         if self.current is None or self.metadata["state"] != "recording":
             raise ValueError("没有正在录制的 Episode")
         if self.process is None or self.process.poll() is not None:
@@ -293,9 +312,16 @@ class Recorder:
             self.metadata["error"] = "rosbag2 已意外退出"
             self._event("interrupted")
             raise ValueError(self.metadata["error"])
-        self._event("stopped")
+        stopped = time.time_ns()
+        self.metadata["stop_reason"] = reason
+        self.metadata["stop_requested_at_unix_ns"] = stopped
+        self.metadata["recorded_duration_sec"] = round(
+            ((time.monotonic_ns() - self.ready_monotonic_ns) if self.ready_monotonic_ns is not None
+             else (stopped - self.metadata["ready_at_unix_ns"])) / 1_000_000_000, 3)
+        self._event("stopped", reason=reason)
         time.sleep(0.15)
         self._terminate()
+        self.deadline_monotonic_ns = None
         self.metadata["stopped_at_unix_ns"] = time.time_ns()
         try:
             self.metadata["bag_validation"] = inspect_bag(
@@ -409,8 +435,12 @@ class Recorder:
                 self._event("failed")
                 time.sleep(0.15)
                 self._terminate()
+            deadline = self.deadline_monotonic_ns
+            if self.metadata["state"] == "recording" and deadline and time.monotonic_ns() >= deadline:
+                return self.stop(reason="duration_limit")
             return {"state": self.metadata["state"], "path": str(self.current),
-                    "metadata": self.metadata, "free_bytes": self._available()}
+                    "metadata": self.metadata, "free_bytes": self._available(),
+                    "remaining_sec": max(0, (deadline - time.monotonic_ns()) / 1_000_000_000) if deadline else None}
         pending = [str(p) for p in self.staging.iterdir() if p.is_dir()]
         return {"state": "idle", "pending": pending, "free_bytes": self._available()}
 
@@ -430,7 +460,8 @@ class Recorder:
             metadata = load_json(metadata_file)
             episodes.append({key: metadata.get(key) for key in (
                 "episode_id", "episode_number", "state", "mode", "task", "skill",
-                "outcome", "started_at_unix_ns", "saved_at_unix_ns")})
+                "outcome", "started_at_unix_ns", "saved_at_unix_ns",
+                "duration_limit_sec", "recorded_duration_sec", "stop_reason")})
             episodes[-1]["language_instruction"] = metadata.get("task_metadata", {}).get("language_instruction")
             episodes[-1]["path"] = str(directory)
         episodes.sort(key=lambda entry: entry.get("episode_number") or 0, reverse=True)
@@ -460,7 +491,7 @@ def serve(config):
     server.bind(str(path))
     os.chmod(path, 0o600)
     server.listen(8)
-    server.settimeout(1)
+    server.settimeout(0.2)
     running = True
 
     def shutdown(_signum, _frame):
@@ -507,6 +538,7 @@ def main():
     parser.add_argument("--task")
     parser.add_argument("--skill")
     parser.add_argument("--metadata", help="JSON 任务元数据文件")
+    parser.add_argument("--duration-sec", type=float, help="本条 Episode 自动停止的秒数（1 至 86400）")
     parser.add_argument("--outcome", choices=["success", "failure"], help="保存时的结果标签")
     parser.add_argument("--save-dir", help="保存 Episode 的绝对目录路径")
     args = parser.parse_args()
@@ -519,7 +551,8 @@ def main():
     request = {"action": args.action}
     if args.action == "start":
         request.update(mode=args.mode, task=args.task, skill=args.skill,
-                       metadata=load_json(args.metadata) if args.metadata else {})
+                       metadata=load_json(args.metadata) if args.metadata else {},
+                       duration_sec=args.duration_sec)
     if args.action == "save":
         request["outcome"] = args.outcome
         request["save_dir"] = args.save_dir

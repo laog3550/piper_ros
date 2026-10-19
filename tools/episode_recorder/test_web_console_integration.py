@@ -87,14 +87,15 @@ def main():
             for index in range(3):
                 with urlopen(f"http://127.0.0.1:{port}/camera/{index}.jpg") as response:
                     assert response.read(3) == b"\xff\xd8\xff"
-            start = http(port, "/api/start", {"task": "合成拾取", "language_instruction": "拿起测试物体"})
+            start = http(port, "/api/start", {"task": "合成拾取", "language_instruction": "拿起测试物体",
+                                                "duration_sec": 3})
             assert start["result"]["state"] == "recording"
             web.terminate(); web.wait(timeout=5)
             time.sleep(1)
             assert recorder.poll() is None
             web = subprocess.Popen(web_command, env=env)
-            wait_for(lambda: http(port, "/api/status")["result"]["state"] == "recording")
-            assert http(port, "/api/stop", {})["result"]["state"] == "stopped"
+            wait_for(lambda: http(port, "/api/status")["result"]["state"] == "stopped")
+            assert http(port, "/api/status")["result"]["metadata"]["stop_reason"] == "duration_limit"
             selected_dir = root / "selected_episodes"
             saved = http(port, "/api/save", {"outcome": "success", "save_dir": str(selected_dir)})["result"]
             assert saved["state"] == "saved"
@@ -102,7 +103,9 @@ def main():
             entries = http(port, "/api/episodes")["result"]["episodes"]
             assert len(entries) == 1 and entries[0]["outcome"] == "success"
             assert entries[0]["language_instruction"] == "拿起测试物体"
-            assert http(port, "/api/start", {"task": "丢弃测试", "language_instruction": "测试"})["result"]["state"] == "recording"
+            assert http(port, "/api/start", {"task": "丢弃测试", "language_instruction": "测试",
+                                             "duration_sec": 30})["result"]["state"] == "recording"
+            assert http(port, "/api/stop", {})["result"]["state"] == "stopped"
             assert http(port, "/api/discard", {})["result"]["state"] == "discarded"
             assert http(port, "/api/status")["result"]["state"] == "idle"
             print("合成 ROS 流、三路预览、关闭网页后继续录制、保存标签与丢弃：通过")

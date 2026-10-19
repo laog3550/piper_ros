@@ -54,6 +54,7 @@ def main():
         socket_path = Path(config["output_dir"]) / "recorder.sock"
         rclpy.init()
         app = QApplication([])
+        app.setQuitOnLastWindowClosed(False)
         source = rclpy.create_node("synthetic_desktop_source")
         cameras = Cameras(config)
         stop = threading.Event()
@@ -65,6 +66,7 @@ def main():
         window = Console(config, cameras)
         window.show()
         stage = ["ready"]
+        closed_at = [None]
         failure = []
         deadline = time.monotonic() + 35
 
@@ -76,14 +78,20 @@ def main():
                 if stage[0] == "ready" and window.state == "idle" and all(fps >= 25 for fps in window.display_fps):
                     window.task.setText("合成拾取")
                     window.instruction.setPlainText("拿起合成物体")
+                    window.duration.setValue(2)
                     window.start.click(); stage[0] = "started"
                 elif stage[0] == "started" and window.state == "recording":
                     window.close()
                     assert recorder_request(socket_path, {"action": "status"})["state"] == "recording"
+                    closed_at[0] = time.monotonic()
+                    stage[0] = "window_closed"
+                elif stage[0] == "window_closed" and time.monotonic() - closed_at[0] >= 3:
+                    assert recorder_request(socket_path, {"action": "status"})["state"] == "stopped"
                     window = Console(config, cameras); window.show(); stage[0] = "reopened"
-                elif stage[0] == "reopened" and window.state == "recording":
-                    window.stop.click(); stage[0] = "stopping"
-                elif stage[0] == "stopping" and window.state == "stopped":
+                elif stage[0] == "reopened" and window.state == "stopped":
+                    metadata = recorder_request(socket_path, {"action": "status"})["metadata"]
+                    assert metadata["stop_reason"] == "duration_limit"
+                    assert metadata["recorded_duration_sec"] >= 2
                     collision = target_dir / "episode_000001"
                     collision.mkdir()
                     try:
@@ -101,6 +109,7 @@ def main():
                     episodes = recorder_request(socket_path, {"action": "list"})["episodes"]
                     assert len(episodes) == 1 and episodes[0]["outcome"] == "success"
                     assert episodes[0]["language_instruction"] == "拿起合成物体"
+                    assert episodes[0]["stop_reason"] == "duration_limit"
                     assert Path(episodes[0]["path"]).parent == target_dir
                     assert (Path(episodes[0]["path"]) / "bag" / "metadata.yaml").is_file()
                     window.task.setText("丢弃测试")
@@ -122,6 +131,11 @@ def main():
             app.exec_()
             if failure:
                 raise failure[0]
+            legacy = recorder_request(socket_path, {"action": "start", "mode": "task",
+                                                    "task": "旧接口", "skill": None, "metadata": {}})
+            assert legacy["state"] == "recording" and legacy["remaining_sec"] is None
+            assert recorder_request(socket_path, {"action": "stop"})["metadata"]["stop_reason"] == "manual"
+            recorder_request(socket_path, {"action": "discard"})
             recorder.terminate(); recorder.wait(timeout=8)
             recorder = subprocess.Popen([sys.executable, str(HERE / "episode_recorder.py"),
                                          "serve", "--config", str(config_path)])

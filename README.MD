@@ -712,7 +712,9 @@ ros2 launch piper start_cameras.launch.py camera_map:=/path/to/camera_map.json
 python3 tools/episode_recorder/desktop_console.py --config /path/to/config.json
 ```
 
-关闭本地窗口不影响独立录制器的当前录制；重新打开可继续操作。本地界面显示各路实际预览帧率，任务名、语言指令、开始、停止、结果标签、保存、丢弃及 Episode 列表均沿用录制器的 socket 接口。保存前可在“Episode 保存目录”中为这次采集输入绝对路径或选择文件夹；录制器会在该目录下生成 `episode_000001` 等文件夹，列表显示实际位置。录制时数据仍写入配置的 `output_dir/.staging`；若保存目录位于其他文件系统，停止后保存需要复制整段数据，完成前不会删除暂存文件。CLI 也可用 `save --save-dir /绝对/目录` 指定位置。无机械臂验收可运行 `tools/episode_recorder/test_desktop_console_integration.py`；它只发布合成 ROS 数据，不连接 CAN 设备。
+关闭本地窗口不影响独立录制器的当前录制；重新打开可继续操作。本地界面显示各路实际预览帧率，任务名、语言指令、开始、停止、结果标签、保存、丢弃及 Episode 列表均沿用录制器的 socket 接口。每条 Episode 可设置 1 至 86400 秒的时长上限，从 rosbag2 订阅就绪时起计时；到时由录制服务自动停止，即使界面已关闭也会生效。状态区显示剩余秒数，保存列表显示实际录制时长。自动停止后仍须检查并选择结果标签、保存或丢弃；固定时长不能代替帧丢失与任务结果的人工核查。CLI 可在 `start` 时传 `--duration-sec 60`；ROS `/collection/start` 可在 `metadata_json` 中传 `duration_limit_sec`。未传时长的旧调用仍需手动停止。
+
+保存前可在“Episode 保存目录”中为这次采集输入绝对路径或选择文件夹；录制器会在该目录下生成 `episode_000001` 等文件夹，列表显示实际位置。录制时数据仍写入配置的 `output_dir/.staging`；若保存目录位于其他文件系统，停止后保存需要复制整段数据，完成前不会删除暂存文件。CLI 也可用 `save --save-dir /绝对/目录` 指定位置。无机械臂验收可运行 `tools/episode_recorder/test_desktop_console_integration.py`；它只发布合成 ROS 数据，不连接 CAN 设备。
 
 需要浏览器访问时，仍可另起 Web 控制台进程。其预览经过 JPEG 编码和低频刷新，实时操作优先使用本地控制台：
 

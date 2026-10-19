@@ -45,12 +45,13 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <div id="current" class="muted">正在读取状态…</div>
 <label for="task">任务名</label><input id="task" maxlength="120" placeholder="例如：拾取杯子">
 <label for="instruction">语言指令</label><textarea id="instruction" maxlength="2000" placeholder="例如：把桌上的杯子放入收纳盒"></textarea>
+<label for="duration">本条时长上限（秒，到时自动停止）</label><input id="duration" type="number" min="1" max="86400" step="1" value="60">
 <label for="save_dir">Episode 保存目录（每次保存可修改）</label><input id="save_dir" placeholder="绝对路径；自动创建 episode_000001 等目录">
 <div class="row"><button id="start">开始录制</button><button id="stop" class="secondary">停止录制</button></div>
 <div class="row"><div><label for="outcome">结果标签</label><select id="outcome"><option value="">请选择</option><option value="success">成功</option><option value="failure">失败</option></select></div><button id="save">保存 Episode</button><button id="discard" class="danger">丢弃 Episode</button></div>
 <p id="notice" class="notice" role="status"></p>
 </section>
-<section><h2>已保存 Episode</h2><div class="tablewrap"><table><thead><tr><th>编号</th><th>任务</th><th>语言指令</th><th>结果</th><th>开始时间</th><th>路径</th></tr></thead><tbody id="episodes"></tbody></table></div></section>
+<section><h2>已保存 Episode</h2><div class="tablewrap"><table><thead><tr><th>编号</th><th>任务</th><th>语言指令</th><th>结果</th><th>录制时长</th><th>开始时间</th><th>路径</th></tr></thead><tbody id="episodes"></tbody></table></div></section>
 <script>
 const $ = id => document.getElementById(id);
 const labels = {idle:'空闲',starting:'启动中',recording:'录制中',stopped:'已停止，待保存',failed:'失败，待丢弃',interrupted:'意外中断，待丢弃',saved:'已保存',discarded:'已丢弃'};
@@ -76,7 +77,9 @@ async function refresh() {
     if (!$('save_dir').value) $('save_dir').value=data.default_save_dir || '';
     $('state').textContent=labels[state] || state; $('state').className='badge '+(state==='recording'?'recording':'');
     const meta=result.metadata || {};
-    $('current').textContent=meta.episode_id ? `Episode ${meta.episode_id} · ${meta.task || ''} · ${meta.error || labels[state]}` : (result.pending?.length ? `有 ${result.pending.length} 个未处理暂存 Episode，请丢弃后重试` : '当前无活动 Episode');
+    const remaining=state==='recording' && result.remaining_sec!=null ? ` · 剩余约 ${Math.ceil(result.remaining_sec)} 秒` : '';
+    const timed=meta.stop_reason==='duration_limit' ? ' · 已到时自动停止' : '';
+    $('current').textContent=meta.episode_id ? `Episode ${meta.episode_id} · ${meta.task || ''} · ${meta.error || labels[state]}${remaining}${timed}` : (result.pending?.length ? `有 ${result.pending.length} 个未处理暂存 Episode，请丢弃后重试` : '当前无活动 Episode');
     for(let i=0;i<3;i++) {
       const camera=data.cameras[i], item=cameraNodes[i];
       item.status.textContent=`${camera.name}：${camera.online?'在线':'无新画面'}${camera.error?' · '+camera.error:''}`;
@@ -91,11 +94,11 @@ async function loadEpisodes() {
     const body=$('episodes'); body.replaceChildren();
     for(const episode of data.result.episodes) {
       const tr=document.createElement('tr');
-      const values=[episode.episode_number,episode.task,episode.language_instruction,episode.outcome==='success'?'成功':episode.outcome==='failure'?'失败':'未标注',episode.started_at_unix_ns?new Date(episode.started_at_unix_ns/1e6).toLocaleString():'',episode.path];
+      const values=[episode.episode_number,episode.task,episode.language_instruction,episode.outcome==='success'?'成功':episode.outcome==='failure'?'失败':'未标注',episode.recorded_duration_sec==null?'':`${episode.recorded_duration_sec.toFixed(1)} 秒`,episode.started_at_unix_ns?new Date(episode.started_at_unix_ns/1e6).toLocaleString():'',episode.path];
       for(const value of values) { const td=document.createElement('td'); td.textContent=value ?? ''; tr.append(td); }
       body.append(tr);
     }
-    if(!data.result.episodes.length) { const tr=document.createElement('tr'), td=document.createElement('td'); td.colSpan=6; td.textContent='暂无已保存 Episode'; tr.append(td); body.append(tr); }
+    if(!data.result.episodes.length) { const tr=document.createElement('tr'), td=document.createElement('td'); td.colSpan=7; td.textContent='暂无已保存 Episode'; tr.append(td); body.append(tr); }
   } catch(error) { notice(error.message,true); }
 }
 async function action(name, payload={}) {
@@ -108,7 +111,7 @@ async function action(name, payload={}) {
   } catch(error) { notice(error.message,true); await refresh(); }
   finally { busy=false; updateButtons(); }
 }
-$('start').onclick=()=>action('start',{task:$('task').value,language_instruction:$('instruction').value});
+$('start').onclick=()=>action('start',{task:$('task').value,language_instruction:$('instruction').value,duration_sec:Number($('duration').value)});
 $('stop').onclick=()=>action('stop');
 $('save').onclick=()=>action('save',{outcome:$('outcome').value,save_dir:$('save_dir').value.trim()});
 $('discard').onclick=()=>{ if(confirm('确定丢弃当前 Episode？录制数据将被删除。')) action('discard'); };
