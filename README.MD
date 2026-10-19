@@ -700,7 +700,7 @@ python3 tools/episode_recorder/episode_recorder.py stop --config /path/to/config
 python3 tools/episode_recorder/episode_recorder.py save --config /path/to/config.json
 ```
 
-本地可视化控制台直接显示 ROS 图像，每台相机上方显示彩色画面、下方显示深度画面，适合在采集电脑上查看三路接近 30 fps 的彩色实时画面。深度图使用固定 0–1 米色标和 5×5 中值滤波抑制散点；超过 1 米的有效深度显示为灰色，黑色表示无效深度，白线为对应彩色图的物体轮廓。彩色和深度图尺寸一致且近期均有新帧时才叠加轮廓。本地深度预览在后台约每 0.2 秒更新一次，以保持彩色画面流畅；滤波、轮廓和预览刷新设置不修改录制的原始深度消息。预览支持 `16UC1`（毫米）和 `32FC1`（米）。先在独立终端启动三路相机驱动；若当前工作区尚未构建 `piper`，先运行 `colcon build --packages-select piper --symlink-install` 并重新 `source install/setup.bash`：
+本地可视化控制台直接显示 ROS 图像，每台相机上方显示彩色画面、下方显示深度画面，适合在采集电脑上查看三路接近 30 fps 的彩色实时画面。深度预览先填补小块无效空洞，再用双边滤波抑制噪点并保留深度边缘；较大的空洞仍显示为黑色。深度图使用固定 0–1 米色标，超过 1 米的有效深度显示为灰色，白线为对应彩色图的物体轮廓。彩色和深度图尺寸一致且近期均有新帧时才叠加轮廓。本地深度预览在后台约每 0.2 秒更新一次，以保持彩色画面流畅；滤波、轮廓和预览刷新设置不修改录制的原始深度消息。预览支持 `16UC1`（毫米）和 `32FC1`（米）。先在独立终端启动三路相机驱动；若当前工作区尚未构建 `piper`，先运行 `colcon build --packages-select piper --symlink-install` 并重新 `source install/setup.bash`：
 
 ```bash
 ros2 launch piper start_cameras.launch.py camera_map:=/path/to/camera_map.json

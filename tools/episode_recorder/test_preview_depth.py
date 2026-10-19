@@ -4,7 +4,7 @@
 import numpy as np
 from sensor_msgs.msg import Image
 
-from preview_depth import FAR_COLOR_BGR, depth_to_bgr, overlay_color_edges
+from preview_depth import FAR_COLOR_BGR, depth_to_bgr, filter_depth, overlay_color_edges
 
 
 def image(values):
@@ -23,6 +23,17 @@ assert np.array_equal(preview[4, 4], preview[4, 3])
 assert np.array_equal(depth_to_bgr(image(np.full((9, 9), 1500, dtype=np.uint16)))[4, 4], FAR_COLOR_BGR)
 assert not depth_to_bgr(image(np.zeros((9, 9), dtype=np.uint16)))[4, 4].any()
 
+surface = np.full((40, 40), 0.5, dtype=np.float32)
+surface[20, 20] = 0.54
+smoothed = filter_depth(surface)
+assert 0.5 < smoothed[20, 20] < 0.54
+surface[14:26, 14:26] = 0
+assert filter_depth(surface)[20, 20] == 0
+edge = np.full((40, 40), 0.3, dtype=np.float32)
+edge[:, 20:] = 0.8
+smoothed_edge = filter_depth(edge)
+assert smoothed_edge[20, 19] < 0.35 and smoothed_edge[20, 20] > 0.75
+
 color = Image()
 color.width = color.height = 40
 color.step, color.encoding = 120, "rgb8"
@@ -33,4 +44,4 @@ flat = depth_to_bgr(image(np.full((40, 40), 500, dtype=np.uint16)))
 outlined = overlay_color_edges(flat.copy(), color, (40, 40))
 assert np.any(np.all(outlined == (235, 235, 235), axis=2))
 assert not np.array_equal(flat, outlined)
-print("深度散点抑制、超距、无效像素和物体轮廓显示：通过")
+print("深度双边滤波、小空洞填充、边缘保留和物体轮廓显示：通过")
