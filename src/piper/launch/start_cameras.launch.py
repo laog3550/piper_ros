@@ -82,6 +82,9 @@ def _start_cameras(context):
                 'enable_right_ir': False,
                 'enable_frame_sync': True,
                 'enable_point_cloud': False,
+                'enable_spatial_filter': True,
+                'enable_temporal_filter': True,
+                'enable_hole_filling_filter': True,
                 'color.image_raw.enable_pub_plugins': ['image_transport/raw'],
                 'depth.image_raw.enable_pub_plugins': ['image_transport/raw'],
             }

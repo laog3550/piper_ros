@@ -1,5 +1,22 @@
 # 三相机重新配对记录
 
+## 2026-10-19 腕部深度驱动滤镜
+
+两台 Gemini 305 在 `start_cameras.launch.py` 中均启用驱动的
+`SpatialFilter`、`TemporalFilter` 和 `HoleFillingFilter`。驱动报告两路均为
+`enabled: true`；当前参数分别为 `alpha=0.5`、`diff_threshold=160`、
+`magnitude=1`、`radius=1`；`diff_threshold=0.1`、`weight=0.4`；
+`hole_filling_mode=2`。其余滤镜保持驱动原有配置，顶部 D455 不受此设置影响。
+启用后分别订阅两路深度，短时接收速率约为左腕 `29.9 fps`、右腕
+`29.0 fps`；左腕彩色约 `29.8 fps`。这仅验证滤镜启用和短时出帧，
+不能据此断言实际任务中的噪点、边缘或长时稳定性已达标。
+
+滤镜作用于驱动发布的深度图，录制器订阅的
+`/camera_wrist_*/depth/image_raw` 因此也包含这些处理结果。`image_raw`
+表示图像话题名称，并不表示滤镜前的传感器原始深度。空间与时间平滑可能
+减弱细节并引入运动滞后，空洞填充的像素是估计值；正式采集前应在实际
+工作距离及机械臂运动场景下检查深度边缘、空洞和时序，再决定是否调整参数。
+
 ## 2026-10-15 Orbbec 停机与重启复验
 
 左腕现已接入 `5000M` USB3 链路，两台 Gemini 305 均为 USB3.2。改动前，
