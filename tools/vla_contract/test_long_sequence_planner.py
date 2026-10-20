@@ -11,6 +11,7 @@ from PIL import Image
 
 from action_supervisor import ActionSupervisor
 from long_sequence_planner import LongSequencePlanner, PlanError, SequenceRunner, VERSION, parse_plan
+from local_vlm_planner import LocalVlmBackend
 from offline_simulator import synthetic_profile
 from offline_task_demo import FakeClock, SyntheticCritic, SyntheticPolicy, SyntheticWorld
 from task_orchestrator import TaskOrchestrator
@@ -22,11 +23,12 @@ from tools.vlm_critic.critic import verdict
 def context(clock):
     obs = synthetic()["observation"]
     obs["observation_timestamp_ns"] = clock.now_ns()
-    return {"request_id": "request-1", "instruction": "把两个物体依次放入各自区域",
+    return {"request_id": "request-1", "instruction": "依次把 object-1 放入 region-1、object-2 放入 region-2",
             "observation": obs, "object_ids": ["object-1", "object-2"],
             "region_ids": ["region-1", "region-2"], "available_skills": ["pick", "place"],
             "object_state": {name: {"status": "available", "region_id": None}
                              for name in ("object-1", "object-2")},
+            "goal_state": {"object-1": "region-1", "object-2": "region-2"},
             "completed_step_ids": []}
 
 
@@ -85,6 +87,37 @@ class PlannerTests(unittest.TestCase):
     def test_valid_four_step_plan(self):
         self.assertEqual(len(parse_plan(json.dumps(plan(self.ctx, four_steps())), self.ctx)["steps"]), 4)
 
+    def test_reject_ambiguous_target_and_prefix_collision(self):
+        ambiguous = deepcopy(self.ctx)
+        ambiguous["instruction"] = "把两个物体依次放入各自区域"
+        with self.assertRaisesRegex(PlanError, "消歧"):
+            parse_plan(plan(ambiguous, four_steps()), ambiguous)
+        missing_region = deepcopy(self.ctx)
+        missing_region["instruction"] = "依次拿起 object-1 和 object-2，再放到指定区域"
+        with self.assertRaisesRegex(PlanError, "消歧"):
+            parse_plan(plan(missing_region, four_steps()), missing_region)
+        prefix = deepcopy(self.ctx)
+        prefix["object_ids"] = ["object-1", "object-10"]
+        prefix["object_state"]["object-10"] = prefix["object_state"].pop("object-2")
+        prefix["instruction"] = "把 object-10 放入 region-1，再放入 region-2"
+        with self.assertRaisesRegex(PlanError, "消歧"):
+            parse_plan(plan(prefix, [step("s1", "pick", "object-1")]), prefix)
+
+    def test_reject_partial_plan_and_missing_goal_binding(self):
+        partial = four_steps()[:2]
+        with self.assertRaisesRegex(PlanError, "未覆盖"):
+            parse_plan(plan(self.ctx, partial), self.ctx)
+        missing = deepcopy(self.ctx)
+        del missing["goal_state"]
+        with self.assertRaisesRegex(PlanError, "字段"):
+            LongSequencePlanner(FixtureBackend([four_steps()])).plan(missing, self.clock.now_ns())
+        with self.assertRaisesRegex(PlanError, "目标终态"):
+            parse_plan(plan(missing, four_steps()), missing)
+        extra = deepcopy(self.ctx)
+        extra["goal_state"] = {"object-1": "region-1"}
+        with self.assertRaisesRegex(PlanError, "目标之外"):
+            parse_plan(plan(extra, four_steps()), extra)
+
     def test_reject_unknown_duplicate_conflict_and_overlong(self):
         mutations = [
             lambda p: p["steps"][0].__setitem__("object_id", "unknown"),
@@ -115,6 +148,16 @@ class PlannerTests(unittest.TestCase):
         with self.assertRaisesRegex(PlanError, "后端失败"):
             planner.plan(self.ctx, self.clock.now_ns())
 
+    def test_local_model_rejects_image_dimension_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (32, 32), "white").save(root / "top.png")
+            local = deepcopy(self.ctx)
+            local["observation"]["images"]["top_rgb"]["uri"] = "top.png"
+            backend = LocalVlmBackend(root, root)
+            with self.assertRaisesRegex(PlanError, "尺寸"):
+                backend.generate(local)
+
     def test_observation_expires_during_model_inference(self):
         class SlowBackend:
             def generate(inner, ctx):
@@ -136,7 +179,8 @@ class PlannerTests(unittest.TestCase):
         def factory(skill, current_step):
             result = results.pop(0) if results else "SUCCESS"
             task = TaskOrchestrator((skill,), "LEFT", world, SyntheticPolicy(),
-                                    SyntheticCritic([result, result]), world, self.clock, supervisor)
+                                    SyntheticCritic(result if isinstance(result, list) else [result, result]),
+                                    world, self.clock, supervisor)
             tasks.append(task)
             return task
 
@@ -158,6 +202,14 @@ class PlannerTests(unittest.TestCase):
         result = runner.run(self.ctx, self.clock)
         self.assertEqual((result["status"], result["replans"]), ("DONE", 1))
         self.assertEqual(result["completed"], ["s1", "s2", "s3", "s4"])
+
+    def test_single_failure_recovers_then_continues(self):
+        runner, world, tasks = self.make_runner([four_steps()], critic_results=[["FAIL", "SUCCESS"]])
+        result = runner.run(self.ctx, self.clock)
+        self.assertEqual((result["status"], result["completed"]),
+                         ("DONE", ["s1", "s2", "s3", "s4"]))
+        self.assertEqual(len(world.dispatched), 10)
+        self.assertIn((0, 1, "OBSERVE", "重新观测后重试"), tasks[0].board.history)
 
     def test_failure_and_human_review_do_not_advance(self):
         for critic_result in ("FAIL", "HUMAN_REVIEW"):

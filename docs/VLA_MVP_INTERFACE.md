@@ -210,8 +210,14 @@ python3 tools/vla_contract/shadow_run.py fixture
 
 ## VLM 长序列规划离线基线
 
-`tools/vla_contract/long_sequence_planner.py` 接收任务文本、当前 v1 `observation`、已知物体与区域 ID、可用 `pick`/`place` 技能、物体状态和已完成步骤。规划后端只返回文本；校验器要求 `schema_version=piper_vlm_plan/1.0`、匹配的任务与观测 ID，以及最多 5 个步骤。每步固定为 `{step_id, skill, arm, object_id, region_id, depends_on, completion}`，依赖须按顺序衔接，`pick` 的完成条件为目标被夹持，`place` 为目标进入指定区域。未知目标、重复步骤、非法臂或技能、前置状态矛盾、格式错误、过期观测均拒绝。过期观测要求重新观察；其他无法判定的输出交人工复核。结构校验不能证明模型准确理解自然语言、目标身份或空间关系。
+`tools/vla_contract/long_sequence_planner.py` 接收任务文本、当前 v1 `observation`、已知物体与区域 ID、可用 `pick`/`place` 技能、物体状态、经上游消歧的 `goal_state`（物体 ID 到目标区域 ID 的映射）和已完成步骤。缺少 `goal_state` 时拒绝规划，交人工复核；模型不能自行声明任务已完成。规划后端只返回文本；校验器要求 `schema_version=piper_vlm_plan/1.0`、匹配的任务与观测 ID，以及最多 5 个步骤。每步固定为 `{step_id, skill, arm, object_id, region_id, depends_on, completion}`，依赖须按顺序衔接，`pick` 的完成条件为目标被夹持，`place` 为目标进入指定区域。计划模拟后的终态及离线运行结束后的世界状态均须覆盖 `goal_state`，部分完成不能返回 `DONE`。未知目标、重复步骤、非法臂或技能、前置状态矛盾、格式错误、过期观测均拒绝。过期观测要求重新观察；其他无法判定的输出交人工复核。结构校验不能证明模型准确理解自然语言、目标身份或空间关系。
+
+本地模型入口把顶部 RGB 和观测的时间戳、执行臂、关节/夹爪状态摘要发送给模型；读取前核对 RGB 模式与元数据尺寸。状态摘要只用于规划提示，不代表模型能据此计算空间位姿。
+
+多物体或多区域候选存在时，任务文本必须明确包含计划所用的对应 ID，例如 `object-1` 和 `region-1`；仅说“两个物体”或“对应区域”不足以消歧，计划被拒绝并交人工复核。只有单一候选时允许省略该类 ID。此规则是保守的文本绑定检查，不代替图像中的身份识别或自然语言语义校验。
 
 `SequenceRunner` 每步构造现有 `TaskOrchestrator`，由其 `ActionSupervisor` 逐目标预检与执行；规划文本没有通向动作话题、CAN 或驱动的入口。仅在 critic 给出可继续的结果且独立世界状态满足该步完成条件时记录进度；两者矛盾即停止。世界状态变化可触发重新规划，重规划次数和总执行步数均有限。现有 `OfflineVlmCriticAdapter` 只返回 `HUMAN_REVIEW`，因此真实 critic 路径会停在锁存 `SAFE_STOP`，不会自动推进多步。四步完成、有限重试和重规划验收使用显式合成 critic、观测、动作、反馈及世界状态夹具；不代表真实模型或实机成功。
 
 本地模型 smoke 可运行 `python3 tools/vla_contract/local_vlm_planner.py context.json --model /本地模型目录 --image-root /本地图像目录 --timeout 150 --max-age-ms 5000`，其中 `context.json` 须在调用前刚生成；延长年龄仅供无执行出口的 smoke 使用，不改变安全监督配置。后端要求不可变本地图像，在隔离子进程中加载公开 VLM，超时、非法输出或推理后过期的观测不会产生可执行步骤。2026-10-20 使用本机缓存的 SmolVLM-256M-Instruct revision `7e3e67edbbed1bf9888184d9df282b700a323964`，对两枚合成彩色圆和一个区域的图像执行一次真实 GPU 推理：模型调用约 `10.37 s`，原始输出为 `{'red dot': "red", 'blue dot': "blue"}`，不是计划 JSON，结果为 `HUMAN_REVIEW`。该结果证明本地推理链路可运行，**没有**证明长序列规划能力。当前还缺真实场景标注、目标 ID 与图像的可靠关联、可自动确认完成条件的世界状态、经验证的模型规划准确率和所有实机安全门槛。
+
+2026-10-20 复核：使用明确写出 `object-1`、`object-2`、`region-1`、`region-2` 的合成任务，在加入 `goal_state` 与观测状态摘要后的最终代码上再次调用相同 SmolVLM。模型调用 `22.10 s`，整卡显存由 `1236 MiB` 升至 `2678 MiB`；原始输出是非 JSON 的描述文本，还编造了额外区域 ID，入口返回 `HUMAN_REVIEW`。此为链路与降级测试，不能据此估计计划准确率。
