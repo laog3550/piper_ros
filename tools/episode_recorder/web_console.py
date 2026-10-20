@@ -125,7 +125,10 @@ def recorder_request(socket_path, request):
         client.settimeout(30)
         client.connect(str(socket_path))
         client.sendall(payload)
-        data = client.recv(1_000_000)
+        chunks = []
+        while chunk := client.recv(1_000_000):
+            chunks.append(chunk)
+        data = b"".join(chunks)
     if not data:
         raise OSError("录制服务未返回数据")
     return json.loads(data)
@@ -164,6 +167,12 @@ def handler_factory(socket_path, preview, default_save_dir):
                     return self.respond(200, recorder_request(socket_path, {"action": "list"}))
                 except (OSError, ValueError, json.JSONDecodeError) as exc:
                     return self.respond(503, {"ok": False, "error": str(exc)})
+            if path in ("/api/plans", "/api/vlm/export"):
+                try:
+                    action = "plans" if path == "/api/plans" else "vlm_export"
+                    return self.respond(200, recorder_request(socket_path, {"action": action}))
+                except (OSError, ValueError, json.JSONDecodeError) as exc:
+                    return self.respond(503, {"ok": False, "error": str(exc)})
             if path.startswith("/camera/") and path.endswith(".jpg"):
                 try:
                     parts = path.split("/")
@@ -181,7 +190,7 @@ def handler_factory(socket_path, preview, default_save_dir):
         def do_POST(self):
             path = urlsplit(self.path).path
             action = path.removeprefix("/api/")
-            if path != f"/api/{action}" or action not in ("start", "stop", "save", "discard"):
+            if path != f"/api/{action}" or action not in ("start", "stop", "save", "discard", "plan_create"):
                 return self.respond(404, {"ok": False, "error": "未知操作"})
             origin = self.headers.get("Origin")
             if origin and origin != f"http://{self.headers.get('Host')}":
@@ -194,21 +203,34 @@ def handler_factory(socket_path, preview, default_save_dir):
                 if not isinstance(body, dict):
                     raise ValueError("请求必须为 JSON 对象")
                 if action == "start":
-                    task = body.get("task", "").strip()
-                    instruction = body.get("language_instruction", "").strip()
-                    if not task or not instruction or len(task) > 120 or len(instruction) > 2000:
-                        raise ValueError("请填写任务名和语言指令（任务名最多 120 字，指令最多 2000 字）")
+                    task = body.get("task")
+                    if not isinstance(task, str) or not task.strip() or len(task.strip()) > 120:
+                        raise ValueError("请填写 1 至 120 字的任务名")
                     duration = body.get("duration_sec")
                     if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not 1 <= duration <= 86400:
                         raise ValueError("时长上限须为 1 至 86400 秒")
-                    request = {"action": action, "mode": "task", "task": task, "skill": None,
-                               "metadata": {"language_instruction": instruction},
-                               "duration_sec": duration}
+                    if "vlm" in body:
+                        context = body["vlm"]
+                        if not isinstance(context, dict):
+                            raise ValueError("技能上下文须为 JSON 对象")
+                        request = {"action": action, "mode": "skill", "task": task.strip(),
+                                   "skill": body.get("skill"),
+                                   "metadata": {"language_instruction": context.get("skill_instruction"),
+                                                "vlm": context}, "duration_sec": duration}
+                    else:
+                        instruction = body.get("language_instruction")
+                        if not isinstance(instruction, str) or not instruction.strip() or len(instruction.strip()) > 2000:
+                            raise ValueError("请填写 1 至 2000 字的语言指令")
+                        request = {"action": action, "mode": "task", "task": task.strip(), "skill": None,
+                                   "metadata": {"language_instruction": instruction.strip()},
+                                   "duration_sec": duration}
                 elif action == "save":
                     request = {"action": action, "outcome": body.get("outcome"),
-                               "save_dir": body.get("save_dir")}
-                    if request["outcome"] not in ("success", "failure"):
-                        raise ValueError("请选择成功或失败标签")
+                               "save_dir": body.get("save_dir"), "annotation": body.get("annotation")}
+                    if request["outcome"] not in ("success", "failure", "unknown"):
+                        raise ValueError("请选择成功、失败或无法判断标签")
+                elif action == "plan_create":
+                    request = {"action": action, "plan": body}
                 else:
                     request = {"action": action}
                 response = recorder_request(socket_path, request)

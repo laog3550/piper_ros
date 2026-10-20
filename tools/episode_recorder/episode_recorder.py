@@ -22,6 +22,7 @@ import rclpy
 from piper_msgs.srv import StartEpisode
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
+from vlm_annotations import required_text, validate_annotation, validate_plan, validate_skill_context
 
 
 def atomic_json(path, data):
@@ -104,6 +105,8 @@ class Recorder:
         self.staging.mkdir(exist_ok=True)
         self.discarded = self.root / "discarded"
         self.discarded.mkdir(exist_ok=True)
+        self.plans_dir = self.root / "plans"
+        self.plans_dir.mkdir(exist_ok=True)
         self.events_topic = "/collection/events"
         self.topics = list(config["topics"])
         if self.events_topic not in self.topics:
@@ -236,6 +239,22 @@ class Recorder:
             raise ValueError("原子技能录制需要 skill")
         if not isinstance(fields, dict):
             raise ValueError("metadata 必须是 JSON 对象")
+        fields = dict(fields)
+        if "vlm" in fields:
+            if mode != "skill":
+                raise ValueError("VLM 技能上下文需要 mode=skill")
+            skill = required_text(skill, "原子技能名", 120)
+            context = validate_skill_context(fields["vlm"])
+            if context["plan_id"]:
+                plan_file = self.plans_dir / f'{context["plan_id"]}.json'
+                if not plan_file.is_file():
+                    raise ValueError("关联的 plan_id 不存在")
+                plan = load_json(plan_file)
+                if context["task_group_id"] and context["task_group_id"] != plan["task_group_id"]:
+                    raise ValueError("task_group_id 与规划样本不一致")
+                context["task_group_id"] = plan["task_group_id"]
+            context["task_group_id"] = context["task_group_id"] or uuid.uuid4().hex
+            fields["vlm"] = context
         if duration is not None and (isinstance(duration, bool)
                                      or not isinstance(duration, (int, float))
                                      or not math.isfinite(duration) or not 1 <= duration <= 86400):
@@ -252,6 +271,7 @@ class Recorder:
             "episode_id": self.current.name,
             "task": task, "skill": skill if mode == "skill" else None,
             "task_metadata": fields, "topics": self.topics,
+            "rosbag_relative_path": "bag",
             "duration_limit_sec": duration,
             "frame_topics": self.frame_topics, "expected_fps": self.expected_fps,
             "started_at_unix_ns": time.time_ns(),
@@ -334,11 +354,21 @@ class Recorder:
         self._write_current()
         return self.status()
 
-    def save(self, outcome=None, save_dir=None):
+    def save(self, outcome=None, save_dir=None, annotation=None):
         if self.current is None or self.metadata["state"] != "stopped":
             raise ValueError("只能保存已停止且通过完整性核验的 Episode")
-        if outcome is not None and outcome not in ("success", "failure"):
-            raise ValueError("outcome 必须为 success 或 failure")
+        if outcome is not None and outcome not in ("success", "failure", "unknown"):
+            raise ValueError("outcome 必须为 success、failure 或 unknown")
+        context = self.metadata.get("task_metadata", {}).get("vlm")
+        if context and annotation is None:
+            raise ValueError("VLM 技能片段保存前须填写人工结果标注")
+        if annotation is not None:
+            if not context:
+                raise ValueError("仅 VLM 技能片段可保存结果标注")
+            annotation = validate_annotation(annotation)
+            if outcome is not None and outcome != annotation["outcome"]:
+                raise ValueError("结果标签与人工标注不一致")
+            outcome = annotation["outcome"]
         if save_dir is not None and (not isinstance(save_dir, str) or not save_dir.strip()
                                      or not Path(save_dir).expanduser().is_absolute()):
             raise ValueError("save_dir 必须为非空的绝对目录路径")
@@ -365,6 +395,9 @@ class Recorder:
         self.metadata["state"] = "saved"
         self.metadata["episode_number"] = number
         self.metadata["outcome"] = outcome
+        if annotation is not None:
+            annotation["annotated_at_unix_ns"] = time.time_ns()
+            self.metadata["vlm_annotation"] = annotation
         self.metadata["saved_at_unix_ns"] = time.time_ns()
         self.metadata["save_directory"] = str(destination_root)
         event = {"episode_id": self.metadata["episode_id"], "event": "saved",
@@ -463,9 +496,50 @@ class Recorder:
                 "outcome", "started_at_unix_ns", "saved_at_unix_ns",
                 "duration_limit_sec", "recorded_duration_sec", "stop_reason")})
             episodes[-1]["language_instruction"] = metadata.get("task_metadata", {}).get("language_instruction")
+            episodes[-1]["vlm"] = metadata.get("task_metadata", {}).get("vlm")
+            episodes[-1]["vlm_annotation"] = metadata.get("vlm_annotation")
             episodes[-1]["path"] = str(directory)
         episodes.sort(key=lambda entry: entry.get("episode_number") or 0, reverse=True)
         return {"episodes": episodes}
+
+    def create_plan(self, value):
+        plan = validate_plan(value)
+        plan["schema_version"] = 1
+        plan["plan_id"] = f"plan_{uuid.uuid4().hex}"
+        plan["task_group_id"] = plan["task_group_id"] or uuid.uuid4().hex
+        plan["source"] = "human"
+        plan["created_at_unix_ns"] = time.time_ns()
+        atomic_json(self.plans_dir / f'{plan["plan_id"]}.json', plan)
+        return plan
+
+    def list_plans(self):
+        plans = [load_json(path) for path in self.plans_dir.glob("plan_*.json")]
+        plans.sort(key=lambda item: item["created_at_unix_ns"], reverse=True)
+        return {"plans": plans}
+
+    def export_vlm(self):
+        transitions = []
+        for directory in self._saved_paths():
+            path = directory / "episode.json"
+            if not path.is_file():
+                continue
+            metadata = load_json(path)
+            context = metadata.get("task_metadata", {}).get("vlm")
+            if not context or not metadata.get("vlm_annotation"):
+                continue
+            transitions.append({
+                "episode_id": metadata["episode_id"], "task_group_id": context["task_group_id"],
+                "plan_id": context["plan_id"], "skill": metadata["skill"],
+                "context": context, "human_annotation": metadata["vlm_annotation"],
+                "rosbag_path": str(directory / "bag"), "episode_json_path": str(path),
+                "topics": metadata["topics"], "bag_validation": metadata.get("bag_validation"),
+                "started_at_unix_ns": metadata["started_at_unix_ns"],
+                "ready_at_unix_ns": metadata.get("ready_at_unix_ns"),
+                "stopped_at_unix_ns": metadata.get("stopped_at_unix_ns"),
+                "saved_at_unix_ns": metadata.get("saved_at_unix_ns"),
+            })
+        return {"schema_version": 1, "planning_samples": self.list_plans()["plans"],
+                "transition_samples": transitions}
 
     def close(self):
         if self.process:
@@ -512,12 +586,20 @@ def serve(config):
                 try:
                     request = json.loads(connection.recv(1_000_000).decode())
                     action = request.pop("action")
-                    if action not in ("start", "stop", "save", "discard", "status", "list"):
+                    if action not in ("start", "stop", "save", "discard", "status", "list",
+                                      "plan_create", "plans", "vlm_export"):
                         raise ValueError("未知操作")
                     if action == "start":
                         result = recorder.start(request)
                     elif action == "save":
-                        result = recorder.save(request.get("outcome"), request.get("save_dir"))
+                        result = recorder.save(request.get("outcome"), request.get("save_dir"),
+                                               request.get("annotation"))
+                    elif action == "plan_create":
+                        result = recorder.create_plan(request.get("plan"))
+                    elif action == "plans":
+                        result = recorder.list_plans()
+                    elif action == "vlm_export":
+                        result = recorder.export_vlm()
                     else:
                         result = getattr(recorder, action)()
                     response = {"ok": True, "result": result}
@@ -532,14 +614,17 @@ def serve(config):
 
 def main():
     parser = argparse.ArgumentParser(description="ROS 2 Episode SQLite 录制器")
-    parser.add_argument("action", choices=["serve", "start", "stop", "save", "discard", "status", "list"])
+    parser.add_argument("action", choices=["serve", "start", "stop", "save", "discard", "status", "list",
+                                           "plan_create", "plans", "vlm_export"])
     parser.add_argument("--config", required=True, help="JSON 配置文件")
     parser.add_argument("--mode", choices=["task", "skill"])
     parser.add_argument("--task")
     parser.add_argument("--skill")
     parser.add_argument("--metadata", help="JSON 任务元数据文件")
     parser.add_argument("--duration-sec", type=float, help="本条 Episode 自动停止的秒数（1 至 86400）")
-    parser.add_argument("--outcome", choices=["success", "failure"], help="保存时的结果标签")
+    parser.add_argument("--outcome", choices=["success", "failure", "unknown"], help="保存时的结果标签")
+    parser.add_argument("--annotation", help="JSON 人工结果标注文件")
+    parser.add_argument("--plan", help="JSON 规划样本文件")
     parser.add_argument("--save-dir", help="保存 Episode 的绝对目录路径")
     args = parser.parse_args()
     config = load_json(args.config)
@@ -556,10 +641,16 @@ def main():
     if args.action == "save":
         request["outcome"] = args.outcome
         request["save_dir"] = args.save_dir
+        request["annotation"] = load_json(args.annotation) if args.annotation else None
+    if args.action == "plan_create":
+        request["plan"] = load_json(args.plan) if args.plan else None
     with socket.socket(socket.AF_UNIX) as connection:
         connection.connect(str(path))
         connection.sendall(json.dumps(request, ensure_ascii=False).encode())
-        response = json.loads(connection.recv(1_000_000).decode())
+        chunks = []
+        while chunk := connection.recv(1_000_000):
+            chunks.append(chunk)
+        response = json.loads(b"".join(chunks).decode())
     print(json.dumps(response, ensure_ascii=False, indent=2))
     if not response["ok"]:
         sys.exit(1)

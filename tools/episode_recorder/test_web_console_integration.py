@@ -46,6 +46,16 @@ def http(port, path, data=None):
         return json.load(response)
 
 
+def rejected(port, path, data):
+    try:
+        http(port, path, data)
+    except HTTPError as error:
+        assert error.code in (400, 409), error.code
+        assert json.load(error)["error"]
+    else:
+        raise AssertionError(f"无效输入被接受: {path}")
+
+
 def publisher(node, stop):
     image = Image()
     image.height, image.width, image.encoding, image.step = 24, 32, "rgb8", 96
@@ -123,7 +133,75 @@ def main():
             assert http(port, "/api/stop", {})["result"]["state"] == "stopped"
             assert http(port, "/api/discard", {})["result"]["state"] == "discarded"
             assert http(port, "/api/status")["result"]["state"] == "idle"
-            print("合成 ROS 流、三路预览、关闭网页后继续录制、保存标签与丢弃：通过")
+            rejected(port, "/api/plan_create", {"long_task_description": "测试", "steps": []})
+            plan = http(port, "/api/plan_create", {
+                "long_task_description": "把杯子放入盒子", "object_ids": ["cup_1", "box_1"],
+                "location_ids": ["table_1", "box_slot"],
+                "steps": [{"skill": "grasp", "target_object_id": "cup_1",
+                           "completion_criteria": "杯子离开桌面"},
+                          {"skill": "place", "target_object_id": "cup_1",
+                           "target_location_id": "box_slot", "completion_criteria": "杯子位于盒内"}],
+            })["result"]
+            assert plan["plan_id"] and plan["task_group_id"]
+            assert len(http(port, "/api/plans")["result"]["plans"]) == 1
+            context = {"plan_id": plan["plan_id"], "long_task_description": "把杯子放入盒子",
+                       "skill_instruction": "抓住杯子", "target_object_id": "cup_1",
+                       "target_location_id": "", "expected_state_change": "杯子由桌面变为夹爪持有",
+                       "completion_criteria": "杯子离开桌面"}
+            rejected(port, "/api/start", {"task": "无效技能", "skill": "grasp",
+                                           "duration_sec": 30, "vlm": {**context, "completion_criteria": ""}})
+            started = http(port, "/api/start", {"task": "杯子任务", "skill": "grasp",
+                                                  "duration_sec": 30, "vlm": context})["result"]
+            assert started["metadata"]["task_metadata"]["vlm"]["task_group_id"] == plan["task_group_id"]
+            assert http(port, "/api/stop", {})["result"]["state"] == "stopped"
+            rejected(port, "/api/save", {"outcome": "success", "save_dir": str(selected_dir)})
+            annotation = {"outcome": "success", "observed_state_change": "杯子已抬起",
+                          "next_decision": "continue", "next_skill": "place"}
+            success = http(port, "/api/save", {"outcome": "success", "save_dir": str(selected_dir),
+                                                 "annotation": annotation})["result"]
+            success_meta = json.loads((Path(success["path"]) / "episode.json").read_text())
+            assert success_meta["vlm_annotation"]["source"] == "human"
+            assert success_meta["vlm_annotation"]["failure_reason"] is None
+            assert success_meta["vlm_annotation"]["annotated_at_unix_ns"] > 0
+            assert success_meta["task_metadata"]["vlm"]["plan_id"] == plan["plan_id"]
+            assert success_meta["episode_id"] and success_meta["bag_validation"]["messages_per_topic"]
+            assert (Path(success["path"]) / "bag" / "metadata.yaml").is_file()
+            unknown_context = {**context, "plan_id": "", "target_object_id": "",
+                               "target_location_id": ""}
+            assert http(port, "/api/start", {"task": "未知结果", "skill": "observe",
+                                             "duration_sec": 30, "vlm": unknown_context})["result"]["state"] == "recording"
+            assert http(port, "/api/stop", {})["result"]["state"] == "stopped"
+            unknown = http(port, "/api/save", {"outcome": "unknown", "save_dir": str(selected_dir),
+                                                 "annotation": {"outcome": "unknown", "next_decision": "reobserve"}})["result"]
+            unknown_meta = json.loads((Path(unknown["path"]) / "episode.json").read_text())
+            assert unknown_meta["vlm_annotation"]["observed_state_change"] is None
+            assert unknown_meta["task_metadata"]["vlm"]["target_object_id"] is None
+            assert http(port, "/api/start", {"task": "失败结果", "skill": "grasp",
+                                             "duration_sec": 30, "vlm": context})["result"]["state"] == "recording"
+            assert http(port, "/api/stop", {})["result"]["state"] == "stopped"
+            rejected(port, "/api/save", {"outcome": "failure", "save_dir": str(selected_dir),
+                                           "annotation": {"outcome": "failure", "next_decision": "ask_human"}})
+            failed = http(port, "/api/save", {"outcome": "failure", "save_dir": str(selected_dir),
+                                                "annotation": {"outcome": "failure",
+                                                               "failure_reason": "unable_to_determine",
+                                                               "next_decision": "ask_human"}})["result"]
+            assert Path(failed["path"]).is_dir()
+            web.terminate(); web.wait(timeout=5)
+            recorder.terminate(); recorder.wait(timeout=8)
+            recorder = subprocess.Popen([sys.executable, str(HERE / "episode_recorder.py"), "serve", "--config", str(config)], env=env)
+            web = subprocess.Popen(web_command, env=env)
+            wait_for(lambda: http(port, "/api/status")["ok"])
+            entries = http(port, "/api/episodes")["result"]["episodes"]
+            assert len(entries) == 4 and any(item["vlm"] is None for item in entries)
+            assert len(http(port, "/api/plans")["result"]["plans"]) == 1
+            exported = http(port, "/api/vlm/export")["result"]
+            assert len(exported["planning_samples"]) == 1
+            assert len(exported["transition_samples"]) == 3
+            assert {item["human_annotation"]["outcome"] for item in exported["transition_samples"]} == {"success", "failure", "unknown"}
+            for item in exported["transition_samples"]:
+                assert item["episode_id"] and item["started_at_unix_ns"]
+                assert item["rosbag_path"] and item["topics"] and item["bag_validation"]
+            print("合成 ROS 流、旧 Episode、VLM 单技能三种结果、规划、重启读取及导出：通过")
         finally:
             stop.set(); feeder.join(timeout=2)
             for process in (web, recorder):
