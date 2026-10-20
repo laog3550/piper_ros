@@ -10,7 +10,7 @@ import unittest
 from PIL import Image
 
 from action_supervisor import ActionSupervisor
-from long_sequence_planner import LongSequencePlanner, PlanError, SequenceRunner, VERSION, parse_plan
+from long_sequence_planner import LongSequencePlanner, PlanError, SequenceRunner, VERSION, ground_context, parse_plan
 from local_vlm_planner import LocalVlmBackend
 from offline_simulator import synthetic_profile
 from offline_task_demo import FakeClock, SyntheticCritic, SyntheticPolicy, SyntheticWorld
@@ -50,6 +50,17 @@ def four_steps():
             step("s4", "place", "object-2", "region-2", "s3")]
 
 
+def scene_context(explicit):
+    request = {key: deepcopy(value) for key, value in explicit.items()
+               if key not in ("object_ids", "region_ids", "goal_state")}
+    request["instruction"] = "把红杯放到左盒，再把蓝杯放到右盒"
+    request["scene_objects"] = [{"id": "object-1", "aliases": ["红杯"]},
+                                {"id": "object-2", "aliases": ["蓝杯"]}]
+    request["scene_regions"] = [{"id": "region-1", "aliases": ["左盒"]},
+                                {"id": "region-2", "aliases": ["右盒"]}]
+    return request
+
+
 class FixtureBackend:
     def __init__(self, sequences):
         self.sequences = list(sequences)
@@ -86,6 +97,42 @@ class PlannerTests(unittest.TestCase):
 
     def test_valid_four_step_plan(self):
         self.assertEqual(len(parse_plan(json.dumps(plan(self.ctx, four_steps())), self.ctx)["steps"]), 4)
+
+    def test_chinese_task_grounding_and_end_to_end(self):
+        scene = scene_context(self.ctx)
+        grounded = ground_context(scene)
+        self.assertEqual(grounded["goal_state"], {"object-1": "region-1", "object-2": "region-2"})
+        self.assertIn("object-1→region-1", grounded["instruction"])
+        arrow = scene_context(self.ctx)
+        arrow["instruction"] = "红杯→左盒，蓝杯→右盒"
+        self.assertEqual(ground_context(arrow)["goal_state"], grounded["goal_state"])
+        runner, _, _ = self.make_runner([four_steps()])
+        result = runner.run(scene, self.clock)
+        self.assertEqual((result["status"], result["completed"]),
+                         ("DONE", ["s1", "s2", "s3", "s4"]))
+        with self.assertRaisesRegex(PlanError, "未覆盖"):
+            parse_plan(plan(grounded, four_steps()[:2]), grounded)
+        wrong = four_steps()
+        wrong[1]["region_id"] = "region-2"
+        wrong[1]["completion"]["region_id"] = "region-2"
+        with self.assertRaisesRegex(PlanError, "矛盾"):
+            parse_plan(plan(grounded, wrong), grounded)
+
+    def test_chinese_task_ambiguity_and_unmatched_clause(self):
+        scene = scene_context(self.ctx)
+        scene["scene_objects"][1]["aliases"].append("红杯")
+        with self.assertRaisesRegex(PlanError, "消歧"):
+            ground_context(scene)
+        scene = scene_context(self.ctx)
+        scene["instruction"] = "把红杯放到左盒，再把绿杯放到右盒"
+        with self.assertRaisesRegex(PlanError, "未匹配"):
+            ground_context(scene)
+        scene = scene_context(self.ctx)
+        scene["instruction"] += "，然后检查安全"
+        with self.assertRaisesRegex(PlanError, "无法完整消歧"):
+            ground_context(scene)
+        runner, _, _ = self.make_runner([four_steps()])
+        self.assertEqual(runner.run(scene, self.clock)["status"], "HUMAN_REVIEW")
 
     def test_reject_ambiguous_target_and_prefix_collision(self):
         ambiguous = deepcopy(self.ctx)

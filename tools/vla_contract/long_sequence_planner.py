@@ -38,6 +38,67 @@ def _goals_satisfied(state, goals):
                for object_id, region_id in goals.items())
 
 
+def _catalog(entries, label):
+    if type(entries) is not list or not 1 <= len(entries) <= 64:
+        raise PlanError(f"{label}: 场景目录无效")
+    ids, aliases = [], {}
+    for entry in entries:
+        _fields(entry, ("id", "aliases"), label)
+        _label(entry["id"], f"{label}.id")
+        names = entry["aliases"]
+        if type(names) is not list or not 1 <= len(names) <= 16:
+            raise PlanError(f"{label}: 别名无效")
+        if entry["id"] in ids:
+            raise PlanError(f"{label}: ID 重复")
+        ids.append(entry["id"])
+        for name in [entry["id"], *names]:
+            _label(name, f"{label}.aliases")
+            if name in aliases and aliases[name] != entry["id"]:
+                raise PlanError(f"{label}: 别名对应多个 ID；需要人工消歧")
+            aliases[name] = entry["id"]
+    return ids, aliases
+
+
+def ground_context(context):
+    """把受限中文放置指令绑定到稳定 ID；显式 ID/goal_state 输入保持原样。"""
+    if type(context) is not dict:
+        raise PlanError("规划输入无效")
+    if "scene_objects" not in context and "scene_regions" not in context:
+        return context
+    _fields(context, ("request_id", "instruction", "observation", "scene_objects", "scene_regions",
+                      "available_skills", "object_state", "completed_step_ids"), "场景规划输入")
+    instruction = context["instruction"]
+    if type(instruction) is not str or not instruction.strip() or len(instruction) > 700:
+        raise PlanError("自然语言任务无效")
+    object_ids, objects = _catalog(context["scene_objects"], "scene_objects")
+    region_ids, regions = _catalog(context["scene_regions"], "scene_regions")
+    goals = {}
+    clauses = [item.strip() for item in re.split(r"[，,；;。]", instruction) if item.strip()]
+    if not clauses or len(clauses) > MAX_STEPS:
+        raise PlanError("任务步骤缺失或过多；需要人工复核")
+    for clause in clauses:
+        match = re.fullmatch(r"(?:先|再|然后)?\s*(?:把|将)\s*(.+?)\s*(?:放到|放入|放进)\s*(.+?)", clause)
+        if match is None:
+            match = re.fullmatch(r"(.+?)\s*(?:→|->)\s*(.+?)", clause)
+        if match is None:
+            raise PlanError("任务语句无法完整消歧；需要人工复核")
+        object_name, region_name = (part.strip() for part in match.groups())
+        object_id, region_id = objects.get(object_name), regions.get(region_name)
+        if object_id is None or region_id is None:
+            raise PlanError("任务目标未匹配已知场景；需要人工复核")
+        if object_id in goals:
+            raise PlanError("同一物体目标重复或冲突；需要人工复核")
+        goals[object_id] = region_id
+    bound = "；".join(f"{object_id}→{region_id}" for object_id, region_id in goals.items())
+    resolved = {key: deepcopy(context[key]) for key in
+                ("request_id", "observation", "available_skills", "object_state", "completed_step_ids")}
+    resolved.update(instruction=f"{instruction}\n目标绑定：{bound}", object_ids=object_ids,
+                    region_ids=region_ids, goal_state=goals)
+    if len(resolved["instruction"]) > 1000:
+        raise PlanError("绑定后的任务文本过长")
+    return resolved
+
+
 def validate_context(context, now_ns, max_age_ns):
     _fields(context, ("request_id", "instruction", "observation", "object_ids", "region_ids",
                       "available_skills", "object_state", "goal_state", "completed_step_ids"), "规划输入")
@@ -178,6 +239,7 @@ class LongSequencePlanner:
         self.backend, self.max_age_ns, self.now_provider = backend, max_age_ns, now_provider
 
     def plan(self, context, now_ns):
+        context = ground_context(context)
         validate_context(context, now_ns, self.max_age_ns)
         try:
             raw = self.backend.generate(deepcopy(context))
@@ -202,7 +264,10 @@ class SequenceRunner:
         progress = []
         replans = 0
         remaining = MAX_STEPS
-        current = deepcopy(context)
+        try:
+            current = deepcopy(ground_context(context))
+        except PlanError as exc:
+            return {"status": "HUMAN_REVIEW", "reason": str(exc), "completed": progress, "replans": replans}
         while remaining > 0:
             try:
                 plan = self.planner.plan(current, clock.now_ns())
