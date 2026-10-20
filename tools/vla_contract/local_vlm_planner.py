@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -26,6 +27,15 @@ class LocalVlmBackend:
         image = (self.image_root / uri).resolve()
         if not image.is_relative_to(self.image_root) or not image.is_file() or not self.model.is_dir():
             raise PlanError("图像或模型目录无效")
+        from PIL import Image
+        try:
+            with Image.open(image) as frame:
+                expected = context["observation"]["images"]["top_rgb"]
+                if frame.mode != "RGB" or frame.size != (expected["width"], expected["height"]):
+                    raise PlanError("顶部图像格式或尺寸与观测不符")
+                frame.verify()
+        except OSError as exc:
+            raise PlanError("顶部图像无法读取") from exc
         payload = {"context": context, "model": str(self.model), "image": str(image)}
         start = time.monotonic()
         try:
@@ -59,7 +69,7 @@ def worker(payload):
         "place requires the held object's ID and completion={type:object_in_region,object_id:<id>,region_id:<id>}. "
         "Use only IDs in the context; at most 5 steps. Do not invent IDs. "
         f"Context: {json.dumps({key: value for key, value in context.items() if key != 'observation'}, ensure_ascii=False)}. "
-        f"Observation ID: {context['observation']['observation_id']}; arm: {context['observation']['arm_mode']}."
+        f"Observation: {json.dumps({'observation_id': context['observation']['observation_id'], 'arm_mode': context['observation']['arm_mode'], 'observation_timestamp_ns': context['observation']['observation_timestamp_ns'], 'state': context['observation']['state']}, ensure_ascii=False)}."
     )
     messages = [{"role": "user", "content": [{"type": "image", "path": payload["image"]},
                                                 {"type": "text", "text": prompt}]}]
@@ -82,7 +92,7 @@ def main():
     if args.worker:
         worker(json.load(sys.stdin))
         return
-    if args.context is None or not args.model or not args.image_root or args.timeout <= 0 or not 0 < args.max_age_ms <= 5000:
+    if args.context is None or not args.model or not args.image_root or not math.isfinite(args.timeout) or args.timeout <= 0 or not 0 < args.max_age_ms <= 5000:
         parser.error("需要 context、--model、--image-root 和正数 --timeout")
     context = json.loads(args.context.read_text(encoding="utf-8"))
     backend = LocalVlmBackend(args.model, args.image_root, args.timeout)

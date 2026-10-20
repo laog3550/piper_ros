@@ -3,6 +3,7 @@
 
 from copy import deepcopy
 import json
+import re
 
 from task_orchestrator import Skill, TaskOrchestrator
 from validate_contract import validate_observation
@@ -27,9 +28,19 @@ def _label(value, label):
         raise PlanError(f"{label}: 无效标识")
 
 
+def _mentioned(identifier, instruction):
+    boundary = r"[A-Za-z0-9_-]"
+    return re.search(rf"(?<!{boundary}){re.escape(identifier)}(?!{boundary})", instruction) is not None
+
+
+def _goals_satisfied(state, goals):
+    return all(state.get(object_id) == {"status": "placed", "region_id": region_id}
+               for object_id, region_id in goals.items())
+
+
 def validate_context(context, now_ns, max_age_ns):
     _fields(context, ("request_id", "instruction", "observation", "object_ids", "region_ids",
-                      "available_skills", "object_state", "completed_step_ids"), "规划输入")
+                      "available_skills", "object_state", "goal_state", "completed_step_ids"), "规划输入")
     _label(context["request_id"], "request_id")
     if type(context["instruction"]) is not str or not context["instruction"].strip() or len(context["instruction"]) > 1000:
         raise PlanError("任务文本无效")
@@ -73,6 +84,12 @@ def validate_context(context, now_ns, max_age_ns):
         held += status == "held"
     if held > 1:
         raise PlanError("单臂不能同时持有两个物体")
+    goals = context["goal_state"]
+    if type(goals) is not dict or not goals or len(goals) > MAX_STEPS:
+        raise PlanError("目标终态缺失或过多；需要人工消歧")
+    if any(object_id not in context["object_ids"] or region_id not in context["region_ids"]
+           for object_id, region_id in goals.items()):
+        raise PlanError("目标终态含未知物体或区域")
     completed = context["completed_step_ids"]
     if type(completed) is not list or len(completed) > MAX_STEPS:
         raise PlanError("已完成步骤无效")
@@ -84,6 +101,8 @@ def validate_context(context, now_ns, max_age_ns):
 
 
 def parse_plan(raw, context):
+    if type(context) is not dict or type(context.get("goal_state")) is not dict or not context["goal_state"]:
+        raise PlanError("缺少可核对的任务目标终态")
     try:
         plan = json.loads(raw) if type(raw) is str else deepcopy(raw)
     except (ValueError, TypeError) as exc:
@@ -96,6 +115,15 @@ def parse_plan(raw, context):
     steps = plan["steps"]
     if type(steps) is not list or not 1 <= len(steps) <= MAX_STEPS:
         raise PlanError("计划长度无效")
+    if len(context["object_ids"]) > 1:
+        for step in steps:
+            if type(step) is dict and type(step.get("object_id")) is str and not _mentioned(step["object_id"], context["instruction"]):
+                raise PlanError("多物体任务目标未在文本中明确绑定 ID；需要人工消歧")
+    if len(context["region_ids"]) > 1:
+        for step in steps:
+            if (type(step) is dict and step.get("skill") == "place" and type(step.get("region_id")) is str
+                    and not _mentioned(step["region_id"], context["instruction"])):
+                raise PlanError("多区域任务目标未在文本中明确绑定 ID；需要人工消歧")
     state = deepcopy(context["object_state"])
     held = next((name for name, item in state.items() if item["status"] == "held"), None)
     seen, picked, placed = set(context["completed_step_ids"]), set(), set()
@@ -112,6 +140,8 @@ def parse_plan(raw, context):
             raise PlanError("非法技能或执行臂")
         if step["object_id"] not in context["object_ids"]:
             raise PlanError("未知物体")
+        if step["object_id"] not in context["goal_state"]:
+            raise PlanError("步骤操作了任务目标之外的物体")
         if step["depends_on"] != ([] if previous is None else [previous]):
             raise PlanError("依赖必须形成无跳步的线性序列")
         object_id, region = step["object_id"], step["region_id"]
@@ -128,7 +158,7 @@ def parse_plan(raw, context):
             held = object_id
             picked.add(object_id)
         else:
-            if (region not in context["region_ids"] or condition != {"type": "object_in_region",
+            if (region != context["goal_state"][object_id] or condition != {"type": "object_in_region",
                     "object_id": object_id, "region_id": region} or held != object_id
                     or object_id in placed):
                 raise PlanError("place 前置条件、区域或完成条件矛盾")
@@ -136,6 +166,8 @@ def parse_plan(raw, context):
             held = None
             placed.add(object_id)
         previous = sid
+    if not _goals_satisfied(state, context["goal_state"]):
+        raise PlanError("计划未覆盖任务目标终态")
     return plan
 
 
@@ -228,6 +260,9 @@ class SequenceRunner:
                     requested_replan = True
                     break
             if not requested_replan:
+                if not _goals_satisfied(current["object_state"], current["goal_state"]):
+                    return {"status": "HUMAN_REVIEW", "reason": "世界状态未达到任务目标终态",
+                            "completed": progress, "replans": replans}
                 return {"status": "DONE", "reason": "合成离线序列结束", "completed": progress,
                         "replans": replans}
             if replans >= self.max_replans:
