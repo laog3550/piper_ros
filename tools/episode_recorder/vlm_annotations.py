@@ -42,6 +42,8 @@ def id_list(value, label):
 def validate_plan(value):
     if not isinstance(value, dict):
         raise ValueError("规划样本须为 JSON 对象")
+    object_ids = id_list(value.get("object_ids", []), "物体 ID")
+    location_ids = id_list(value.get("location_ids", []), "位置 ID")
     steps = value.get("steps")
     if not isinstance(steps, list) or not 1 <= len(steps) <= 100:
         raise ValueError("规划步骤须为 1 至 100 项的列表")
@@ -57,11 +59,14 @@ def validate_plan(value):
             "completion_criteria": required_text(step.get("completion_criteria"),
                                                  f"第 {index} 步完成判据"),
         })
+        if object_ids and normalized[-1]["target_object_id"] not in (None, *object_ids):
+            raise ValueError(f"第 {index} 步目标物体不在场景目录中")
+        if location_ids and normalized[-1]["target_location_id"] not in (None, *location_ids):
+            raise ValueError(f"第 {index} 步目标位置不在场景目录中")
     return {
         "task_group_id": optional_id(value.get("task_group_id"), "task_group_id"),
         "long_task_description": required_text(value.get("long_task_description"), "长任务描述"),
-        "scene": {"object_ids": id_list(value.get("object_ids", []), "物体 ID"),
-                  "location_ids": id_list(value.get("location_ids", []), "位置 ID")},
+        "scene": {"object_ids": object_ids, "location_ids": location_ids},
         "steps": normalized,
     }
 
@@ -79,6 +84,17 @@ def validate_skill_context(value):
         "expected_state_change": required_text(value.get("expected_state_change"), "预期状态变化"),
         "completion_criteria": required_text(value.get("completion_criteria"), "完成判据"),
     }
+
+
+def validate_plan_link(plan, context, skill):
+    """仅允许技能片段关联到同一计划中的完整对应步骤。"""
+    if context["long_task_description"] != plan["long_task_description"]:
+        raise ValueError("技能片段长任务描述与规划样本不一致")
+    expected = (skill, context["target_object_id"], context["target_location_id"],
+                context["completion_criteria"])
+    if not any((step["skill"], step["target_object_id"], step["target_location_id"],
+                step["completion_criteria"]) == expected for step in plan["steps"]):
+        raise ValueError("技能片段与 plan_id 的步骤、目标或完成判据不一致")
 
 
 def validate_annotation(value):

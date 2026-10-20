@@ -148,6 +148,9 @@ def main():
                        "skill_instruction": "抓住杯子", "target_object_id": "cup_1",
                        "target_location_id": "", "expected_state_change": "杯子由桌面变为夹爪持有",
                        "completion_criteria": "杯子离开桌面"}
+            rejected(port, "/api/start", {"task": "错配规划", "skill": "grasp",
+                                           "duration_sec": 30,
+                                           "vlm": {**context, "target_object_id": "other_cup"}})
             rejected(port, "/api/start", {"task": "无效技能", "skill": "grasp",
                                            "duration_sec": 30, "vlm": {**context, "completion_criteria": ""}})
             started = http(port, "/api/start", {"task": "杯子任务", "skill": "grasp",
@@ -194,7 +197,16 @@ def main():
             entries = http(port, "/api/episodes")["result"]["episodes"]
             assert len(entries) == 4 and any(item["vlm"] is None for item in entries)
             assert len(http(port, "/api/plans")["result"]["plans"]) == 1
+            tampered = json.loads(json.dumps(success_meta))
+            tampered["task_metadata"]["vlm"]["target_object_id"] = "other_cup"
+            Path(success["path"]).joinpath("episode.json").write_text(
+                json.dumps(tampered, ensure_ascii=False), encoding="utf-8")
+            rejected(port, "/api/vlm/export", None)
+            Path(success["path"]).joinpath("episode.json").write_text(
+                json.dumps(success_meta, ensure_ascii=False), encoding="utf-8")
             exported = http(port, "/api/vlm/export")["result"]
+            if output := os.environ.get("VLM_EXPORT_TEST_OUTPUT"):
+                Path(output).write_text(json.dumps(exported, ensure_ascii=False, indent=2), encoding="utf-8")
             assert len(exported["planning_samples"]) == 1
             assert len(exported["transition_samples"]) == 3
             assert {item["human_annotation"]["outcome"] for item in exported["transition_samples"]} == {"success", "failure", "unknown"}

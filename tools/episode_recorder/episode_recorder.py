@@ -22,7 +22,8 @@ import rclpy
 from piper_msgs.srv import StartEpisode
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
-from vlm_annotations import required_text, validate_annotation, validate_plan, validate_skill_context
+from vlm_annotations import (required_text, validate_annotation, validate_plan,
+                             validate_plan_link, validate_skill_context)
 
 
 def atomic_json(path, data):
@@ -252,6 +253,7 @@ class Recorder:
                 plan = load_json(plan_file)
                 if context["task_group_id"] and context["task_group_id"] != plan["task_group_id"]:
                     raise ValueError("task_group_id 与规划样本不一致")
+                validate_plan_link(plan, context, skill)
                 context["task_group_id"] = plan["task_group_id"]
             context["task_group_id"] = context["task_group_id"] or uuid.uuid4().hex
             fields["vlm"] = context
@@ -527,6 +529,16 @@ class Recorder:
             context = metadata.get("task_metadata", {}).get("vlm")
             if not context or not metadata.get("vlm_annotation"):
                 continue
+            if metadata.get("state") != "saved":
+                raise ValueError("VLM 导出包含未完成保存的 Episode")
+            if context["plan_id"]:
+                plan_file = self.plans_dir / f'{context["plan_id"]}.json'
+                if not plan_file.is_file():
+                    raise ValueError("VLM 导出的关联 plan_id 不存在")
+                plan = load_json(plan_file)
+                if context["task_group_id"] != plan["task_group_id"]:
+                    raise ValueError("VLM 导出的 task_group_id 与规划样本不一致")
+                validate_plan_link(plan, context, metadata["skill"])
             transitions.append({
                 "episode_id": metadata["episode_id"], "task_group_id": context["task_group_id"],
                 "plan_id": context["plan_id"], "skill": metadata["skill"],

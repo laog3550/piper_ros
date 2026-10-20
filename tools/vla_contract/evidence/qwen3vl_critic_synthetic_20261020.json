@@ -1,0 +1,37 @@
+{
+  "data_kind": "synthetic_only",
+  "model_dir": "/home/mips/.cache/huggingface/hub/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203",
+  "cases": [
+    {
+      "case_id": "pick_success",
+      "expected_result": "SUCCESS",
+      "raw_model_output": "```json\n{\n  \"result\": \"SUCCESS\",\n  \"failure_type\": \"NONE\",\n  \"confidence\": 1,\n  \"evidence\": [\n    {\n      \"source\": \"pre_rgb\",\n      \"observation\": \"robot is above the target object\"\n    },\n    {\n      \"source\": \"post_rgb\",\n      \"observation\": \"robot is above the target object and has grasped it\"\n    }\n  ]\n}\n```",
+      "worker_stderr_tail": null,
+      "parsed_result": "UNKNOWN",
+      "decision_correct": false,
+      "recommended_transition": "HUMAN_REVIEW",
+      "error": "JSONDecodeError",
+      "model_seconds": 14.227994421031326,
+      "gpu_base_mib": 1311,
+      "gpu_peak_mib": 5967
+    },
+    {
+      "case_id": "pick_failure",
+      "expected_result": "FAILURE",
+      "raw_model_output": "{\"result\":\"SUCCESS\",\"failure_type\":\"NONE\",\"confidence\":1,\"evidence\":[{\"source\":\"post_rgb\",\"observation\":\"target object-1 is picked\"}]}",
+      "worker_stderr_tail": null,
+      "parsed_result": "SUCCESS",
+      "decision_correct": false,
+      "recommended_transition": "HUMAN_REVIEW",
+      "error": null,
+      "model_seconds": 11.809216920053586,
+      "gpu_base_mib": 1311,
+      "gpu_peak_mib": 5967
+    }
+  ],
+  "summary": {
+    "cases": 2,
+    "decision_correct": 0,
+    "human_review": 2
+  }
+}

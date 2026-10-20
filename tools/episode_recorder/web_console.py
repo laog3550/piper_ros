@@ -170,7 +170,8 @@ def handler_factory(socket_path, preview, default_save_dir):
             if path in ("/api/plans", "/api/vlm/export"):
                 try:
                     action = "plans" if path == "/api/plans" else "vlm_export"
-                    return self.respond(200, recorder_request(socket_path, {"action": action}))
+                    response = recorder_request(socket_path, {"action": action})
+                    return self.respond(200 if response["ok"] else 409, response)
                 except (OSError, ValueError, json.JSONDecodeError) as exc:
                     return self.respond(503, {"ok": False, "error": str(exc)})
             if path.startswith("/camera/") and path.endswith(".jpg"):
