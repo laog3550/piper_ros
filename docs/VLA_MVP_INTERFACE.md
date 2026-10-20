@@ -223,3 +223,15 @@ python3 tools/vla_contract/shadow_run.py fixture
 2026-10-20 复核：使用明确写出 `object-1`、`object-2`、`region-1`、`region-2` 的合成任务，在加入 `goal_state` 与观测状态摘要后的最终代码上再次调用相同 SmolVLM。模型调用 `22.10 s`，整卡显存由 `1236 MiB` 升至 `2678 MiB`；原始输出是非 JSON 的描述文本，还编造了额外区域 ID，入口返回 `HUMAN_REVIEW`。此为链路与降级测试，不能据此估计计划准确率。
 
 加入中文别名绑定入口后，以“把红杯放到左盒，再把蓝杯放到右盒”和两枚合成彩色圆再次运行：受限解析先形成 `object-1→region-1`、`object-2→region-2`；SmolVLM 调用 `11.41 s`，整卡显存 `1223→2659 MiB`，输出英文描述而非计划 JSON，最终仍为 `HUMAN_REVIEW`。这一结果仅验证自然语言绑定和模型回退链路；没有真实规划准确率证据。
+
+2026-10-20 进一步用 `tools/vla_contract/eval_local_vlm_planner.py` 评估三个合成场景：两件物体的四步任务、首件物体已夹持的三步任务、首件物体已夹持且有三件物体的五步任务。图像与结构化场景目录由脚本生成；人工写定的预期步骤用于**评测**，没有传给模型。脚本保存每例的完整原始输出、严格 JSON/计划校验、步骤顺序与目标核对、模型耗时、推理后观测年龄和整卡显存采样。运行命令为 `python3 tools/vla_contract/eval_local_vlm_planner.py --model /本地模型目录 --output /tmp/评测.json --timeout 120`；必须使用含权重的本地模型目录和支持 `transformers`、`torch` 的环境。模型输出原文直接交给原有 `parse_plan`，没有从文本补写计划或放宽契约。
+
+| 模型与提示 | 严格 JSON | 合法计划 | 顺序及目标正确 | 单例模型耗时 | 整卡显存峰值 |
+| --- | ---: | ---: | ---: | --- | --- |
+| SmolVLM-256M-Instruct，中文 JSON 提示 | 0/3 | 0/3 | 0/3 | 38.96–41.78 s | 2651–2652 MiB |
+| Qwen3-VL-2B-Instruct，初版提示 | 3/3 | 1/3 | 1/3 | 27.07–33.38 s | 5907–6056 MiB |
+| Qwen3-VL-2B-Instruct，明确已夹持物体及精确步数 | 3/3 | 3/3 | 3/3 | 22.65–28.51 s | 5974–6045 MiB |
+
+Qwen3-VL-2B-Instruct 使用公开 revision `89644892e4d85e24eaac8bacfd4f463576704203`，权重 `model.safetensors` 的 SHA-256 为 `7de1838c87a5349b016c26a1c3f7d2bc400a3d485f95ef39a7059ffd734977a0`。初版在已夹持场景重新生成 `pick` 或重复 `place`，被既有校验器拒绝；最终提示只显式列出已夹持 ID 与所需步数，仍由模型生成每个步骤。逐例原文和指标见 `tools/vla_contract/evidence/smolvlm_prompt_v2_20261020.json`、`tools/vla_contract/evidence/qwen3vl_prompt_v1_20261020.json`、`tools/vla_contract/evidence/qwen3vl_prompt_v2_20261020.json`。三例是小规模、确定性的合成输入，只能说明该模型在这些输入上生成了可解析且语义匹配的离线计划；场景别名、物体状态及目标关系由结构化输入提供，尚未验证模型从真实图像自行识别身份或泛化到现场任务。
+
+最终三例的推理后观测年龄为 22.69–28.55 s，均超过当前 `5000 ms` 时效门槛。实际 `LongSequencePlanner` 会因过期抛出 `PlanError`，本地入口将其映射为 `REOBSERVE`，不会把这些离线有效计划交给动作监督器。要在现场使用，需要另行解决时效与重新观测后的计划关联，并完成真实场景、critic、世界状态和实机安全验收；此次没有连接机器人、CAN 或动作话题。

@@ -1,0 +1,137 @@
+{
+  "schema_version": "piper_vlm_plan_eval/1.0",
+  "data_kind": "synthetic_only",
+  "model_dir": "/home/mips/.cache/huggingface/hub/models--HuggingFaceTB--SmolVLM-256M-Instruct/snapshots/7e3e67edbbed1bf9888184d9df282b700a323964",
+  "results": [
+    {
+      "case_id": "four_steps",
+      "instruction": "把红杯放到左盒，再把蓝杯放到右盒",
+      "goal_state": {
+        "object-1": "region-1",
+        "object-2": "region-3"
+      },
+      "expected_steps": [
+        [
+          "pick",
+          "object-1",
+          null
+        ],
+        [
+          "place",
+          "object-1",
+          "region-1"
+        ],
+        [
+          "pick",
+          "object-2",
+          null
+        ],
+        [
+          "place",
+          "object-2",
+          "region-3"
+        ]
+      ],
+      "raw_model_output": "The image shows a pick/place  action that involves placing a cup or mug on a table. The action is described as \"pick,\" \"place,\" and \"place.\" The table is labeled as \"table,\" and the table's contents are as follows:\n\n```\n- \"table\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"place\"\n- \"",
+      "json_valid": false,
+      "plan_valid": false,
+      "semantic_correct": false,
+      "actual_steps": null,
+      "reason": "模型输出不是 JSON",
+      "model_seconds": 40.35527177201584,
+      "observation_age_after_ms": 40397.89,
+      "fresh_under_5s": false,
+      "gpu_base_mib": 1215,
+      "gpu_peak_mib": 2652
+    },
+    {
+      "case_id": "three_steps_held",
+      "instruction": "把红杯放到左盒，再把蓝杯放到右盒",
+      "goal_state": {
+        "object-1": "region-1",
+        "object-2": "region-3"
+      },
+      "expected_steps": [
+        [
+          "place",
+          "object-1",
+          "region-1"
+        ],
+        [
+          "pick",
+          "object-2",
+          null
+        ],
+        [
+          "place",
+          "object-2",
+          "region-3"
+        ]
+      ],
+      "raw_model_output": "The image shows a pick/place 2D object that is used to create a map of a joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint joint",
+      "json_valid": false,
+      "plan_valid": false,
+      "semantic_correct": false,
+      "actual_steps": null,
+      "reason": "模型输出不是 JSON",
+      "model_seconds": 41.78059244400356,
+      "observation_age_after_ms": 41819.14,
+      "fresh_under_5s": false,
+      "gpu_base_mib": 1206,
+      "gpu_peak_mib": 2651
+    },
+    {
+      "case_id": "five_steps_held",
+      "instruction": "把红杯放到左盒，再把蓝杯放到中盒，然后把绿杯放到右盒",
+      "goal_state": {
+        "object-1": "region-1",
+        "object-2": "region-2",
+        "object-3": "region-3"
+      },
+      "expected_steps": [
+        [
+          "place",
+          "object-1",
+          "region-1"
+        ],
+        [
+          "pick",
+          "object-2",
+          null
+        ],
+        [
+          "place",
+          "object-2",
+          "region-2"
+        ],
+        [
+          "pick",
+          "object-3",
+          null
+        ],
+        [
+          "place",
+          "object-3",
+          "region-3"
+        ]
+      ],
+      "raw_model_output": "The image shows a pick/place  action that involves placing a cup or a green square on a table. The action is set up as follows:\n\n1. The table is laid out on a flat surface.\n2. A red cup is placed on the table.\n3. A blue square is placed on the table.\n4. A green square is placed on the table.\n5. A red square is placed on the table.\n6. A blue square is placed on the table.\n7. A green square is placed on the table.\n8. A red square is placed on the table.\n9. A blue square is placed on the table.\n10. A green square is placed on the table.\n11. A red square is placed on the table.\n12. A blue square is placed on the table.\n13. A red square is placed on the table.\n14. A blue square is placed on the table.\n15. A green square is placed on the table.\n16. A red square is placed on the table.\n17. A blue square is placed on the table.\n18. A green square is placed on the table.\n19. A red square is placed on the table.\n20. A blue square is placed on the table.\n21. A green square is placed on the table.\n22. A red square is placed on the table.\n23. A blue square is placed on the table.\n24. A red square is placed on the table.\n25. A blue square is placed on the table.\n26. A green square is placed on the table.\n27. A red square is placed on the table.\n28. A blue square is placed on the table.\n29. A red square is placed on the table.\n30. A blue square is placed on the table.\n31. A green square is placed on the table.\n32. A red square is placed on the table.\n33. A blue square is placed on the table.\n34. A red square is placed on the table.\n35. A blue square is placed on the table.\n36. A green square is placed on the table.\n37. A red square is placed on the table.\n38. A blue square is placed on the table.\n39. A red square is placed on the table.\n40. A blue square is placed on the table.\n41. A green square is placed on the table.\n42. A red square is placed on the table.\n43. A blue square is placed on the table.\n44. A red square is placed on the table.\n45. A blue square is placed on the table.\n46. A green square is placed on the table.\n47. A red square is placed on the table.\n48. A blue square is placed on the table.\n49. A red square is placed on the table.\n50. A blue square is placed on the table.\n51. A green square is placed on the table.\n52. A red square is placed on the table.\n53. A blue square is placed on the table.\n54. A red square is placed on the table.\n55. A blue square is placed on the table.\n56. A green square is placed on the table.\n57. A red square is placed on the table.\n58. A blue square is placed on the table.\n59. A red square is placed on the table.\n60. A blue square is placed on the table.\n61. A green square is placed on the table.\n62. A red square is placed on the table.\n63. A blue square is placed on the table.\n64. A red square is placed on the table.\n65. A blue square is placed on the table.\n66. A green square is placed on the table.\n67. A red square is placed on the table.\n68. A blue square is placed on the table.\n69. A red square is placed on the table.\n70. A blue square is placed on the table.\n71. A green square is placed on the table.\n72. A red square is placed on the table.\n73. A blue square is placed on the table.\n74. A red square is placed on the table.\n75. A blue square is placed on the table.\n76. A green square is placed on the table.\n77. A red square is placed on the table.",
+      "json_valid": false,
+      "plan_valid": false,
+      "semantic_correct": false,
+      "actual_steps": null,
+      "reason": "模型输出不是 JSON",
+      "model_seconds": 38.95806749002077,
+      "observation_age_after_ms": 38997.4,
+      "fresh_under_5s": false,
+      "gpu_base_mib": 1204,
+      "gpu_peak_mib": 2651
+    }
+  ],
+  "summary": {
+    "cases": 3,
+    "json_valid": 0,
+    "plan_valid": 0,
+    "semantic_correct": 0
+  }
+}
