@@ -710,13 +710,17 @@ python3 tools/episode_recorder/web_console.py --config config/episode_recorder.c
 
 在 `http://127.0.0.1:8765/` 用任务模式开始、停止并保存 Episode；应先保存再停止相机。`config/episode_recorder.camera_only.json` 只录三机的 RGB、对齐深度、CameraInfo 和自动追加的 `/collection/events`，默认保存到 `/tmp/piper_camera_episodes`，长期采集前请改到有足够空间的磁盘。此 Episode 可用于相机检查与 Rerun 回放，但不含关节状态和示教动作，现有 `to_lerobot.py` 会明确拒绝将其转换为动作数据集。
 
+Web 控制台在每路彩色画面下显示深度预览；腕部固定使用 `0–0.5 m` 色标，顶部使用 `0–1 m`。预览端的滤波和轮廓叠加不修改录制消息。每条 Episode 可设置 1 至 86400 秒的录制上限，到时由独立录制服务自动停止。保存前可在界面中修改 Episode 的绝对保存目录；录制过程仍写入配置目录的 `.staging`。本地可视化控制台可用 `python3 tools/episode_recorder/desktop_console.py --config /path/to/config.json` 启动，显示更流畅的彩色画面。保存后仍须核查任务结果、帧完整性和动作有效性。
+
 轻量级 Web 控制台另起一个进程，使用同一配置文件：
 
 ```bash
 python3 tools/episode_recorder/web_console.py --config /path/to/config.json
 ```
 
-浏览器打开 `http://127.0.0.1:8765/`。页面显示三路彩色相机的低帧率预览和录制状态，可填写任务名、语言指令，执行开始、停止、保存或丢弃，并查看已保存的 Episode。保存时选择成功或失败标签；录制器分别将语言指令写入 `task_metadata.language_instruction`，将标签写入 `outcome`。录制器新增只读 `/collection/list` 服务和同名 socket 操作；socket 的 `save` 操作接受可选的 `outcome`，旧的 `/collection/save` Trigger 与 CLI 保存方式仍可使用，未传标签时 `outcome` 为 `null`。Web 服务默认仅监听本机，录制器独立运行，关闭浏览器或重启 Web 服务不会中断录制。预览仅支持常见 8 位彩色或灰度 `sensor_msgs/Image`；深度图及 CAN 数据仍交给独立的 Rerun 查看。
+浏览器打开 `http://127.0.0.1:8765/`。页面按相机上下显示三路彩色图和深度图的低帧率预览及录制状态，可填写任务名、语言指令及保存目录，执行开始、停止、保存或丢弃，并查看已保存的 Episode。原有 `task` 模式仍将语言指令写入 `task_metadata.language_instruction`，将可选结果写入 `outcome`。录制器新增只读 `/collection/list` 服务和同名 socket 操作；socket 的 `save` 操作接受可选的 `outcome` 与 `save_dir`，旧的 `/collection/save` Trigger 与 CLI 保存方式仍可使用，未传标签时 `outcome` 为 `null`。Web 服务默认仅监听本机，录制器独立运行，关闭浏览器或重启 Web 服务不会中断录制。彩色预览支持常见 8 位彩色或灰度 `sensor_msgs/Image`；CAN 数据仍可交给独立的 Rerun 查看。
+
+Web 控制台现在也支持 VLM 单技能片段：每条片段仍是一条 Episode 和一份 rosbag，无须录制完整长任务。录制前填写长任务描述、当前技能及短指令、可选目标物体与位置 ID、预期状态变化和完成判据；保存时由人填写 `success`、`failure` 或 `unknown`、失败原因、实际观察状态及下一决策。结果标注写在对应 `episode.json` 的 `vlm_annotation`，与录制前的 `task_metadata.vlm` 分开；未观察到的内容保留 `null`。原有 `task` 模式和旧 Episode 仍可使用。页面下方可独立录入规划样本：长任务描述、场景物体与位置 ID、按顺序排列的技能及完成判据；规划保存在配置目录的 `plans/<plan_id>.json`，技能片段可用 `plan_id` 或 `task_group_id` 关联。点击“导出 VLM 样本 JSON”可取得规划与结果/转移两类样本，包含 Episode、时间戳、话题及 rosbag 路径引用。人工标注只表示人的判断，不作为真实机器人反馈或 LeRobot action。
 
 无机械臂验收可构建 `piper_msgs` 后运行 `tools/episode_recorder/test_web_console_integration.py`。测试仅发布合成相机和字符串反馈话题，不连接 CAN 设备。
 

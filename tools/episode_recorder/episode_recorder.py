@@ -4,6 +4,7 @@
 import argparse
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -21,6 +22,7 @@ import rclpy
 from piper_msgs.srv import StartEpisode
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
+from vlm_annotations import required_text, validate_annotation, validate_plan, validate_skill_context
 
 
 def atomic_json(path, data):
@@ -103,6 +105,8 @@ class Recorder:
         self.staging.mkdir(exist_ok=True)
         self.discarded = self.root / "discarded"
         self.discarded.mkdir(exist_ok=True)
+        self.plans_dir = self.root / "plans"
+        self.plans_dir.mkdir(exist_ok=True)
         self.events_topic = "/collection/events"
         self.topics = list(config["topics"])
         if self.events_topic not in self.topics:
@@ -129,6 +133,8 @@ class Recorder:
         self.event_publisher = self.node.create_publisher(String, self.events_topic, 10)
         self.process = None
         self.current = None
+        self.ready_monotonic_ns = None
+        self.deadline_monotonic_ns = None
         self._recover()
         self.node.create_service(StartEpisode, "/collection/start", self._service_start)
         for action in ("stop", "save", "discard", "status", "list"):
@@ -137,8 +143,10 @@ class Recorder:
     def _service_start(self, request, response):
         try:
             fields = json.loads(request.metadata_json or "{}")
+            duration = fields.pop("duration_limit_sec", None) if isinstance(fields, dict) else None
             result = self.start({"mode": request.mode, "task": request.task,
-                                 "skill": request.skill, "metadata": fields})
+                                 "skill": request.skill, "metadata": fields,
+                                 "duration_sec": duration})
             response.success = True
             response.result_json = json.dumps(result, ensure_ascii=False)
         except (ValueError, OSError, KeyError, sqlite3.Error) as error:
@@ -157,9 +165,9 @@ class Recorder:
             return response
         return callback
 
-    def _event(self, name):
+    def _event(self, name, **details):
         event = {"episode_id": self.metadata["episode_id"], "event": name,
-                 "time": time.time_ns(), "time_unit": "unix_ns"}
+                 "time": time.time_ns(), "time_unit": "unix_ns", **details}
         self.metadata.setdefault("events", []).append(event)
         self._write_current()
         self.event_publisher.publish(String(data=json.dumps(event, ensure_ascii=False)))
@@ -224,15 +232,38 @@ class Recorder:
         task = request.get("task")
         skill = request.get("skill")
         fields = request.get("metadata", {})
+        duration = request.get("duration_sec")
         if mode not in ("task", "skill") or not isinstance(task, str) or not task.strip():
             raise ValueError("mode 必须为 task 或 skill，且 task 不能为空")
         if mode == "skill" and (not isinstance(skill, str) or not skill.strip()):
             raise ValueError("原子技能录制需要 skill")
         if not isinstance(fields, dict):
             raise ValueError("metadata 必须是 JSON 对象")
+        fields = dict(fields)
+        if "vlm" in fields:
+            if mode != "skill":
+                raise ValueError("VLM 技能上下文需要 mode=skill")
+            skill = required_text(skill, "原子技能名", 120)
+            context = validate_skill_context(fields["vlm"])
+            if context["plan_id"]:
+                plan_file = self.plans_dir / f'{context["plan_id"]}.json'
+                if not plan_file.is_file():
+                    raise ValueError("关联的 plan_id 不存在")
+                plan = load_json(plan_file)
+                if context["task_group_id"] and context["task_group_id"] != plan["task_group_id"]:
+                    raise ValueError("task_group_id 与规划样本不一致")
+                context["task_group_id"] = plan["task_group_id"]
+            context["task_group_id"] = context["task_group_id"] or uuid.uuid4().hex
+            fields["vlm"] = context
+        if duration is not None and (isinstance(duration, bool)
+                                     or not isinstance(duration, (int, float))
+                                     or not math.isfinite(duration) or not 1 <= duration <= 86400):
+            raise ValueError("duration_sec 必须为 1 至 86400 秒的有限数值")
         free = self._available()
         if free < self.min_free_bytes:
             raise ValueError(f"剩余磁盘空间不足: {free} 字节")
+        self.ready_monotonic_ns = None
+        self.deadline_monotonic_ns = None
         self.current = self.staging / uuid.uuid4().hex
         self.current.mkdir()
         self.metadata = {
@@ -240,6 +271,8 @@ class Recorder:
             "episode_id": self.current.name,
             "task": task, "skill": skill if mode == "skill" else None,
             "task_metadata": fields, "topics": self.topics,
+            "rosbag_relative_path": "bag",
+            "duration_limit_sec": duration,
             "frame_topics": self.frame_topics, "expected_fps": self.expected_fps,
             "started_at_unix_ns": time.time_ns(),
             "timestamp_note": "rosbag2 messages.timestamp 是接收时间；原始消息 header.stamp 保留在 CDR 消息中",
@@ -266,7 +299,13 @@ class Recorder:
                 break
             if self._graph_ready(node_name) and (self.current / "bag").is_dir():
                 self.metadata["state"] = "recording"
-                self.metadata["ready_at_unix_ns"] = time.time_ns()
+                ready = time.time_ns()
+                self.metadata["ready_at_unix_ns"] = ready
+                if duration is not None:
+                    duration_ns = round(duration * 1_000_000_000)
+                    self.ready_monotonic_ns = time.monotonic_ns()
+                    self.deadline_monotonic_ns = self.ready_monotonic_ns + duration_ns
+                    self.metadata["recording_deadline_unix_ns"] = ready + duration_ns
                 self._event("started")
                 return self.status()
         self._terminate()
@@ -285,7 +324,7 @@ class Recorder:
                 self.process.wait(timeout=5)
         self.process = None
 
-    def stop(self):
+    def stop(self, reason="manual"):
         if self.current is None or self.metadata["state"] != "recording":
             raise ValueError("没有正在录制的 Episode")
         if self.process is None or self.process.poll() is not None:
@@ -293,9 +332,16 @@ class Recorder:
             self.metadata["error"] = "rosbag2 已意外退出"
             self._event("interrupted")
             raise ValueError(self.metadata["error"])
-        self._event("stopped")
+        stopped = time.time_ns()
+        self.metadata["stop_reason"] = reason
+        self.metadata["stop_requested_at_unix_ns"] = stopped
+        self.metadata["recorded_duration_sec"] = round(
+            ((time.monotonic_ns() - self.ready_monotonic_ns) if self.ready_monotonic_ns is not None
+             else (stopped - self.metadata["ready_at_unix_ns"])) / 1_000_000_000, 3)
+        self._event("stopped", reason=reason)
         time.sleep(0.15)
         self._terminate()
+        self.deadline_monotonic_ns = None
         self.metadata["stopped_at_unix_ns"] = time.time_ns()
         try:
             self.metadata["bag_validation"] = inspect_bag(
@@ -308,26 +354,82 @@ class Recorder:
         self._write_current()
         return self.status()
 
-    def save(self, outcome=None):
+    def save(self, outcome=None, save_dir=None, annotation=None):
         if self.current is None or self.metadata["state"] != "stopped":
             raise ValueError("只能保存已停止且通过完整性核验的 Episode")
-        if outcome is not None and outcome not in ("success", "failure"):
-            raise ValueError("outcome 必须为 success 或 failure")
+        if outcome is not None and outcome not in ("success", "failure", "unknown"):
+            raise ValueError("outcome 必须为 success、failure 或 unknown")
+        context = self.metadata.get("task_metadata", {}).get("vlm")
+        if context and annotation is None:
+            raise ValueError("VLM 技能片段保存前须填写人工结果标注")
+        if annotation is not None:
+            if not context:
+                raise ValueError("仅 VLM 技能片段可保存结果标注")
+            annotation = validate_annotation(annotation)
+            if outcome is not None and outcome != annotation["outcome"]:
+                raise ValueError("结果标签与人工标注不一致")
+            outcome = annotation["outcome"]
+        if save_dir is not None and (not isinstance(save_dir, str) or not save_dir.strip()
+                                     or not Path(save_dir).expanduser().is_absolute()):
+            raise ValueError("save_dir 必须为非空的绝对目录路径")
+        destination_root = Path(save_dir).expanduser().resolve() if save_dir else self.root
+        if destination_root == self.staging or self.staging in destination_root.parents:
+            raise ValueError("保存目录不能位于录制暂存目录内")
         inspect_bag(self.current / "bag", self.metadata["topics"],
                     self.metadata.get("frame_topics", []), self.metadata.get("expected_fps", {}))
+        destination_root.mkdir(parents=True, exist_ok=True)
         counter = self.root / ".next_id"
         stored = int(counter.read_text()) if counter.exists() else 1
-        existing = [int(p.name[8:]) for p in self.root.glob("episode_[0-9]*") if p.name[8:].isdigit()]
+        existing = [int(p.name[8:]) for p in self._saved_paths() if p.name[8:].isdigit()]
         number = max([stored, *(value + 1 for value in existing)])
-        destination = self.root / f"episode_{number:06d}"
+        destination = destination_root / f"episode_{number:06d}"
+        if destination.exists() or destination.is_symlink():
+            raise ValueError(f"保存目标已存在: {destination}")
+        same_device = self.current.stat().st_dev == destination_root.stat().st_dev
+        if not same_device:
+            required = sum(path.stat().st_size for path in self.current.rglob("*") if path.is_file())
+            if shutil.disk_usage(destination_root).free < required + self.min_free_bytes:
+                raise ValueError("目标磁盘剩余空间不足以保存 Episode")
+        previous = dict(self.metadata)
+        previous["events"] = list(self.metadata.get("events", []))
         self.metadata["state"] = "saved"
         self.metadata["episode_number"] = number
         self.metadata["outcome"] = outcome
+        if annotation is not None:
+            annotation["annotated_at_unix_ns"] = time.time_ns()
+            self.metadata["vlm_annotation"] = annotation
         self.metadata["saved_at_unix_ns"] = time.time_ns()
-        self._event("saved")
-        self.current.rename(destination)
-        atomic_json(counter, number + 1)
+        self.metadata["save_directory"] = str(destination_root)
+        event = {"episode_id": self.metadata["episode_id"], "event": "saved",
+                 "time": time.time_ns(), "time_unit": "unix_ns"}
+        self.metadata.setdefault("events", []).append(event)
+        self._write_current()
+        temporary = destination_root / f".{destination.name}.copy-{uuid.uuid4().hex}"
+        try:
+            if destination_root != self.root:
+                index = self.root / ".episode_index.json"
+                paths = load_json(index)["paths"] if index.exists() else []
+                atomic_json(index, {"paths": [*paths, str(destination)]})
+            atomic_json(counter, number + 1)
+            if same_device:
+                self.current.rename(destination)
+            else:
+                shutil.copytree(self.current, temporary)
+                temporary.rename(destination)
+                cleanup = self.root / f".saved_cleanup_{self.current.name}_{uuid.uuid4().hex}"
+                self.current.rename(cleanup)
+                shutil.rmtree(cleanup, ignore_errors=True)
+        except (OSError, ValueError):
+            if temporary.exists():
+                shutil.rmtree(temporary, ignore_errors=True)
+            if self.current.exists():
+                if destination.exists():
+                    shutil.rmtree(destination, ignore_errors=True)
+                self.metadata = previous
+                self._write_current()
+            raise
         self.current = None
+        self.event_publisher.publish(String(data=json.dumps(event, ensure_ascii=False)))
         return {"state": "saved", "path": str(destination), "episode_number": number}
 
     def discard(self):
@@ -366,24 +468,78 @@ class Recorder:
                 self._event("failed")
                 time.sleep(0.15)
                 self._terminate()
+            deadline = self.deadline_monotonic_ns
+            if self.metadata["state"] == "recording" and deadline and time.monotonic_ns() >= deadline:
+                return self.stop(reason="duration_limit")
             return {"state": self.metadata["state"], "path": str(self.current),
-                    "metadata": self.metadata, "free_bytes": self._available()}
+                    "metadata": self.metadata, "free_bytes": self._available(),
+                    "remaining_sec": max(0, (deadline - time.monotonic_ns()) / 1_000_000_000) if deadline else None}
         pending = [str(p) for p in self.staging.iterdir() if p.is_dir()]
         return {"state": "idle", "pending": pending, "free_bytes": self._available()}
 
+    def _saved_paths(self):
+        paths = list(self.root.glob("episode_[0-9]*"))
+        index = self.root / ".episode_index.json"
+        if index.exists():
+            paths.extend(Path(path) for path in load_json(index)["paths"])
+        return list(dict.fromkeys(paths))
+
     def list(self):
         episodes = []
-        for directory in sorted(self.root.glob("episode_[0-9]*"), reverse=True):
+        for directory in self._saved_paths():
             metadata_file = directory / "episode.json"
             if not metadata_file.is_file():
                 continue
             metadata = load_json(metadata_file)
             episodes.append({key: metadata.get(key) for key in (
                 "episode_id", "episode_number", "state", "mode", "task", "skill",
-                "outcome", "started_at_unix_ns", "saved_at_unix_ns")})
+                "outcome", "started_at_unix_ns", "saved_at_unix_ns",
+                "duration_limit_sec", "recorded_duration_sec", "stop_reason")})
             episodes[-1]["language_instruction"] = metadata.get("task_metadata", {}).get("language_instruction")
+            episodes[-1]["vlm"] = metadata.get("task_metadata", {}).get("vlm")
+            episodes[-1]["vlm_annotation"] = metadata.get("vlm_annotation")
             episodes[-1]["path"] = str(directory)
+        episodes.sort(key=lambda entry: entry.get("episode_number") or 0, reverse=True)
         return {"episodes": episodes}
+
+    def create_plan(self, value):
+        plan = validate_plan(value)
+        plan["schema_version"] = 1
+        plan["plan_id"] = f"plan_{uuid.uuid4().hex}"
+        plan["task_group_id"] = plan["task_group_id"] or uuid.uuid4().hex
+        plan["source"] = "human"
+        plan["created_at_unix_ns"] = time.time_ns()
+        atomic_json(self.plans_dir / f'{plan["plan_id"]}.json', plan)
+        return plan
+
+    def list_plans(self):
+        plans = [load_json(path) for path in self.plans_dir.glob("plan_*.json")]
+        plans.sort(key=lambda item: item["created_at_unix_ns"], reverse=True)
+        return {"plans": plans}
+
+    def export_vlm(self):
+        transitions = []
+        for directory in self._saved_paths():
+            path = directory / "episode.json"
+            if not path.is_file():
+                continue
+            metadata = load_json(path)
+            context = metadata.get("task_metadata", {}).get("vlm")
+            if not context or not metadata.get("vlm_annotation"):
+                continue
+            transitions.append({
+                "episode_id": metadata["episode_id"], "task_group_id": context["task_group_id"],
+                "plan_id": context["plan_id"], "skill": metadata["skill"],
+                "context": context, "human_annotation": metadata["vlm_annotation"],
+                "rosbag_path": str(directory / "bag"), "episode_json_path": str(path),
+                "topics": metadata["topics"], "bag_validation": metadata.get("bag_validation"),
+                "started_at_unix_ns": metadata["started_at_unix_ns"],
+                "ready_at_unix_ns": metadata.get("ready_at_unix_ns"),
+                "stopped_at_unix_ns": metadata.get("stopped_at_unix_ns"),
+                "saved_at_unix_ns": metadata.get("saved_at_unix_ns"),
+            })
+        return {"schema_version": 1, "planning_samples": self.list_plans()["plans"],
+                "transition_samples": transitions}
 
     def close(self):
         if self.process:
@@ -409,7 +565,7 @@ def serve(config):
     server.bind(str(path))
     os.chmod(path, 0o600)
     server.listen(8)
-    server.settimeout(1)
+    server.settimeout(0.2)
     running = True
 
     def shutdown(_signum, _frame):
@@ -430,12 +586,20 @@ def serve(config):
                 try:
                     request = json.loads(connection.recv(1_000_000).decode())
                     action = request.pop("action")
-                    if action not in ("start", "stop", "save", "discard", "status", "list"):
+                    if action not in ("start", "stop", "save", "discard", "status", "list",
+                                      "plan_create", "plans", "vlm_export"):
                         raise ValueError("未知操作")
                     if action == "start":
                         result = recorder.start(request)
                     elif action == "save":
-                        result = recorder.save(request.get("outcome"))
+                        result = recorder.save(request.get("outcome"), request.get("save_dir"),
+                                               request.get("annotation"))
+                    elif action == "plan_create":
+                        result = recorder.create_plan(request.get("plan"))
+                    elif action == "plans":
+                        result = recorder.list_plans()
+                    elif action == "vlm_export":
+                        result = recorder.export_vlm()
                     else:
                         result = getattr(recorder, action)()
                     response = {"ok": True, "result": result}
@@ -450,13 +614,18 @@ def serve(config):
 
 def main():
     parser = argparse.ArgumentParser(description="ROS 2 Episode SQLite 录制器")
-    parser.add_argument("action", choices=["serve", "start", "stop", "save", "discard", "status", "list"])
+    parser.add_argument("action", choices=["serve", "start", "stop", "save", "discard", "status", "list",
+                                           "plan_create", "plans", "vlm_export"])
     parser.add_argument("--config", required=True, help="JSON 配置文件")
     parser.add_argument("--mode", choices=["task", "skill"])
     parser.add_argument("--task")
     parser.add_argument("--skill")
     parser.add_argument("--metadata", help="JSON 任务元数据文件")
-    parser.add_argument("--outcome", choices=["success", "failure"], help="保存时的结果标签")
+    parser.add_argument("--duration-sec", type=float, help="本条 Episode 自动停止的秒数（1 至 86400）")
+    parser.add_argument("--outcome", choices=["success", "failure", "unknown"], help="保存时的结果标签")
+    parser.add_argument("--annotation", help="JSON 人工结果标注文件")
+    parser.add_argument("--plan", help="JSON 规划样本文件")
+    parser.add_argument("--save-dir", help="保存 Episode 的绝对目录路径")
     args = parser.parse_args()
     config = load_json(args.config)
     if args.action == "serve":
@@ -467,13 +636,21 @@ def main():
     request = {"action": args.action}
     if args.action == "start":
         request.update(mode=args.mode, task=args.task, skill=args.skill,
-                       metadata=load_json(args.metadata) if args.metadata else {})
+                       metadata=load_json(args.metadata) if args.metadata else {},
+                       duration_sec=args.duration_sec)
     if args.action == "save":
         request["outcome"] = args.outcome
+        request["save_dir"] = args.save_dir
+        request["annotation"] = load_json(args.annotation) if args.annotation else None
+    if args.action == "plan_create":
+        request["plan"] = load_json(args.plan) if args.plan else None
     with socket.socket(socket.AF_UNIX) as connection:
         connection.connect(str(path))
         connection.sendall(json.dumps(request, ensure_ascii=False).encode())
-        response = json.loads(connection.recv(1_000_000).decode())
+        chunks = []
+        while chunk := connection.recv(1_000_000):
+            chunks.append(chunk)
+        response = json.loads(b"".join(chunks).decode())
     print(json.dumps(response, ensure_ascii=False, indent=2))
     if not response["ok"]:
         sys.exit(1)
