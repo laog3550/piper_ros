@@ -216,7 +216,9 @@ python3 tools/vla_contract/shadow_run.py fixture
 
 显式 ID 输入中，多物体或多区域候选存在时，任务文本必须明确包含计划所用的对应 ID，例如 `object-1` 和 `region-1`；仅说“两个物体”或“对应区域”不足以消歧。也可用受限的场景输入替代 `object_ids`、`region_ids`、`goal_state`：提供 `scene_objects`、`scene_regions`，每项为 `{id, aliases}`，再写出“把红杯放到左盒，再把蓝杯放到右盒”或“红杯→左盒，蓝杯→右盒”。入口只接受可完整拆分为 `把/将…放到/放入/放进…` 或箭头绑定的句子；名称必须与各自目录中的 ID 或别名精确且唯一匹配，随后生成经校验的 `goal_state` 与规范 ID 绑定。未知名称、同名别名、重复目标、额外无法解析的句子均进入 `HUMAN_REVIEW`。场景别名由上游识别与核对，文本绑定不代替图像中的身份识别或开放式自然语言语义理解。
 
-`SequenceRunner` 每步构造现有 `TaskOrchestrator`，由其 `ActionSupervisor` 逐目标预检与执行；规划文本没有通向动作话题、CAN 或驱动的入口。仅在 critic 给出可继续的结果且独立世界状态满足该步完成条件时记录进度；两者矛盾即停止。世界状态变化可触发重新规划，重规划次数和总执行步数均有限。现有 `OfflineVlmCriticAdapter` 只返回 `HUMAN_REVIEW`，因此真实 critic 路径会停在锁存 `SAFE_STOP`，不会自动推进多步。四步完成、有限重试和重规划验收使用显式合成 critic、观测、动作、反馈及世界状态夹具；不代表真实模型或实机成功。
+`SequenceRunner` 将模型输出先视为待确认计划。输入必须带稳定的 `scene_version`，现场读取器必须实现 `refresh_plan_snapshot()`，返回新的 v1 `observation`、`object_ids`、`region_ids`、`object_state`、`goal_state`、`scene_version` 和明确的 `trusted=true`。慢速推理后先核对场景/标定/归一化版本、臂、观测来源、物体和区域 ID、目标终态及物体状态；观测 ID、时间戳、各图像与状态源的 Header 时间戳以及不可变图像 URI 必须更新，且新观测仍在原有时效阈值内。核对成功后，只将计划的 `observation_id` 改绑为新观测并重新执行完整计划校验；每一步构造任务前再次刷新并核对场景与该步前置状态。来源不可信、现场变化或缺少刷新接口均进入 `HUMAN_REVIEW`，过期新观测要求 `REOBSERVE`。独立现场适配器须核实物体身份与几何；身份或几何变化必须更换 `scene_version`，并只在来源可靠时给出 `trusted=true`。当前只有合成夹具，没有已验收的真实适配器。
+
+每步仍由现有 `TaskOrchestrator` 和 `ActionSupervisor` 逐目标预检与执行；规划文本没有通向动作话题、CAN 或驱动的入口。仅在 critic 给出可继续的结果且独立世界状态满足该步完成条件时记录进度；两者矛盾即停止。世界状态变化可触发重新规划，重规划次数和总执行步数均有限。现有 `OfflineVlmCriticAdapter` 只返回 `HUMAN_REVIEW`，因此真实 critic 路径会停在锁存 `SAFE_STOP`，不会自动推进多步。四步完成、有限重试和重规划验收使用显式合成 critic、观测、动作、反馈及世界状态夹具；不代表真实模型或实机成功。
 
 本地模型 smoke 可运行 `python3 tools/vla_contract/local_vlm_planner.py context.json --model /本地模型目录 --image-root /本地图像目录 --timeout 150 --max-age-ms 5000`，其中 `context.json` 须在调用前刚生成；延长年龄仅供无执行出口的 smoke 使用，不改变安全监督配置。后端要求不可变本地图像，在隔离子进程中加载公开 VLM，超时、非法输出或推理后过期的观测不会产生可执行步骤。2026-10-20 使用本机缓存的 SmolVLM-256M-Instruct revision `7e3e67edbbed1bf9888184d9df282b700a323964`，对两枚合成彩色圆和一个区域的图像执行一次真实 GPU 推理：模型调用约 `10.37 s`，原始输出为 `{'red dot': "red", 'blue dot': "blue"}`，不是计划 JSON，结果为 `HUMAN_REVIEW`。该结果证明本地推理链路可运行，**没有**证明长序列规划能力。当前还缺真实场景标注、目标 ID 与图像的可靠关联、可自动确认完成条件的世界状态、经验证的模型规划准确率和所有实机安全门槛。
 
@@ -234,4 +236,6 @@ python3 tools/vla_contract/shadow_run.py fixture
 
 Qwen3-VL-2B-Instruct 使用公开 revision `89644892e4d85e24eaac8bacfd4f463576704203`，权重 `model.safetensors` 的 SHA-256 为 `7de1838c87a5349b016c26a1c3f7d2bc400a3d485f95ef39a7059ffd734977a0`。初版在已夹持场景重新生成 `pick` 或重复 `place`，被既有校验器拒绝；最终提示只显式列出已夹持 ID 与所需步数，仍由模型生成每个步骤。逐例原文和指标见 `tools/vla_contract/evidence/smolvlm_prompt_v2_20261020.json`、`tools/vla_contract/evidence/qwen3vl_prompt_v1_20261020.json`、`tools/vla_contract/evidence/qwen3vl_prompt_v2_20261020.json`。三例是小规模、确定性的合成输入，只能说明该模型在这些输入上生成了可解析且语义匹配的离线计划；场景别名、物体状态及目标关系由结构化输入提供，尚未验证模型从真实图像自行识别身份或泛化到现场任务。
 
-最终三例的推理后观测年龄为 22.69–28.55 s，均超过当前 `5000 ms` 时效门槛。实际 `LongSequencePlanner` 会因过期抛出 `PlanError`，本地入口将其映射为 `REOBSERVE`，不会把这些离线有效计划交给动作监督器。要在现场使用，需要另行解决时效与重新观测后的计划关联，并完成真实场景、critic、世界状态和实机安全验收；此次没有连接机器人、CAN 或动作话题。
+最终三例的推理后观测年龄为 22.69–28.55 s，均超过当前 `5000 ms` 时效门槛。独立的 `LongSequencePlanner.plan()` 与本地 smoke 入口仍因旧观测返回 `REOBSERVE`；`SequenceRunner` 的待确认计划路径可在推理后用新快照重新绑定并再次校验，绝不把旧观测直接放行。该路径目前只通过合成慢后端、刷新成功/变化及真实 critic 拒绝测试；仍缺真实现场快照适配器、图像目标身份核实、独立世界状态和实机安全验收。此次没有连接机器人、CAN 或动作话题。
+
+可用 `python3 tools/vla_contract/verify_refreshed_vlm_runner.py --model /本地模型目录 --output /tmp/刷新评测.json --timeout 120` 在合成世界中复核公开模型的四步计划。脚本把模型耗时计入合成时钟，再由合成现场读取器提供新观测和世界状态；动作只写入合成世界，critic 明确使用合成 `SUCCESS`。使用上述 Qwen3-VL 固定 revision 的一次真实模型运行耗时 `24.95 s`，刷新 5 次，合成世界记录 8 个经监督器放行的目标，四步结果为 `DONE`，原始步骤与人工预期顺序一致；逐例原始输出见 `tools/vla_contract/evidence/qwen3vl_refreshed_runner_20261020.json`。这个 `DONE` 不代表真实 critic 或机械臂验收通过。

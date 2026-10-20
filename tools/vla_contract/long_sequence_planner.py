@@ -65,8 +65,10 @@ def ground_context(context):
         raise PlanError("规划输入无效")
     if "scene_objects" not in context and "scene_regions" not in context:
         return context
-    _fields(context, ("request_id", "instruction", "observation", "scene_objects", "scene_regions",
-                      "available_skills", "object_state", "completed_step_ids"), "场景规划输入")
+    required = {"request_id", "instruction", "observation", "scene_objects", "scene_regions",
+                "available_skills", "object_state", "completed_step_ids"}
+    if set(context) not in (required, required | {"scene_version"}):
+        raise PlanError("场景规划输入: 字段不符合契约")
     instruction = context["instruction"]
     if type(instruction) is not str or not instruction.strip() or len(instruction) > 700:
         raise PlanError("自然语言任务无效")
@@ -92,6 +94,8 @@ def ground_context(context):
     bound = "；".join(f"{object_id}→{region_id}" for object_id, region_id in goals.items())
     resolved = {key: deepcopy(context[key]) for key in
                 ("request_id", "observation", "available_skills", "object_state", "completed_step_ids")}
+    if "scene_version" in context:
+        resolved["scene_version"] = context["scene_version"]
     resolved.update(instruction=f"{instruction}\n目标绑定：{bound}", object_ids=object_ids,
                     region_ids=region_ids, goal_state=goals)
     if len(resolved["instruction"]) > 1000:
@@ -100,8 +104,12 @@ def ground_context(context):
 
 
 def validate_context(context, now_ns, max_age_ns):
-    _fields(context, ("request_id", "instruction", "observation", "object_ids", "region_ids",
-                      "available_skills", "object_state", "goal_state", "completed_step_ids"), "规划输入")
+    required = {"request_id", "instruction", "observation", "object_ids", "region_ids",
+                "available_skills", "object_state", "goal_state", "completed_step_ids"}
+    if type(context) is not dict or set(context) not in (required, required | {"scene_version"}):
+        raise PlanError("规划输入: 字段不符合契约")
+    if "scene_version" in context:
+        _label(context["scene_version"], "scene_version")
     _label(context["request_id"], "request_id")
     if type(context["instruction"]) is not str or not context["instruction"].strip() or len(context["instruction"]) > 1000:
         raise PlanError("任务文本无效")
@@ -239,6 +247,13 @@ class LongSequencePlanner:
         self.backend, self.max_age_ns, self.now_provider = backend, max_age_ns, now_provider
 
     def plan(self, context, now_ns):
+        context, plan = self.propose(context, now_ns)
+        if self.now_provider is not None:
+            validate_context(context, self.now_provider(), self.max_age_ns)
+        return plan
+
+    def propose(self, context, now_ns):
+        """返回待确认计划；推理后的时效和现场状态交由执行前刷新处理。"""
         context = ground_context(context)
         validate_context(context, now_ns, self.max_age_ns)
         try:
@@ -246,9 +261,7 @@ class LongSequencePlanner:
         except Exception as exc:
             raise PlanError(f"规划后端失败：{type(exc).__name__}") from exc
         plan = parse_plan(raw, context)
-        if self.now_provider is not None:
-            validate_context(context, self.now_provider(), self.max_age_ns)
-        return plan
+        return context, plan
 
 
 class SequenceRunner:
@@ -260,18 +273,73 @@ class SequenceRunner:
         self.planner, self.task_factory, self.world_reader = planner, task_factory, world_reader
         self.max_replans = max_replans
 
+    def _refresh(self, current, clock):
+        if "scene_version" not in current:
+            raise PlanError("缺少场景版本；需要人工复核")
+        if self.world_reader is None or not callable(getattr(self.world_reader, "refresh_plan_snapshot", None)):
+            raise PlanError("缺少可信现场刷新来源；需要人工复核")
+        try:
+            snapshot = self.world_reader.refresh_plan_snapshot()
+        except Exception as exc:
+            raise PlanError(f"现场刷新失败：{type(exc).__name__}") from exc
+        _fields(snapshot, ("trusted", "scene_version", "observation", "object_ids", "region_ids",
+                           "object_state", "goal_state"), "现场快照")
+        if snapshot["trusted"] is not True:
+            raise PlanError("现场快照来源不可信；需要人工复核")
+        if snapshot["scene_version"] != current["scene_version"]:
+            raise PlanError("场景版本已变化；需要人工复核")
+        for name in ("object_ids", "region_ids", "object_state", "goal_state"):
+            if snapshot[name] != current[name]:
+                raise PlanError(f"现场{name}已变化；需要人工复核")
+        old_obs, new_obs = current["observation"], snapshot["observation"]
+        if type(new_obs) is not dict:
+            raise PlanError("现场观测无效；需要人工复核")
+        for name in ("contract_version", "time_domain", "arm_mode", "calibration_version",
+                     "normalization_version"):
+            if new_obs.get(name) != old_obs[name]:
+                raise PlanError(f"现场{name}已变化；需要人工复核")
+        for source_group in ("images", "state"):
+            if type(new_obs.get(source_group)) is not dict or set(new_obs[source_group]) != set(old_obs[source_group]):
+                raise PlanError("现场观测来源已变化；需要人工复核")
+            for name, old_source in old_obs[source_group].items():
+                new_source = new_obs[source_group][name]
+                stable = (("topic", "frame_id", "encoding", "width", "height") if source_group == "images"
+                          else ("source_topic", "joint_names"))
+                if type(new_source) is not dict or any(new_source.get(key) != old_source[key] for key in stable):
+                    raise PlanError("现场观测来源已变化；需要人工复核")
+                if (type(new_source.get("header_timestamp_ns")) is not int
+                        or new_source["header_timestamp_ns"] <= old_source["header_timestamp_ns"]):
+                    raise PlanError("现场观测源数据未更新；需要人工复核")
+                if source_group == "images" and new_source.get("uri") == old_source["uri"]:
+                    raise PlanError("现场图像未更新；需要人工复核")
+        if (new_obs.get("observation_id") == old_obs["observation_id"]
+                or type(new_obs.get("observation_timestamp_ns")) is not int
+                or new_obs["observation_timestamp_ns"] <= old_obs["observation_timestamp_ns"]):
+            raise PlanError("现场观测未更新；需要人工复核")
+        refreshed = deepcopy(current)
+        refreshed["observation"] = deepcopy(new_obs)
+        validate_context(refreshed, clock.now_ns(), self.planner.max_age_ns)
+        return refreshed
+
     def run(self, context, clock):
         progress = []
         replans = 0
         remaining = MAX_STEPS
         try:
             current = deepcopy(ground_context(context))
+            if "scene_version" not in current:
+                raise PlanError("缺少场景版本；需要人工复核")
+            if self.world_reader is None or not callable(getattr(self.world_reader, "refresh_plan_snapshot", None)):
+                raise PlanError("缺少可信现场刷新来源；需要人工复核")
         except PlanError as exc:
             return {"status": "HUMAN_REVIEW", "reason": str(exc), "completed": progress, "replans": replans}
         while remaining > 0:
             try:
-                plan = self.planner.plan(current, clock.now_ns())
-                validate_context(current, clock.now_ns(), self.planner.max_age_ns)
+                current, pending = self.planner.propose(current, clock.now_ns())
+                current = self._refresh(current, clock)
+                plan = deepcopy(pending)
+                plan["observation_id"] = current["observation"]["observation_id"]
+                parse_plan(plan, current)
             except PlanError as exc:
                 status = "REOBSERVE" if "观测" in str(exc) and "过期" in str(exc) else "HUMAN_REVIEW"
                 return {"status": status, "reason": str(exc), "completed": progress, "replans": replans}
@@ -279,6 +347,15 @@ class SequenceRunner:
             for step in plan["steps"]:
                 if remaining == 0:
                     return {"status": "HUMAN_REVIEW", "reason": "执行步数上限", "completed": progress, "replans": replans}
+                try:
+                    current = self._refresh(current, clock)
+                    object_state = current["object_state"][step["object_id"]]
+                    if (step["skill"] == "pick" and object_state != {"status": "available", "region_id": None}
+                            or step["skill"] == "place" and object_state != {"status": "held", "region_id": None}):
+                        raise PlanError("执行前置条件已变化；需要人工复核")
+                except PlanError as exc:
+                    status = "REOBSERVE" if "观测" in str(exc) and "过期" in str(exc) else "HUMAN_REVIEW"
+                    return {"status": status, "reason": str(exc), "completed": progress, "replans": replans}
                 skill = Skill(step["skill"], step["object_id"] if step["skill"] == "pick" else step["region_id"],
                               max_retries=1)
                 try:
@@ -334,5 +411,8 @@ class SequenceRunner:
                 return {"status": "HUMAN_REVIEW", "reason": "重新规划次数耗尽",
                         "completed": progress, "replans": replans}
             replans += 1
-            current["observation"] = self.world_reader.refresh_observation()
+            try:
+                current = self._refresh(current, clock)
+            except PlanError as exc:
+                return {"status": "HUMAN_REVIEW", "reason": str(exc), "completed": progress, "replans": replans}
         return {"status": "HUMAN_REVIEW", "reason": "执行步数上限", "completed": progress, "replans": replans}
