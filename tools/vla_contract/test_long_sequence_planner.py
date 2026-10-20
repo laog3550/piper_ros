@@ -29,7 +29,7 @@ def context(clock):
             "object_state": {name: {"status": "available", "region_id": None}
                              for name in ("object-1", "object-2")},
             "goal_state": {"object-1": "region-1", "object-2": "region-2"},
-            "completed_step_ids": []}
+            "completed_step_ids": [], "scene_version": "scene-1"}
 
 
 def step(sid, skill, obj, region=None, dependency=None):
@@ -70,12 +70,14 @@ class FixtureBackend:
 
 
 class FixtureWorldReader:
-    def __init__(self, world, initial_state, replan_at=0, mismatch=False):
+    def __init__(self, world, initial_state, replan_at=0, mismatch=False, snapshot_change=None):
         self.world = world
         self.state = deepcopy(initial_state)
         self.calls = 0
         self.replan_at = replan_at
         self.mismatch = mismatch
+        self.snapshot_change = snapshot_change
+        self.refreshes = 0
 
     def __call__(self, current_step):
         self.calls += 1
@@ -85,9 +87,18 @@ class FixtureWorldReader:
                                else {"status": "placed", "region_id": current_step["region_id"]})
         return deepcopy(self.state), self.calls == self.replan_at
 
-    def refresh_observation(self):
+    def refresh_plan_snapshot(self):
+        self.refreshes += 1
         obs, _ = self.world.observe(type("S", (), {"name": "pick"})(), "LEFT", self.world.clock.now_ns())
-        return obs
+        for image in obs["images"].values():
+            image["uri"] = f'{image["uri"]}/{obs["observation_id"]}'
+        snapshot = {"trusted": True, "scene_version": "scene-1", "observation": obs,
+                    "object_ids": ["object-1", "object-2"], "region_ids": ["region-1", "region-2"],
+                    "object_state": deepcopy(self.state),
+                    "goal_state": {"object-1": "region-1", "object-2": "region-2"}}
+        if self.snapshot_change is not None:
+            self.snapshot_change(snapshot, self.refreshes)
+        return snapshot
 
 
 class PlannerTests(unittest.TestCase):
@@ -211,13 +222,96 @@ class PlannerTests(unittest.TestCase):
                 self.clock.value += 100_000_000
                 return json.dumps(plan(ctx, four_steps()))
 
-        runner = SequenceRunner(LongSequencePlanner(SlowBackend()),
-                                lambda skill, current_step: self.fail("不应开始执行"), None)
+        runner, world, tasks = self.make_runner([four_steps()])
+        runner.planner = LongSequencePlanner(SlowBackend())
+        result = runner.run(self.ctx, self.clock)
+        self.assertEqual(result["status"], "DONE")
+        self.assertEqual(result["completed"], ["s1", "s2", "s3", "s4"])
+        self.assertEqual(len(tasks), 4)
+        self.assertGreaterEqual(runner.world_reader.refreshes, 5)
+
+    def test_direct_planner_still_rejects_post_inference_staleness(self):
+        class SlowBackend:
+            def generate(inner, ctx):
+                self.clock.value += 100_000_000
+                return json.dumps(plan(ctx, four_steps()))
+
+        planner = LongSequencePlanner(SlowBackend(), now_provider=self.clock.now_ns)
+        with self.assertRaisesRegex(PlanError, "观测过期"):
+            planner.plan(self.ctx, self.clock.now_ns())
+
+    def test_refresh_detects_changed_object_before_execution(self):
+        def changed(snapshot, call):
+            if call == 1:
+                snapshot["object_state"]["object-1"] = {"status": "held", "region_id": None}
+
+        runner, world, tasks = self.make_runner([four_steps()], snapshot_change=changed)
+        result = runner.run(self.ctx, self.clock)
+        self.assertEqual(result["status"], "HUMAN_REVIEW")
+        self.assertIn("object_state", result["reason"])
+        self.assertEqual(tasks, [])
+        self.assertEqual(world.dispatched, [])
+
+    def test_refresh_rechecks_state_before_every_step(self):
+        def changed(snapshot, call):
+            if call == 3:
+                snapshot["object_state"]["object-2"] = {"status": "held", "region_id": None}
+
+        runner, world, tasks = self.make_runner([four_steps()], snapshot_change=changed)
+        result = runner.run(self.ctx, self.clock)
+        self.assertEqual(result["status"], "HUMAN_REVIEW")
+        self.assertEqual(result["completed"], ["s1"])
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(len(world.dispatched), 2)
+
+    def test_refresh_rejects_expired_new_observation(self):
+        def delayed(snapshot, call):
+            if call == 1:
+                self.clock.value += 100_000_000
+
+        runner, world, tasks = self.make_runner([four_steps()], snapshot_change=delayed)
         result = runner.run(self.ctx, self.clock)
         self.assertEqual(result["status"], "REOBSERVE")
-        self.assertEqual(result["completed"], [])
+        self.assertEqual(tasks, [])
+        self.assertEqual(world.dispatched, [])
 
-    def make_runner(self, plans, critic_results=(), replan_at=0, mismatch=False):
+    def test_runner_requires_version_and_refresh_source_before_model(self):
+        called = []
+
+        class NoCallBackend:
+            def generate(self, ctx):
+                called.append(True)
+                raise AssertionError("不应调用模型")
+
+        runner = SequenceRunner(LongSequencePlanner(NoCallBackend()), self.fail, None)
+        self.assertEqual(runner.run(self.ctx, self.clock)["status"], "HUMAN_REVIEW")
+        runner, world, tasks = self.make_runner([four_steps()])
+        runner.planner = LongSequencePlanner(NoCallBackend())
+        missing = deepcopy(self.ctx)
+        del missing["scene_version"]
+        self.assertEqual(runner.run(missing, self.clock)["status"], "HUMAN_REVIEW")
+        self.assertEqual(called, [])
+        self.assertEqual(tasks, [])
+
+    def test_refresh_rejects_untrusted_and_changed_versions(self):
+        for change in (lambda s: s.__setitem__("trusted", False),
+                       lambda s: s.__setitem__("scene_version", "scene-2"),
+                       lambda s: s["observation"].__setitem__("calibration_version", "other"),
+                       lambda s: s["goal_state"].__setitem__("object-1", "region-2"),
+                       lambda s: s["object_ids"].append("object-3"),
+                       lambda s: s["observation"].__setitem__("observation_id", "synthetic-001"),
+                       lambda s: s["observation"]["images"]["top_rgb"].__setitem__("uri", "synthetic://top_rgb"),
+                       lambda s: s["observation"]["state"]["left"].__setitem__(
+                           "header_timestamp_ns", self.ctx["observation"]["state"]["left"]["header_timestamp_ns"])):
+            with self.subTest(change=change):
+                self.setUp()
+                runner, world, tasks = self.make_runner(
+                    [four_steps()], snapshot_change=lambda snapshot, call: change(snapshot))
+                self.assertEqual(runner.run(self.ctx, self.clock)["status"], "HUMAN_REVIEW")
+                self.assertEqual(tasks, [])
+                self.assertEqual(world.dispatched, [])
+
+    def make_runner(self, plans, critic_results=(), replan_at=0, mismatch=False, snapshot_change=None):
         world = SyntheticWorld(self.clock)
         supervisor = ActionSupervisor(synthetic_profile())
         results = list(critic_results)
@@ -231,7 +325,7 @@ class PlannerTests(unittest.TestCase):
             tasks.append(task)
             return task
 
-        reader = FixtureWorldReader(world, self.ctx["object_state"], replan_at, mismatch)
+        reader = FixtureWorldReader(world, self.ctx["object_state"], replan_at, mismatch, snapshot_change)
         runner = SequenceRunner(LongSequencePlanner(FixtureBackend(plans)), factory, reader)
         return runner, world, tasks
 
