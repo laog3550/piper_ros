@@ -1,0 +1,203 @@
+{
+  "schema_version": "piper_vlm_plan_eval/1.0",
+  "data_kind": "synthetic_only",
+  "model_dir": "/home/mips/.cache/huggingface/hub/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203",
+  "model_weight_sha256": "7de1838c87a5349b016c26a1c3f7d2bc400a3d485f95ef39a7059ffd734977a0",
+  "results": [
+    {
+      "case_id": "four_steps",
+      "instruction": "把红杯放到左盒，再把蓝杯放到右盒",
+      "goal_state": {
+        "object-1": "region-1",
+        "object-2": "region-3"
+      },
+      "expected_steps": [
+        [
+          "pick",
+          "object-1",
+          null
+        ],
+        [
+          "place",
+          "object-1",
+          "region-1"
+        ],
+        [
+          "pick",
+          "object-2",
+          null
+        ],
+        [
+          "place",
+          "object-2",
+          "region-3"
+        ]
+      ],
+      "raw_model_output": "{\n  \"schema_version\": \"piper_vlm_plan/1.0\",\n  \"request_id\": \"four_steps\",\n  \"observation_id\": \"synthetic-001\",\n  \"steps\": [\n    {\n      \"step_id\": \"s1\",\n      \"skill\": \"pick\",\n      \"arm\": \"LEFT\",\n      \"object_id\": \"object-1\",\n      \"region_id\": null,\n      \"depends_on\": [],\n      \"completion\": {\n        \"type\": \"object_held\",\n        \"object_id\": \"object-1\",\n        \"region_id\": null\n      }\n    },\n    {\n      \"step_id\": \"s2\",\n      \"skill\": \"place\",\n      \"arm\": \"LEFT\",\n      \"object_id\": \"object-1\",\n      \"region_id\": \"region-1\",\n      \"depends_on\": [\"s1\"],\n      \"completion\": {\n        \"type\": \"object_in_region\",\n        \"object_id\": \"object-1\",\n        \"region_id\": \"region-1\"\n      }\n    },\n    {\n      \"step_id\": \"s3\",\n      \"skill\": \"pick\",\n      \"arm\": \"LEFT\",\n      \"object_id\": \"object-2\",\n      \"region_id\": null,\n      \"depends_on\": [\"s2\"],\n      \"completion\": {\n        \"type\": \"object_held\",\n        \"object_id\": \"object-2\",\n        \"region_id\": null\n      }\n    },\n    {\n      \"step_id\": \"s4\",\n      \"skill\": \"place\",\n      \"arm\": \"LEFT\",\n      \"object_id\": \"object-2\",\n      \"region_id\": \"region-3\",\n      \"depends_on\": [\"s3\"],\n      \"completion\": {\n        \"type\": \"object_in_region\",\n        \"object_id\": \"object-2\",\n        \"region_id\": \"region-3\"\n      }\n    }\n  ]\n}",
+      "json_valid": true,
+      "plan_valid": true,
+      "semantic_correct": true,
+      "actual_steps": [
+        [
+          "pick",
+          "object-1",
+          null
+        ],
+        [
+          "place",
+          "object-1",
+          "region-1"
+        ],
+        [
+          "pick",
+          "object-2",
+          null
+        ],
+        [
+          "place",
+          "object-2",
+          "region-3"
+        ]
+      ],
+      "reason": null,
+      "model_seconds": 26.317415134981275,
+      "observation_age_after_ms": 26363.12,
+      "fresh_under_5s": false,
+      "gpu_base_mib": 1249,
+      "gpu_peak_mib": 6045
+    },
+    {
+      "case_id": "three_steps_held",
+      "instruction": "把红杯放到左盒，再把蓝杯放到右盒",
+      "goal_state": {
+        "object-1": "region-1",
+        "object-2": "region-3"
+      },
+      "expected_steps": [
+        [
+          "place",
+          "object-1",
+          "region-1"
+        ],
+        [
+          "pick",
+          "object-2",
+          null
+        ],
+        [
+          "place",
+          "object-2",
+          "region-3"
+        ]
+      ],
+      "raw_model_output": "{\n  \"schema_version\": \"piper_vlm_plan/1.0\",\n  \"request_id\": \"three_steps_held\",\n  \"observation_id\": \"synthetic-001\",\n  \"steps\": [\n    {\n      \"step_id\": \"s1\",\n      \"skill\": \"place\",\n      \"arm\": \"LEFT\",\n      \"object_id\": \"object-1\",\n      \"region_id\": \"region-1\",\n      \"depends_on\": [],\n      \"completion\": {\n        \"type\": \"object_in_region\",\n        \"object_id\": \"object-1\",\n        \"region_id\": \"region-1\"\n      }\n    },\n    {\n      \"step_id\": \"s2\",\n      \"skill\": \"pick\",\n      \"arm\": \"LEFT\",\n      \"object_id\": \"object-2\",\n      \"region_id\": null,\n      \"depends_on\": [\"s1\"],\n      \"completion\": {\n        \"type\": \"object_held\",\n        \"object_id\": \"object-2\",\n        \"region_id\": null\n      }\n    },\n    {\n      \"step_id\": \"s3\",\n      \"skill\": \"place\",\n      \"arm\": \"LEFT\",\n      \"object_id\": \"object-2\",\n      \"region_id\": \"region-3\",\n      \"depends_on\": [\"s2\"],\n      \"completion\": {\n        \"type\": \"object_in_region\",\n        \"object_id\": \"object-2\",\n        \"region_id\": \"region-3\"\n      }\n    }\n  ]\n}",
+      "json_valid": true,
+      "plan_valid": true,
+      "semantic_correct": true,
+      "actual_steps": [
+        [
+          "place",
+          "object-1",
+          "region-1"
+        ],
+        [
+          "pick",
+          "object-2",
+          null
+        ],
+        [
+          "place",
+          "object-2",
+          "region-3"
+        ]
+      ],
+      "reason": null,
+      "model_seconds": 22.648408057983033,
+      "observation_age_after_ms": 22689.82,
+      "fresh_under_5s": false,
+      "gpu_base_mib": 1303,
+      "gpu_peak_mib": 5995
+    },
+    {
+      "case_id": "five_steps_held",
+      "instruction": "把红杯放到左盒，再把蓝杯放到中盒，然后把绿杯放到右盒",
+      "goal_state": {
+        "object-1": "region-1",
+        "object-2": "region-2",
+        "object-3": "region-3"
+      },
+      "expected_steps": [
+        [
+          "place",
+          "object-1",
+          "region-1"
+        ],
+        [
+          "pick",
+          "object-2",
+          null
+        ],
+        [
+          "place",
+          "object-2",
+          "region-2"
+        ],
+        [
+          "pick",
+          "object-3",
+          null
+        ],
+        [
+          "place",
+          "object-3",
+          "region-3"
+        ]
+      ],
+      "raw_model_output": "{\n  \"schema_version\": \"piper_vlm_plan/1.0\",\n  \"request_id\": \"five_steps_held\",\n  \"observation_id\": \"synthetic-001\",\n  \"steps\": [\n    {\n      \"step_id\": \"s1\",\n      \"skill\": \"place\",\n      \"arm\": \"LEFT\",\n      \"object_id\": \"object-1\",\n      \"region_id\": \"region-1\",\n      \"depends_on\": [],\n      \"completion\": {\n        \"type\": \"object_in_region\",\n        \"object_id\": \"object-1\",\n        \"region_id\": \"region-1\"\n      }\n    },\n    {\n      \"step_id\": \"s2\",\n      \"skill\": \"pick\",\n      \"arm\": \"LEFT\",\n      \"object_id\": \"object-2\",\n      \"region_id\": null,\n      \"depends_on\": [\"s1\"],\n      \"completion\": {\n        \"type\": \"object_held\",\n        \"object_id\": \"object-2\",\n        \"region_id\": null\n      }\n    },\n    {\n      \"step_id\": \"s3\",\n      \"skill\": \"place\",\n      \"arm\": \"LEFT\",\n      \"object_id\": \"object-2\",\n      \"region_id\": \"region-2\",\n      \"depends_on\": [\"s2\"],\n      \"completion\": {\n        \"type\": \"object_in_region\",\n        \"object_id\": \"object-2\",\n        \"region_id\": \"region-2\"\n      }\n    },\n    {\n      \"step_id\": \"s4\",\n      \"skill\": \"pick\",\n      \"arm\": \"LEFT\",\n      \"object_id\": \"object-3\",\n      \"region_id\": null,\n      \"depends_on\": [\"s3\"],\n      \"completion\": {\n        \"type\": \"object_held\",\n        \"object_id\": \"object-3\",\n        \"region_id\": null\n      }\n    },\n    {\n      \"step_id\": \"s5\",\n      \"skill\": \"place\",\n      \"arm\": \"LEFT\",\n      \"object_id\": \"object-3\",\n      \"region_id\": \"region-3\",\n      \"depends_on\": [\"s4\"],\n      \"completion\": {\n        \"type\": \"object_in_region\",\n        \"object_id\": \"object-3\",\n        \"region_id\": \"region-3\"\n      }\n    }\n  ]\n}",
+      "json_valid": true,
+      "plan_valid": true,
+      "semantic_correct": true,
+      "actual_steps": [
+        [
+          "place",
+          "object-1",
+          "region-1"
+        ],
+        [
+          "pick",
+          "object-2",
+          null
+        ],
+        [
+          "place",
+          "object-2",
+          "region-2"
+        ],
+        [
+          "pick",
+          "object-3",
+          null
+        ],
+        [
+          "place",
+          "object-3",
+          "region-3"
+        ]
+      ],
+      "reason": null,
+      "model_seconds": 28.505260668927804,
+      "observation_age_after_ms": 28546.34,
+      "fresh_under_5s": false,
+      "gpu_base_mib": 1271,
+      "gpu_peak_mib": 5974
+    }
+  ],
+  "summary": {
+    "cases": 3,
+    "json_valid": 3,
+    "plan_valid": 3,
+    "semantic_correct": 3,
+    "plan_valid_rate": 1.0,
+    "semantic_correct_rate": 1.0
+  }
+}
