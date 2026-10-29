@@ -31,6 +31,7 @@
 - `test_web_console_integration.py` 通过：合成 ROS 彩色/深度流、固定时长停止、停止后保存、手动保存目录、丢弃、旧 Episode 列表、VLM success/failure/unknown、规划校验、Web 重启读取与导出。
 - `test_desktop_console_integration.py` 通过：三路预览约 29–30 fps、关闭窗口后继续录制、固定时长停止、跨磁盘自选目录保存、重复 Episode 目录拒绝、丢弃、录制器重启后读取。
 - `test_preview_depth.py` 通过；`test_to_lerobot.py` 14 项通过。这 14 项中的转换测试使用 `FakeDataset` / stub，主要验证输入契约、字段映射、时间对齐与切分。默认 Python 环境未安装 `lerobot`；本轮没有在该环境创建并重新读取真实 `LeRobotDataset`，不能据此宣称实体数据集端到端转换通过。
+- 2026-10-29 补充复验：使用隔离环境中的真实 `lerobot==0.4.4`，分别将两段合成 `JointState` Episode 和两段合成双臂 CAN 向量 Episode 写成 LeRobotDataset，执行 `finalize` 后重新打开，核对 `train`/`test` 各一条 Episode、每条两帧，以及任务文本、RGB 图像、7/14 维状态和动作。仅含相机的 Episode 被拒绝。当前 `test_to_lerobot.py` 共 18 项通过（命令：`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /tmp/piper-lerobot-runtime/bin/python -m pytest -q tools/episode_recorder/test_to_lerobot.py`）。这证明合成数据的实体格式转换可用；真实 Piper 示教的来源、夹爪映射及标定仍未验收。
 - 已有被动相机 Episode 含 RGB-D，但缺少显式动作来源、实测关节反馈和示教动作。`audit_real_data.py` 标为 `eligible=false`，`to_lerobot.py` 以缺少 arm_mode/time_domain/action_space/action_provenance 明确拒绝，未把被动相机帧误当示教动作。
 
 ## 现场相机与复现边界
