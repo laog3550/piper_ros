@@ -12,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 import to_lerobot as converter
 
 
-def fixture(root, name, *, missing_action=False, bad_dimension=False, bad_stamp=False, arm_mode="LEFT"):
+def fixture(root, name, *, missing_action=False, bad_dimension=False, bad_stamp=False,
+            arm_mode="LEFT", camera_only=False):
     episode = root / name
     bag = episode / "bag"
     episode.mkdir()
@@ -31,9 +32,10 @@ def fixture(root, name, *, missing_action=False, bad_dimension=False, bad_stamp=
     Joint = s.types["sensor_msgs/msg/JointState"]
     Image = s.types["sensor_msgs/msg/Image"]
     arms = ["left", "right"] if arm_mode == "BIMANUAL" else [arm_mode.lower()]
-    topics = [converter.CAMERAS["top_rgb"], *(converter.CAMERAS[f"{arm}_wrist_rgb"] for arm in arms),
-              *(converter.STATES[arm] for arm in arms)]
-    if not missing_action:
+    topics = [converter.CAMERAS["top_rgb"], *(converter.CAMERAS[f"{arm}_wrist_rgb"] for arm in arms)]
+    if not camera_only:
+        topics.extend(converter.STATES[arm] for arm in arms)
+    if not missing_action and not camera_only:
         topics.extend(converter.ACTIONS[arm] for arm in arms)
     base = 1_800_000_000_000_000_000
     with Writer(bag, version=Writer.VERSION_LATEST) as writer:
@@ -274,3 +276,79 @@ def test_can_vector_rejects_untrusted_sources(tmp_path, kwargs, match):
     with pytest.raises(ValueError, match=match):
         converter.read_episode(episode, ["left", "right"], 10, 30_000_000, 2_000_000,
                                input_format="can-vector")
+
+
+def test_only_camera_episode_is_rejected(tmp_path):
+    episode = fixture(tmp_path, "episode_000001", camera_only=True)
+    with pytest.raises(ValueError, match="缺少话题"):
+        converter.read_episode(episode, ["left"], 10, 20_000_000, 2_000_000)
+
+
+@pytest.mark.parametrize("input_format,arm_mode,dimension", [
+    ("joint-state", "LEFT", 7),
+    ("can-vector", "BIMANUAL", 14),
+])
+def test_real_lerobot_roundtrip(tmp_path, input_format, arm_mode, dimension):
+    """用真实 LeRobotDataset 写入、finalize 和重新打开，不使用 FakeDataset。"""
+    from importlib.metadata import version
+    if version("lerobot") != "0.4.4":
+        pytest.skip("需要 lerobot==0.4.4")
+    pytest.importorskip("lerobot.datasets.lerobot_dataset")
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    from types import SimpleNamespace
+
+    source = tmp_path / "episodes"
+    source.mkdir()
+    make = vector_fixture if input_format == "can-vector" else fixture
+    for name in ("episode_000001", "episode_000002"):
+        make(source, name)
+    output = tmp_path / "dataset"
+    args = SimpleNamespace(input_dir=source, output_dir=output, repo_id="local/piper_acceptance",
+                           arm_mode=arm_mode, input_format=input_format, fps=10,
+                           max_age_ms=30, jitter_ms=2, max_can_skew_ms=30, test_percent=50)
+    converter.convert(args)
+    manifest = json.loads((output / "conversion_manifest.json").read_text(encoding="utf-8"))
+    assert {entry["split"] for entry in manifest["episodes"]} == {"train", "test"}
+    assert len({entry["episode_id"] for entry in manifest["episodes"]}) == 2
+    assert all(entry["frames"] == 2 for entry in manifest["episodes"])
+    stamps = [json.loads(line) for line in (output / "source_timestamps.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(stamps) == 4
+    for split in ("train", "test"):
+        dataset = LeRobotDataset(f"local/piper_acceptance_{split}", root=output / split)
+        assert dataset.meta.total_episodes == 1
+        assert len(dataset) == 2
+        first, second = dataset[0], dataset[1]
+        assert first["task"] == second["task"] == "抓取方块"
+        assert tuple(first["action"].shape) == (dimension,)
+        assert tuple(first["observation.state"].shape) == (dimension,)
+        assert tuple(first["observation.images.top_rgb"].shape) == (3, 480, 640)
+        assert first["observation.images.top_rgb"][0, 0, 0].item() == pytest.approx(0)
+        expected_pixel = 5 if input_format == "can-vector" else 1
+        assert second["observation.images.top_rgb"][0, 0, 0].item() == pytest.approx(expected_pixel / 255)
+        if input_format == "can-vector":
+            assert first["action"][[0, 7]].tolist() == [1.0, 3.0]
+            assert first["observation.state"][[0, 7]].tolist() == [0.0, 2.0]
+            assert tuple(first["observation.images.right_wrist_rgb"].shape) == (3, 480, 640)
+        else:
+            assert first["action"][0].item() == pytest.approx(0)
+            assert tuple(first["observation.images.left_wrist_rgb"].shape) == (3, 480, 640)
+
+
+def test_real_lerobot_rejects_camera_only(tmp_path):
+    from importlib.metadata import version
+    if version("lerobot") != "0.4.4":
+        pytest.skip("需要 lerobot==0.4.4")
+    pytest.importorskip("lerobot.datasets.lerobot_dataset")
+    from types import SimpleNamespace
+
+    source = tmp_path / "episodes"
+    source.mkdir()
+    for name in ("episode_000001", "episode_000002"):
+        fixture(source, name, camera_only=True)
+    output = tmp_path / "dataset"
+    args = SimpleNamespace(input_dir=source, output_dir=output, repo_id="local/piper_camera_only",
+                           arm_mode="LEFT", input_format="joint-state", fps=10,
+                           max_age_ms=30, jitter_ms=2, max_can_skew_ms=30, test_percent=50)
+    with pytest.raises(ValueError, match="缺少话题"):
+        converter.convert(args)
+    assert not output.exists()
