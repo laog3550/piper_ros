@@ -80,3 +80,10 @@ def test_unresolved_completion_marked_for_audit(recorder):
     result = recorder.annotate({"kind": "skill_complete", "value": "pick_banana"})
     assert result["annotation"]["frame_resolution_required"] is True
     assert (recorder.current / "episode.json").is_file()
+
+
+def test_recovery_trigger_has_stable_link(recorder):
+    recorder.annotate({"kind": "skill_start", "value": "pick_banana"})
+    result = recorder.annotate({"kind": "recovery_trigger", "value": "grasp_slip"})
+    assert len(result["annotation"]["recovery_id"]) == 32
+    assert result["annotation"]["skill"] == "pick_banana"

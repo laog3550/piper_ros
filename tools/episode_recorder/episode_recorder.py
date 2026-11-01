@@ -323,6 +323,9 @@ class Recorder:
                                   not isinstance(stamp, int) or isinstance(stamp, bool) or stamp <= 0):
             raise ValueError("完成帧来源必须是配置中的图像话题及有效 Header 时间戳")
         annotation = {"kind": kind, "value": value, "recorded_at_unix_ns": time.time_ns()}
+        if kind == "recovery_trigger":
+            annotation["recovery_id"] = uuid.uuid4().hex
+            annotation["skill"] = active
         if topic is not None:
             annotation.update(source_topic=topic, header_stamp_ns=stamp)
         else:

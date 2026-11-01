@@ -18,7 +18,9 @@
 {"action":"annotate","kind":"skill_complete","value":"close_hinged_lid_bimanual","source_topic":"/camera_top/color/image_raw","header_stamp_ns":1234567890000000000}
 ```
 
-`kind` 为 `skill_start`、`skill_complete`、`outcome`、`recovery_trigger`；每条标注由录制器补 `recorded_at_unix_ns` 并同步写入元数据和 `/collection/events`。`skill_complete` 对应当前技能；`task` Episode 强制抓取、放置、翻盖顺序。相机来源只接受配置中的 `frame_topics`。如果点击时无法取得真实图像 Header，允许保存待对齐标注并置 `frame_resolution_required=true`；质量审计必须将其挡在成功 SFT 导出之外。录制器接收时间不能冒充完成帧。旧 v1 Episode 仍可读取，但不自动补造 v2 标签。
+`kind` 为 `skill_start`、`skill_complete`、`outcome`、`recovery_trigger`；每条标注由录制器补 `recorded_at_unix_ns` 并同步写入元数据和 `/collection/events`。恢复触发还生成唯一 `recovery_id` 并记录当前 `skill`。`skill_complete` 对应当前技能；`task` Episode 强制抓取、放置、翻盖顺序。相机来源只接受配置中的 `frame_topics`。如果点击时无法取得真实图像 Header，允许保存待对齐标注并置 `frame_resolution_required=true`；质量审计必须将其挡在成功 SFT 导出之外。录制器接收时间不能冒充完成帧。旧 v1 Episode 仍可读取，但不自动补造 v2 标签。
+
+恢复缓存设计预算：三路 640×480 RGB-D 原始帧、30 fps 约 138 MB/s；前录 3 秒约 415 MB，前 3 秒加后录 2 秒约 691 MB，双份拷贝可能超过 1 GB。实现须同时限制 `pre_roll_sec` 和 `max_buffer_bytes`，满时淘汰最旧消息并记录实际回溯时长、淘汰数和丢帧数。独立恢复 bag 的 manifest 必须关联原 Episode、技能和 `recovery_id`，记录各话题计数、前后窗口、磁盘余量与完整/失败状态。只有通过人工审核的完整片段才能回流；当前 v2 仅提供触发事件，尚无在线回溯缓存。
 
 ## 七模块实施与验收门槛
 
