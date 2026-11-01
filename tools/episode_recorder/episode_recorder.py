@@ -23,6 +23,10 @@ from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 
+SKILLS = ("pick_banana", "place_banana_in_box", "close_hinged_lid_bimanual")
+ANNOTATION_KINDS = ("skill_start", "skill_complete", "outcome", "recovery_trigger")
+
+
 def atomic_json(path, data):
     temporary = path.with_name(path.name + ".tmp")
     with temporary.open("w", encoding="utf-8") as stream:
@@ -228,6 +232,8 @@ class Recorder:
             raise ValueError("mode 必须为 task 或 skill，且 task 不能为空")
         if mode == "skill" and (not isinstance(skill, str) or not skill.strip()):
             raise ValueError("原子技能录制需要 skill")
+        if mode == "skill" and skill not in SKILLS:
+            raise ValueError("skill 不在固定技能集中")
         if not isinstance(fields, dict):
             raise ValueError("metadata 必须是 JSON 对象")
         free = self._available()
@@ -236,9 +242,11 @@ class Recorder:
         self.current = self.staging / uuid.uuid4().hex
         self.current.mkdir()
         self.metadata = {
-            "schema_version": 1, "state": "starting", "mode": mode,
+            "schema_version": 2, "state": "starting", "mode": mode,
             "episode_id": self.current.name,
             "task": task, "skill": skill if mode == "skill" else None,
+            "active_skill": skill if mode == "skill" else None,
+            "annotations": [],
             "task_metadata": fields, "topics": self.topics,
             "frame_topics": self.frame_topics, "expected_fps": self.expected_fps,
             "started_at_unix_ns": time.time_ns(),
@@ -274,6 +282,57 @@ class Recorder:
         self.metadata["error"] = "rosbag2 未在超时内订阅全部配置话题；见 rosbag.log"
         self._event("failed")
         raise ValueError(self.metadata["error"])
+
+    def annotate(self, request):
+        if self.current is None or self.metadata["state"] != "recording":
+            raise ValueError("只能在录制中标注")
+        kind = request.get("kind")
+        value = request.get("value")
+        if kind not in ANNOTATION_KINDS:
+            raise ValueError("未知标注类型")
+        active = self.metadata.get("active_skill")
+        next_active = active
+        if kind == "skill_start":
+            if self.metadata["mode"] != "task" or active is not None or value not in SKILLS:
+                raise ValueError("当前不能开始该技能")
+            completed = [item["value"] for item in self.metadata["annotations"]
+                         if item["kind"] == "skill_complete"]
+            if len(completed) >= len(SKILLS) or value != SKILLS[len(completed)]:
+                raise ValueError("技能顺序必须为抓取、放置、双臂翻盖")
+            next_active = value
+        elif kind == "skill_complete":
+            if active is None or value != active:
+                raise ValueError("完成标注与当前技能不一致")
+            if self.metadata["mode"] == "skill" and any(
+                item["kind"] == "skill_complete" for item in self.metadata["annotations"]
+            ):
+                raise ValueError("原子技能完成帧不能重复标注")
+            next_active = None if self.metadata["mode"] == "task" else active
+        elif kind == "outcome":
+            if value not in ("success", "failure"):
+                raise ValueError("outcome 必须为 success 或 failure")
+            if any(item["kind"] == "outcome" for item in self.metadata["annotations"]):
+                raise ValueError("结果标签不能重复标注")
+        elif not isinstance(value, str) or not value.strip():
+            raise ValueError("恢复原因不能为空")
+        topic = request.get("source_topic")
+        stamp = request.get("header_stamp_ns")
+        if (topic is None) != (stamp is None):
+            raise ValueError("source_topic 与 header_stamp_ns 必须同时提供")
+        if topic is not None and (topic not in self.frame_topics or
+                                  not isinstance(stamp, int) or isinstance(stamp, bool) or stamp <= 0):
+            raise ValueError("完成帧来源必须是配置中的图像话题及有效 Header 时间戳")
+        annotation = {"kind": kind, "value": value, "recorded_at_unix_ns": time.time_ns()}
+        if topic is not None:
+            annotation.update(source_topic=topic, header_stamp_ns=stamp)
+        else:
+            annotation["frame_resolution_required"] = kind == "skill_complete"
+        self.metadata["active_skill"] = next_active
+        self.metadata["annotations"].append(annotation)
+        self._write_current()
+        self.event_publisher.publish(String(data=json.dumps({"episode_id": self.metadata["episode_id"],
+            "event": "annotation", **annotation}, ensure_ascii=False)))
+        return {"annotation": annotation, "active_skill": next_active}
 
     def _terminate(self):
         if self.process and self.process.poll() is None:
@@ -313,6 +372,12 @@ class Recorder:
             raise ValueError("只能保存已停止且通过完整性核验的 Episode")
         if outcome is not None and outcome not in ("success", "failure"):
             raise ValueError("outcome 必须为 success 或 failure")
+        labels = [item["value"] for item in self.metadata.get("annotations", [])
+                  if item["kind"] == "outcome"]
+        if labels and outcome is not None and outcome != labels[0]:
+            raise ValueError("保存结果与录制中结果标签冲突")
+        if labels and outcome is None:
+            outcome = labels[0]
         inspect_bag(self.current / "bag", self.metadata["topics"],
                     self.metadata.get("frame_topics", []), self.metadata.get("expected_fps", {}))
         counter = self.root / ".next_id"
@@ -430,12 +495,14 @@ def serve(config):
                 try:
                     request = json.loads(connection.recv(1_000_000).decode())
                     action = request.pop("action")
-                    if action not in ("start", "stop", "save", "discard", "status", "list"):
+                    if action not in ("start", "stop", "save", "discard", "status", "list", "annotate"):
                         raise ValueError("未知操作")
                     if action == "start":
                         result = recorder.start(request)
                     elif action == "save":
                         result = recorder.save(request.get("outcome"))
+                    elif action == "annotate":
+                        result = recorder.annotate(request)
                     else:
                         result = getattr(recorder, action)()
                     response = {"ok": True, "result": result}
@@ -450,13 +517,17 @@ def serve(config):
 
 def main():
     parser = argparse.ArgumentParser(description="ROS 2 Episode SQLite 录制器")
-    parser.add_argument("action", choices=["serve", "start", "stop", "save", "discard", "status", "list"])
+    parser.add_argument("action", choices=["serve", "start", "stop", "save", "discard", "status", "list", "annotate"])
     parser.add_argument("--config", required=True, help="JSON 配置文件")
     parser.add_argument("--mode", choices=["task", "skill"])
     parser.add_argument("--task")
     parser.add_argument("--skill")
     parser.add_argument("--metadata", help="JSON 任务元数据文件")
     parser.add_argument("--outcome", choices=["success", "failure"], help="保存时的结果标签")
+    parser.add_argument("--kind", choices=ANNOTATION_KINDS)
+    parser.add_argument("--value")
+    parser.add_argument("--source-topic")
+    parser.add_argument("--header-stamp-ns", type=int)
     args = parser.parse_args()
     config = load_json(args.config)
     if args.action == "serve":
@@ -470,6 +541,9 @@ def main():
                        metadata=load_json(args.metadata) if args.metadata else {})
     if args.action == "save":
         request["outcome"] = args.outcome
+    if args.action == "annotate":
+        request.update(kind=args.kind, value=args.value, source_topic=args.source_topic,
+                       header_stamp_ns=args.header_stamp_ns)
     with socket.socket(socket.AF_UNIX) as connection:
         connection.connect(str(path))
         connection.sendall(json.dumps(request, ensure_ascii=False).encode())
