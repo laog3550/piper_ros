@@ -44,6 +44,16 @@ def http(port, path, data=None):
         return json.load(response)
 
 
+def rejected(port, path, data):
+    try:
+        http(port, path, data)
+    except HTTPError as error:
+        assert error.code in (400, 409), error.code
+        assert json.load(error)["error"]
+    else:
+        raise AssertionError(f"无效请求被接受：{path}")
+
+
 def publisher(node, stop):
     image = Image()
     image.height, image.width, image.encoding, image.step = 24, 32, "rgb8", 96
@@ -69,7 +79,7 @@ def main():
         with closing(socket.socket()) as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
-        os.environ["ROS_DOMAIN_ID"] = "197"
+        os.environ.setdefault("ROS_DOMAIN_ID", "197")
         env = dict(os.environ)
         rclpy.init()
         node = rclpy.create_node("synthetic_collection_source")
@@ -89,21 +99,70 @@ def main():
                     assert response.read(3) == b"\xff\xd8\xff"
             start = http(port, "/api/start", {"task": "合成拾取", "language_instruction": "拿起测试物体"})
             assert start["result"]["state"] == "recording"
+            assert start["result"]["metadata"]["mode"] == "task"
             web.terminate(); web.wait(timeout=5)
             time.sleep(1)
             assert recorder.poll() is None
             web = subprocess.Popen(web_command, env=env)
             wait_for(lambda: http(port, "/api/status")["result"]["state"] == "recording")
+            wait_for(lambda: all(item["online"] for item in http(port, "/api/status")["cameras"]))
+            rejected(port, "/api/annotate", {"kind": "skill_start", "value": "pick_banana",
+                                             "camera_index": 9})
+            started = http(port, "/api/annotate", {"kind": "skill_start", "value": "pick_banana",
+                                                  "camera_index": 2})["result"]
+            assert started["active_skill"] == "pick_banana"
+            assert started["annotation"]["source_topic"] == TOPICS[2]
+            assert started["annotation"]["header_stamp_ns"] > 0
+            completed = http(port, "/api/annotate", {"kind": "skill_complete", "value": "pick_banana",
+                                                    "camera_index": 2})["result"]
+            assert completed["active_skill"] is None
+            assert completed["annotation"]["source_topic"] == TOPICS[2]
+            http(port, "/api/annotate", {"kind": "recovery_trigger", "value": "异常：夹爪打滑"})
+            http(port, "/api/annotate", {"kind": "skill_start", "value": "place_banana_in_box"})
+            unresolved = http(port, "/api/annotate", {"kind": "skill_complete",
+                                                     "value": "place_banana_in_box",
+                                                     "source_topic": TOPICS[2],
+                                                     "header_stamp_ns": 123})["result"]
+            assert unresolved["annotation"]["frame_resolution_required"] is True
+            assert "source_topic" not in unresolved["annotation"]
+            http(port, "/api/annotate", {"kind": "outcome", "value": "success"})
+            assert len(http(port, "/api/status")["result"]["metadata"]["annotations"]) == 6
             assert http(port, "/api/stop", {})["result"]["state"] == "stopped"
             saved = http(port, "/api/save", {"outcome": "success"})["result"]
             assert saved["state"] == "saved"
+            saved_meta = json.loads((Path(saved["path"]) / "episode.json").read_text())
+            assert len(saved_meta["annotations"]) == 6
+            assert saved_meta["annotations"][1]["kind"] == "skill_complete"
             entries = http(port, "/api/episodes")["result"]["episodes"]
             assert len(entries) == 1 and entries[0]["outcome"] == "success"
             assert entries[0]["language_instruction"] == "拿起测试物体"
+            initial = {"object": "香蕉左偏 3 cm", "box": "盒子右移 2 cm", "lid_angle": "80°",
+                       "left_arm": "左臂在起始位", "right_arm": "右臂在起始位", "perturbation_id": "scene_003"}
+            rejected(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
+                                          "language_instruction": "双臂合上翻盖",
+                                          "skill": "close_hinged_lid_bimanual"})
+            skill = http(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
+                                               "language_instruction": "双臂合上翻盖",
+                                               "skill": "close_hinged_lid_bimanual",
+                                               "initial_conditions": initial})["result"]
+            assert skill["metadata"]["task_metadata"]["initial_conditions"] == {"source": "human", **initial}
+            assert skill["metadata"]["active_skill"] == "close_hinged_lid_bimanual"
+            done = http(port, "/api/annotate", {"kind": "skill_complete",
+                                               "value": "close_hinged_lid_bimanual",
+                                               "camera_index": 0})["result"]
+            assert done["annotation"]["source_topic"] == TOPICS[0]
+            rejected(port, "/api/annotate", {"kind": "skill_complete",
+                                             "value": "close_hinged_lid_bimanual"})
+            http(port, "/api/annotate", {"kind": "recovery_trigger", "value": "恢复：重新扶正盒体"})
+            http(port, "/api/annotate", {"kind": "outcome", "value": "failure"})
+            assert http(port, "/api/stop", {})["result"]["state"] == "stopped"
+            skill_saved = http(port, "/api/save", {"outcome": "failure"})["result"]
+            assert skill_saved["state"] == "saved"
+            assert len(http(port, "/api/episodes")["result"]["episodes"]) == 2
             assert http(port, "/api/start", {"task": "丢弃测试", "language_instruction": "测试"})["result"]["state"] == "recording"
             assert http(port, "/api/discard", {})["result"]["state"] == "discarded"
             assert http(port, "/api/status")["result"]["state"] == "idle"
-            print("合成 ROS 流、三路预览、关闭网页后继续录制、保存标签与丢弃：通过")
+            print("合成 ROS 流、旧任务兼容、真实 Header 标注、无图像完成帧待核、固定技能、重启与丢弃：通过")
         finally:
             stop.set(); feeder.join(timeout=2)
             for process in (web, recorder):

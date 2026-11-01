@@ -22,6 +22,8 @@ from std_msgs.msg import String
 
 PAGE = Path(__file__).with_name("web_console.html").read_bytes()
 CAMERA_NAMES = ("左腕", "右腕", "顶部")
+SKILLS = ("pick_banana", "place_banana_in_box", "close_hinged_lid_bimanual")
+INITIAL_FIELDS = ("object", "box", "lid_angle", "left_arm", "right_arm", "perturbation_id")
 
 
 def camera_topics(config):
@@ -65,15 +67,25 @@ class Preview:
         self.frames = [None] * 3
         self.times = [0.0] * 3
         self.errors = [None] * 3
+        self.header_stamps = [None] * 3
+        self.source_times = [0.0] * 3
         self.event = None
         self.topics = list(camera_topics(config))
+        self.frame_topics = set(config.get("frame_topics", ()))
         for index, topic in enumerate(self.topics):
             self.node.create_subscription(Image, topic, lambda msg, i=index: self.on_image(i, msg), qos_profile_sensor_data)
         self.node.create_subscription(String, "/collection/events", self.on_event, 10)
 
     def on_image(self, index, message):
         now = time.monotonic()
+        channels = {"rgb8": 3, "bgr8": 3, "rgba8": 4, "bgra8": 4, "mono8": 1}
+        stamp = message.header.stamp
+        stamp_ns = stamp.sec * 1_000_000_000 + stamp.nanosec
         with self.lock:
+            if (message.encoding in channels and message.width > 0 and message.height > 0
+                    and message.step >= message.width * channels[message.encoding]
+                    and len(message.data) >= message.step * message.height and stamp_ns > 0):
+                self.header_stamps[index], self.source_times[index] = stamp_ns, now
             if now - self.times[index] < 0.4:
                 return
         try:
@@ -83,6 +95,14 @@ class Preview:
             frame, error = None, str(exc)
         with self.lock:
             self.frames[index], self.errors[index], self.times[index] = frame, error, now
+
+    def latest_reference(self, index):
+        with self.lock:
+            stamp = self.header_stamps[index]
+            if (self.topics[index] in self.frame_topics and self.frames[index]
+                    and stamp and time.monotonic() - self.source_times[index] <= 0.15):
+                return self.topics[index], stamp
+        return None
 
     def on_event(self, message):
         try:
@@ -110,6 +130,60 @@ def recorder_request(socket_path, request):
     if not data:
         raise OSError("录制服务未返回数据")
     return json.loads(data)
+
+
+def start_request(body):
+    task, instruction = body.get("task"), body.get("language_instruction")
+    if (not isinstance(task, str) or not isinstance(instruction, str)
+            or not task.strip() or not instruction.strip()
+            or len(task.strip()) > 120 or len(instruction.strip()) > 2000):
+        raise ValueError("请填写任务名和语言指令（任务名最多 120 字，指令最多 2000 字）")
+    mode = body.get("mode", "task")
+    if mode not in ("task", "skill"):
+        raise ValueError("采集类型必须为 task 或 skill")
+    metadata = {"language_instruction": instruction.strip()}
+    initial = body.get("initial_conditions")
+    if mode == "skill" or initial is not None:
+        if not isinstance(initial, dict):
+            raise ValueError("请填写人工设置的初始条件")
+        values = {key: initial.get(key) for key in INITIAL_FIELDS}
+        if any(not isinstance(value, str) or len(value.strip()) > 500 for value in values.values()):
+            raise ValueError("初始条件各项须为最多 500 字的文本")
+        if mode == "skill" and any(not value.strip() for value in values.values()):
+            raise ValueError("单技能采集须填写对象、盒子、翻盖、两臂及扰动编号")
+        if any(value.strip() for value in values.values()):
+            metadata["initial_conditions"] = {"source": "human", **{
+                key: value.strip() for key, value in values.items()}}
+    skill = body.get("skill") if mode == "skill" else None
+    if mode == "skill" and skill not in SKILLS:
+        raise ValueError("请选择固定技能")
+    return {"action": "start", "mode": mode, "task": task.strip(), "skill": skill,
+            "metadata": metadata}
+
+
+def annotation_request(body, preview):
+    kind, value = body.get("kind"), body.get("value")
+    if kind in ("skill_start", "skill_complete"):
+        if value not in SKILLS:
+            raise ValueError("请选择固定技能")
+    elif kind == "outcome":
+        if value not in ("success", "failure"):
+            raise ValueError("结果须为 success 或 failure")
+    elif kind == "recovery_trigger":
+        if not isinstance(value, str) or not value.strip() or len(value.strip()) > 200:
+            raise ValueError("请填写 1 至 200 字的异常或恢复原因")
+        value = value.strip()
+    else:
+        raise ValueError("未知标注类型")
+    request = {"action": "annotate", "kind": kind, "value": value}
+    index = body.get("camera_index")
+    if index is not None:
+        if isinstance(index, bool) or not isinstance(index, int) or index not in range(3):
+            raise ValueError("关联画面必须为左腕、右腕或顶部")
+        reference = preview.latest_reference(index)
+        if reference:
+            request.update(source_topic=reference[0], header_stamp_ns=reference[1])
+    return request
 
 
 def handler_factory(socket_path, preview):
@@ -159,7 +233,7 @@ def handler_factory(socket_path, preview):
         def do_POST(self):
             path = urlsplit(self.path).path
             action = path.removeprefix("/api/")
-            if path != f"/api/{action}" or action not in ("start", "stop", "save", "discard"):
+            if path != f"/api/{action}" or action not in ("start", "stop", "save", "discard", "annotate"):
                 return self.respond(404, {"ok": False, "error": "未知操作"})
             origin = self.headers.get("Origin")
             if origin and origin != f"http://{self.headers.get('Host')}":
@@ -172,12 +246,9 @@ def handler_factory(socket_path, preview):
                 if not isinstance(body, dict):
                     raise ValueError("请求必须为 JSON 对象")
                 if action == "start":
-                    task = body.get("task", "").strip()
-                    instruction = body.get("language_instruction", "").strip()
-                    if not task or not instruction or len(task) > 120 or len(instruction) > 2000:
-                        raise ValueError("请填写任务名和语言指令（任务名最多 120 字，指令最多 2000 字）")
-                    request = {"action": action, "mode": "task", "task": task, "skill": None,
-                               "metadata": {"language_instruction": instruction}}
+                    request = start_request(body)
+                elif action == "annotate":
+                    request = annotation_request(body, preview)
                 elif action == "save":
                     request = {"action": action, "outcome": body.get("outcome")}
                     if request["outcome"] not in ("success", "failure"):
