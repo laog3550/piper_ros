@@ -10,6 +10,8 @@
 
 起始位姿扰动由人员在安全范围内摆放后记录在 `task_metadata.initial_conditions`，包括香蕉、盒体、盖子角度、两臂初始状态和扰动编号。采集器只记录，不自动移动机械臂。每个扰动编号应覆盖成功与失败/恢复实例；训练/测试按完整 Episode 和场景组切分，防止同一重复动作泄漏。
 
+成功 SFT 导出要求每段原子技能 Episode 明确记录非空字符串 `task_metadata.initial_conditions.perturbation_id`。同一编号在所有技能中视为同一场景组，完整划入 train 或 test；缺少编号的 Episode 拒绝导出，合格数据不足两个不同场景组时不能建立训练/测试切分。旧版未标注转换保持按 `episode_id` 切分。
+
 ## v2 标注契约
 
 新 Episode 的 `episode.json` 使用 `schema_version=2`，保留 v1 字段，新增 `active_skill` 与 `annotations`。录制中经 socket `annotate` 写入：

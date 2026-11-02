@@ -2,13 +2,12 @@
 """只读盘点真实录制并给出训练契约拒绝原因。运行：python3 audit_real_data.py DATA_ROOT [--episode-root PATH] [--output PATH]。"""
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 
 import yaml
 
-from to_lerobot import (CAN_ACTIONS, CAN_STATES, ACTIONS, STATES, read_episode,
+from to_lerobot import (CAN_ACTIONS, CAN_STATES, ACTIONS, STATES, group_split, read_episode,
                         select_sft_frames, sft_label)
 
 CAMERAS = {"top_rgb": "/camera_top/D455/color/image_raw",
@@ -138,6 +137,7 @@ def audit_native(episode_path, fps=10, max_age_ms=100, max_can_skew_ms=30,
         "annotation_coverage": annotated_frames / aligned_frames if aligned_frames else 0.0,
         "aligned_frame_count": aligned_frames, "eligible_frame_count": annotated_frames if not reasons else 0,
         "skill_id": label["skill_id"] if label else meta.get("skill"),
+        "group_id": label["group_id"] if label else None,
         "task_text": label["task_text"] if label else meta.get("task"),
         "input_format": input_format, "quality": quality,
         "eligible": not reasons, "reasons": reasons,
@@ -169,19 +169,20 @@ def main():
                  for path in sorted(args.episode_root.rglob("episode.json"))
                  if (path.parent / "bag" / "metadata.yaml").exists()]
     eligible = [row for row in rows if row["eligible"]]
-    test_ids = set()
-    if len(eligible) >= 2:
-        test_count = min(len(eligible) - 1, max(1, round(len(eligible) * args.test_percent / 100)))
-        ranked = sorted(eligible, key=lambda row: hashlib.sha256(str(row["episode_id"]).encode()).digest())
-        test_ids = {row["episode_id"] for row in ranked[:test_count]}
-    for row in eligible:
-        row["suggested_split"] = "test" if row["episode_id"] in test_ids else "train"
+    split_ready = len({row["group_id"] for row in eligible}) >= 2
+    if split_ready:
+        group_splits, _ = group_split((row["group_id"] for row in eligible), args.test_percent)
+        for row in eligible:
+            row["suggested_split"] = group_splits[row["group_id"]]
     skills = {skill: sum(row.get("skill_id") == skill for row in eligible)
               for skill in sorted({row.get("skill_id") for row in eligible})}
     report = {
         "schema_version": "piper_real_data_audit_v2", "sources": rows,
         "source_count": len(rows), "eligible_episode_count": len(eligible),
         "eligible_frame_count": sum(row.get("eligible_frame_count", 0) for row in eligible),
+        "split_ready": split_ready,
+        "split_blocker": None if split_ready else "至少需要两个不同的 perturbation_id 场景组",
+        "split_rule": "sha256(task_metadata.initial_conditions.perturbation_id) 按完整场景组划分",
         "train_episode_count": sum(row.get("suggested_split") == "train" for row in eligible),
         "test_episode_count": sum(row.get("suggested_split") == "test" for row in eligible),
         "skill_coverage": skills,

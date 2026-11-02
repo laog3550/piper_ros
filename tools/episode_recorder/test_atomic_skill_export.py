@@ -15,7 +15,7 @@ import to_lerobot as exporter
 
 
 def annotate(episode, skill="pick_banana", task="抓取香蕉", outcome="success",
-             completion_index=-1, resolved=True):
+             completion_index=-1, resolved=True, group_id="auto"):
     path = episode / "episode.json"
     meta = json.loads(path.read_text(encoding="utf-8"))
     arms = ["left", "right"] if skill == "close_hinged_lid_bimanual" else ["left"]
@@ -29,6 +29,9 @@ def annotate(episode, skill="pick_banana", task="抓取香蕉", outcome="success
     meta.update(schema_version=2, mode="skill", skill=skill, active_skill=skill,
                 frame_topics=[exporter.CAMERAS["top_rgb"]],
                 task=task, outcome=outcome)
+    if group_id is not None:
+        meta["task_metadata"]["initial_conditions"] = {
+            "perturbation_id": episode.name if group_id == "auto" else group_id}
     recorded = meta["stopped_at_unix_ns"] - 10_000_000
     complete = {"kind": "skill_complete", "value": skill, "recorded_at_unix_ns": recorded}
     if resolved:
@@ -80,6 +83,11 @@ def test_v2_audit_requires_resolved_success_and_complete_camera_frame(tmp_path):
     row = audit.audit_native(task_episode, max_age_ms=30)
     assert not row["eligible"] and "task 模式" in " ".join(row["reasons"])
 
+    missing_group = fixture(tmp_path, "episode_000006")
+    annotate(missing_group, group_id=None)
+    row = audit.audit_native(missing_group, max_age_ms=30)
+    assert not row["eligible"] and "perturbation_id" in " ".join(row["reasons"])
+
 
 def test_v2_audit_rejects_unmapped_completion_and_camera_gap(tmp_path):
     episode = fixture(tmp_path, "episode_000001")
@@ -114,6 +122,7 @@ def test_bimanual_audit_rejects_invalid_action_state(tmp_path):
     meta = json.loads(path.read_text(encoding="utf-8"))
     stamp = 1_800_000_100_100_000_000
     recorded = meta["stopped_at_unix_ns"] - 10_000_000
+    meta["task_metadata"]["initial_conditions"] = {"perturbation_id": episode.name}
     meta.update(schema_version=2, mode="skill", skill="close_hinged_lid_bimanual",
                 task="双臂合上盒盖", outcome="success",
                 frame_topics=[exporter.CAMERAS["top_rgb"]],
@@ -153,6 +162,48 @@ def test_audit_cli_splits_complete_episodes(tmp_path):
     assert {row["suggested_split"] for row in data["sources"]} == {"train", "test"}
 
 
+def test_audit_and_export_keep_perturbation_group_together(tmp_path):
+    from importlib.metadata import version
+    if version("lerobot") != "0.4.4":
+        pytest.skip("需要 lerobot==0.4.4")
+    source = tmp_path / "episodes"
+    source.mkdir()
+    for number, group in ((1, "scene-A"), (2, "scene-A"), (3, "scene-B")):
+        annotate(fixture(source, f"episode_{number:06d}"), group_id=group)
+    report = tmp_path / "audit.json"
+    subprocess.run([sys.executable, str(Path(audit.__file__)), str(source),
+                    "--episode-root", str(source), "--output", str(report),
+                    "--max-age-ms", "30", "--test-percent", "50"], check=True)
+    data = json.loads(report.read_text(encoding="utf-8"))
+    assert data["split_ready"]
+    assert len({row["suggested_split"] for row in data["sources"]
+                if row["group_id"] == "scene-A"}) == 1
+    output = tmp_path / "dataset"
+    exporter.convert(args(source, output))
+    manifest = json.loads((output / "conversion_manifest.json").read_text(encoding="utf-8"))
+    assert "perturbation_id" in manifest["split_rule"]
+    assert len({item["split"] for item in manifest["episodes"]
+                if item["group_id"] == "scene-A"}) == 1
+    assert {item["split"] for item in manifest["episodes"]} == {"train", "test"}
+
+
+def test_success_sft_requires_two_distinct_groups(tmp_path):
+    source = tmp_path / "episodes"
+    source.mkdir()
+    for number in (1, 2):
+        annotate(fixture(source, f"episode_{number:06d}"), group_id="same-scene")
+    report = tmp_path / "audit.json"
+    subprocess.run([sys.executable, str(Path(audit.__file__)), str(source),
+                    "--episode-root", str(source), "--output", str(report),
+                    "--max-age-ms", "30"], check=True)
+    data = json.loads(report.read_text(encoding="utf-8"))
+    assert not data["split_ready"] and "两个不同" in data["split_blocker"]
+    assert data["train_episode_count"] == data["test_episode_count"] == 0
+    with pytest.raises(ValueError, match="两个不同的 perturbation_id"):
+        exporter.convert(args(source, tmp_path / "dataset"))
+    assert not (tmp_path / "dataset").exists()
+
+
 def test_success_sft_real_lerobot_roundtrip_and_failure_exclusion(tmp_path):
     from importlib.metadata import version
     if version("lerobot") != "0.4.4":
@@ -166,12 +217,15 @@ def test_success_sft_real_lerobot_roundtrip_and_failure_exclusion(tmp_path):
     annotate(fixture(source, "episode_000002"), task="抓取第二根香蕉")
     annotate(fixture(source, "episode_000003"), task="失败抓取", outcome="failure")
     annotate(fixture(source, "episode_000004"), skill="place_banana_in_box", task="香蕉入盒")
+    annotate(fixture(source, "episode_000005"), task="缺场景组", group_id=None)
     output = tmp_path / "dataset"
     exporter.convert(args(source, output, skills=["pick_banana"]))
     manifest = json.loads((output / "conversion_manifest.json").read_text(encoding="utf-8"))
     assert manifest["purpose"] == "success_sft"
     assert len(manifest["episodes"]) == 2
-    assert len(manifest["excluded_episodes"]) == 2
+    assert len(manifest["excluded_episodes"]) == 3
+    assert any("perturbation_id" in " ".join(item["reasons"])
+               for item in manifest["excluded_episodes"])
     assert {item["split"] for item in manifest["episodes"]} == {"train", "test"}
     assert {item["skill_id"] for item in manifest["episodes"]} == {"pick_banana"}
     tasks = set()

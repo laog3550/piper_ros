@@ -293,6 +293,10 @@ def sft_label(meta):
         reasons.append("skill 不在固定原子技能集中")
     fields = meta.get("task_metadata")
     arm_mode = fields.get("arm_mode") if isinstance(fields, dict) else None
+    initial = fields.get("initial_conditions") if isinstance(fields, dict) else None
+    group_id = initial.get("perturbation_id") if isinstance(initial, dict) else None
+    if not isinstance(group_id, str) or not group_id.strip():
+        reasons.append("缺少 task_metadata.initial_conditions.perturbation_id 场景组标识")
     if (skill == "close_hinged_lid_bimanual" and arm_mode != "BIMANUAL"
             or skill in SKILLS[:2] and arm_mode not in ("LEFT", "RIGHT")):
         reasons.append("skill 与 arm_mode 不匹配")
@@ -335,7 +339,18 @@ def sft_label(meta):
             break
     if reasons:
         return None, reasons
-    return {"skill_id": skill, "task_text": task_text.strip(), "completion_frame": complete}, []
+    return {"skill_id": skill, "task_text": task_text.strip(),
+            "group_id": group_id.strip(), "completion_frame": complete}, []
+
+
+def group_split(group_ids, test_percent):
+    """Deterministically assign complete perturbation groups to train/test."""
+    groups = set(group_ids)
+    if len(groups) < 2:
+        fail("至少需要两个不同的 perturbation_id 场景组才能划分 train/test")
+    test_count = min(len(groups) - 1, max(1, round(len(groups) * test_percent / 100)))
+    ranked = sorted(groups, key=lambda group: (hashlib.sha256(group.encode()).digest(), group))
+    return {group: "test" if group in ranked[:test_count] else "train" for group in groups}, test_count
 
 
 def select_sft_frames(meta, frames, label, arms, input_format):
@@ -408,16 +423,22 @@ def convert(args):
         prepared.append((path, meta, len(frames), episode_id, source_digest(path), label, annotation_stats))
     if len(prepared) < 2:
         fail(f"至少需要两个合格 Episode 才能划分 train/test；排除 {len(excluded)} 段")
-    test_count = min(len(prepared) - 1, max(1, round(len(prepared) * args.test_percent / 100)))
-    ranked = sorted(prepared, key=lambda item: hashlib.sha256(item[3].encode()).digest())
-    test_ids = {item[3] for item in ranked[:test_count]}
+    if success_sft:
+        group_splits, test_count = group_split((item[5]["group_id"] for item in prepared), args.test_percent)
+        split_rule = (f"sha256(task_metadata.initial_conditions.perturbation_id) 排序前 "
+                      f"{test_count}/{len(group_splits)} 个完整场景组为 test")
+    else:
+        test_count = min(len(prepared) - 1, max(1, round(len(prepared) * args.test_percent / 100)))
+        ranked = sorted(prepared, key=lambda item: hashlib.sha256(item[3].encode()).digest())
+        test_ids = {item[3] for item in ranked[:test_count]}
+        split_rule = f"sha256(episode_id) 排序前 {test_count}/{len(prepared)} 个为 test"
     args.output_dir.mkdir(parents=True)
     manifest = {"format": "LeRobotDataset v3.0", "lerobot_version": "0.4.4", "fps": args.fps,
                 "purpose": "success_sft" if success_sft else "legacy_unlabeled",
                 "arm_mode": args.arm_mode, "input_format": args.input_format,
                 "joint_names": [f"{arm}.{joint}" for arm in arms for joint in JOINTS],
                 "state_unit": "rad (joint1..6), m (gripper)", "action_space": "absolute_joint_position_7",
-                "split_rule": f"sha256(episode_id) 排序前 {test_count}/{len(prepared)} 个为 test",
+                "split_rule": split_rule,
                 "episodes": [], "excluded_episodes": excluded}
     timestamps_file = (args.output_dir / "source_timestamps.jsonl").open("w", encoding="utf-8")
     for split in ("train", "test"):
@@ -427,7 +448,9 @@ def convert(args):
                                         robot_type="piper", use_videos=False)
         expected_episodes = expected_frames = 0
         for path, meta, count, episode_id, digest, label, annotation_stats in prepared:
-            if ("test" if episode_id in test_ids else "train") != split:
+            assigned = group_splits[label["group_id"]] if success_sft else (
+                "test" if episode_id in test_ids else "train")
+            if assigned != split:
                 continue
             with tempfile.TemporaryDirectory(prefix="piper-rgb-") as temporary:
                 written_meta, frames = read_episode(path, arms, args.fps, int(args.max_age_ms * 1e6),
@@ -463,6 +486,7 @@ def convert(args):
                                          "calibration_version": meta["task_metadata"]["calibration_version"],
                                          "normalization_version": meta["task_metadata"]["normalization_version"],
                                          "skill_id": label["skill_id"] if label else None,
+                                         "group_id": label["group_id"] if label else None,
                                          "task_text": label["task_text"] if label else meta["task"],
                                          "annotation_quality": annotation_stats,
                                          "source_quality": meta.get("_quality"),
