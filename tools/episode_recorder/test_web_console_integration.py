@@ -18,6 +18,7 @@ import rclpy
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from rclpy.qos import qos_profile_sensor_data
+from web_console import ARM_TOPICS, start_request, teleoperation_ready
 
 HERE = Path(__file__).parent
 TOPICS = [f"/camera_{name}/color/image_raw" for name in ("wrist_left", "wrist_right", "top")]
@@ -69,6 +70,24 @@ def publisher(node, stop):
 
 
 def main():
+    declared = {"topics": list(ARM_TOPICS["left"].values()),
+                "teleoperation": {"source": "master_slave_teleoperation",
+                                  "mapping_verified": True, "gripper_mapping_verified": True,
+                                  "arms": {"left": ARM_TOPICS["left"]}}}
+    assert teleoperation_ready(declared, "LEFT")
+    assert not teleoperation_ready(declared, "RIGHT")
+    verified_request = start_request({
+        "mode": "skill", "skill": "pick_banana", "task": "合成抓取", "language_instruction": "抓取香蕉",
+        "initial_conditions": {name: "人工设置" for name in
+                               ("object", "box", "lid_angle", "left_arm", "right_arm", "perturbation_id")},
+        "arm_mode": "LEFT", "calibration_version": "cal-v1", "normalization_version": "norm-v1"}, declared)
+    assert {key: verified_request["metadata"][key] for key in
+            ("arm_mode", "time_domain", "action_space", "action_provenance",
+             "calibration_version", "normalization_version")} == {
+                 "arm_mode": "LEFT", "time_domain": "unix_ns",
+                 "action_space": "absolute_joint_position_7",
+                 "action_provenance": "human_demonstration",
+                 "calibration_version": "cal-v1", "normalization_version": "norm-v1"}
     with tempfile.TemporaryDirectory(prefix="piper-web-test-") as temp:
         root = Path(temp)
         config = root / "config.json"
@@ -141,11 +160,33 @@ def main():
             rejected(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
                                           "language_instruction": "双臂合上翻盖",
                                           "skill": "close_hinged_lid_bimanual"})
+            assert http(port, "/api/contract")["teleoperation_ready"] == {
+                "LEFT": False, "RIGHT": False, "BIMANUAL": False}
+            rejected(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
+                                          "language_instruction": "双臂合上翻盖",
+                                          "skill": "close_hinged_lid_bimanual",
+                                          "initial_conditions": initial, "arm_mode": "LEFT",
+                                          "calibration_version": "cal-v1", "normalization_version": "norm-v1"})
+            rejected(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
+                                          "language_instruction": "双臂合上翻盖",
+                                          "skill": "close_hinged_lid_bimanual",
+                                          "initial_conditions": initial, "arm_mode": "BIMANUAL",
+                                          "calibration_version": "UNVERIFIED_PLACEHOLDER",
+                                          "normalization_version": "norm-v1"})
             skill = http(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
                                                "language_instruction": "双臂合上翻盖",
                                                "skill": "close_hinged_lid_bimanual",
-                                               "initial_conditions": initial})["result"]
+                                               "initial_conditions": initial, "arm_mode": "BIMANUAL",
+                                               "calibration_version": "cal-v1",
+                                               "normalization_version": "norm-v1"})["result"]
             assert skill["metadata"]["task_metadata"]["initial_conditions"] == {"source": "human", **initial}
+            skill_contract = skill["metadata"]["task_metadata"]
+            assert skill_contract["arm_mode"] == "BIMANUAL"
+            assert skill_contract["calibration_version"] == "cal-v1"
+            assert skill_contract["normalization_version"] == "norm-v1"
+            assert skill_contract["collection_contract_status"] == "training_not_ready_unverified_teleoperation_mapping"
+            assert all(field not in skill_contract for field in
+                       ("time_domain", "action_space", "action_provenance"))
             assert skill["metadata"]["active_skill"] == "close_hinged_lid_bimanual"
             done = http(port, "/api/annotate", {"kind": "skill_complete",
                                                "value": "close_hinged_lid_bimanual",
@@ -158,11 +199,13 @@ def main():
             assert http(port, "/api/stop", {})["result"]["state"] == "stopped"
             skill_saved = http(port, "/api/save", {"outcome": "failure"})["result"]
             assert skill_saved["state"] == "saved"
+            saved_contract = json.loads((Path(skill_saved["path"]) / "episode.json").read_text())["task_metadata"]
+            assert saved_contract == skill_contract
             assert len(http(port, "/api/episodes")["result"]["episodes"]) == 2
             assert http(port, "/api/start", {"task": "丢弃测试", "language_instruction": "测试"})["result"]["state"] == "recording"
             assert http(port, "/api/discard", {})["result"]["state"] == "discarded"
             assert http(port, "/api/status")["result"]["state"] == "idle"
-            print("合成 ROS 流、旧任务兼容、真实 Header 标注、无图像完成帧待核、固定技能、重启与丢弃：通过")
+            print("合成 ROS 流、旧任务兼容、技能采集契约、未验证映射训练未就绪、真实 Header 标注、重启与丢弃：通过")
         finally:
             stop.set(); feeder.join(timeout=2)
             for process in (web, recorder):

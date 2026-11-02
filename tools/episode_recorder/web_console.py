@@ -24,6 +24,23 @@ PAGE = Path(__file__).with_name("web_console.html").read_bytes()
 CAMERA_NAMES = ("左腕", "右腕", "顶部")
 SKILLS = ("pick_banana", "place_banana_in_box", "close_hinged_lid_bimanual")
 INITIAL_FIELDS = ("object", "box", "lid_angle", "left_arm", "right_arm", "perturbation_id")
+ARM_TOPICS = {arm: {"master_target": f"/piper_vector/{arm}/master_target",
+                    "slave_feedback": f"/piper_vector/{arm}/slave_feedback"}
+              for arm in ("left", "right")}
+
+
+def teleoperation_ready(config, arm_mode):
+    mapping = config.get("teleoperation")
+    if not isinstance(mapping, dict) or mapping.get("source") != "master_slave_teleoperation":
+        return False
+    if mapping.get("mapping_verified") is not True or mapping.get("gripper_mapping_verified") is not True:
+        return False
+    required = ("left", "right") if arm_mode == "BIMANUAL" else (arm_mode.lower(),)
+    configured = set(config.get("topics", ()))
+    arms = mapping.get("arms")
+    return isinstance(arms, dict) and all(
+        arms.get(arm) == ARM_TOPICS[arm] and set(ARM_TOPICS[arm].values()).issubset(configured)
+        for arm in required)
 
 
 def camera_topics(config):
@@ -132,7 +149,7 @@ def recorder_request(socket_path, request):
     return json.loads(data)
 
 
-def start_request(body):
+def start_request(body, config):
     task, instruction = body.get("task"), body.get("language_instruction")
     if (not isinstance(task, str) or not isinstance(instruction, str)
             or not task.strip() or not instruction.strip()
@@ -157,6 +174,26 @@ def start_request(body):
     skill = body.get("skill") if mode == "skill" else None
     if mode == "skill" and skill not in SKILLS:
         raise ValueError("请选择固定技能")
+    if mode == "skill":
+        arm_mode = body.get("arm_mode")
+        if skill == "close_hinged_lid_bimanual":
+            if arm_mode != "BIMANUAL":
+                raise ValueError("双臂翻盖技能须选择 BIMANUAL")
+        elif arm_mode not in ("LEFT", "RIGHT"):
+            raise ValueError("单臂技能须选择 LEFT 或 RIGHT")
+        metadata["arm_mode"] = arm_mode
+        for field in ("calibration_version", "normalization_version"):
+            value = body.get(field)
+            if (not isinstance(value, str) or not value.strip() or len(value.strip()) > 120
+                    or value.strip().upper().startswith("UNVERIFIED")):
+                raise ValueError(f"{field} 须填写已验收的非空版本号，不能使用 UNVERIFIED 占位值")
+            metadata[field] = value.strip()
+        if teleoperation_ready(config, arm_mode):
+            metadata.update(time_domain="unix_ns", action_space="absolute_joint_position_7",
+                            action_provenance="human_demonstration")
+            metadata["collection_contract_status"] = "metadata_ready_pending_data_audit"
+        else:
+            metadata["collection_contract_status"] = "training_not_ready_unverified_teleoperation_mapping"
     return {"action": "start", "mode": mode, "task": task.strip(), "skill": skill,
             "metadata": metadata}
 
@@ -186,7 +223,7 @@ def annotation_request(body, preview):
     return request
 
 
-def handler_factory(socket_path, preview):
+def handler_factory(socket_path, preview, config):
     class Handler(BaseHTTPRequestHandler):
         def respond(self, status, payload, content_type="application/json; charset=utf-8"):
             if not isinstance(payload, bytes):
@@ -218,6 +255,9 @@ def handler_factory(socket_path, preview):
                     return self.respond(200, recorder_request(socket_path, {"action": "list"}))
                 except (OSError, ValueError, json.JSONDecodeError) as exc:
                     return self.respond(503, {"ok": False, "error": str(exc)})
+            if path == "/api/contract":
+                return self.respond(200, {"ok": True, "teleoperation_ready": {
+                    mode: teleoperation_ready(config, mode) for mode in ("LEFT", "RIGHT", "BIMANUAL")}})
             if path.startswith("/camera/") and path.endswith(".jpg"):
                 try:
                     index = int(path[8:-4])
@@ -246,7 +286,7 @@ def handler_factory(socket_path, preview):
                 if not isinstance(body, dict):
                     raise ValueError("请求必须为 JSON 对象")
                 if action == "start":
-                    request = start_request(body)
+                    request = start_request(body, config)
                 elif action == "annotate":
                     request = annotation_request(body, preview)
                 elif action == "save":
@@ -283,7 +323,7 @@ def main():
 
     spin = threading.Thread(target=spin_preview, daemon=True)
     spin.start()
-    server = ThreadingHTTPServer((args.host, args.port), handler_factory(socket_path, preview))
+    server = ThreadingHTTPServer((args.host, args.port), handler_factory(socket_path, preview, config))
     def shutdown(_signum, _frame):
         threading.Thread(target=server.shutdown, daemon=True).start()
     signal.signal(signal.SIGTERM, shutdown)

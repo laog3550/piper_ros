@@ -47,6 +47,12 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <div class="row"><div><label for="mode">采集类型</label><select id="mode"><option value="task">完整任务</option><option value="skill">单技能片段</option></select></div><div id="skill_field" hidden><label for="skill">固定技能</label><select id="skill"><option value="pick_banana">抓取香蕉</option><option value="place_banana_in_box">香蕉放入盒子</option><option value="close_hinged_lid_bimanual">双臂合上翻盖</option></select></div></div>
 <label for="task">任务名</label><input id="task" maxlength="120" placeholder="例如：香蕉抓取、入盒与双臂翻盖">
 <label for="instruction">语言指令</label><textarea id="instruction" maxlength="2000" placeholder="例如：抓取香蕉放入盒中，再由双臂合上翻盖"></textarea>
+<div id="contract_fields" hidden>
+<h2>技能采集契约</h2>
+<div class="row"><div><label for="arm_mode">执行臂</label><select id="arm_mode"><option value="">请选择</option><option value="LEFT">LEFT</option><option value="RIGHT">RIGHT</option><option value="BIMANUAL">BIMANUAL</option></select></div><div><label for="calibration_version">已验收标定版本</label><input id="calibration_version" maxlength="120" placeholder="填写现场验收的版本号"></div><div><label for="normalization_version">归一化版本</label><input id="normalization_version" maxlength="120" placeholder="填写数据集版本号"></div></div>
+<p id="contract_status" class="notice">训练未就绪：正在检查主从遥操作映射。</p>
+<p class="muted">只有配置已核对主臂目标、从臂反馈及夹爪映射时，才声明人类示教动作来源。元数据就绪仍须通过原始数据审计。</p>
+</div>
 <div id="initial_fields">
 <p class="muted">起始条件由人工填写，只作为采集元数据，不会驱动机械臂。单技能片段须填写全部六项；原有任务可留空。</p>
 <div class="row"><div><label for="initial_object">对象起始位姿或扰动</label><input id="initial_object" maxlength="500" placeholder="例如：香蕉向左偏移 3 cm"></div><div><label for="initial_box">盒子起始位姿或扰动</label><input id="initial_box" maxlength="500" placeholder="例如：盒子朝向偏转 5°"></div></div>
@@ -83,7 +89,23 @@ for (let i=0;i<3;i++) {
   card.append(img,status); $('cameras').append(card); cameraNodes.push({img,status});
 }
 let busy = false, state = 'unknown', currentMeta = {};
+let teleoperationReady = {};
 function notice(text, error=false) { $('notice').textContent=text; $('notice').className=error?'notice error':'notice'; }
+function updateContract() {
+  const skillMode=$('mode').value==='skill', bimanual=$('skill').value==='close_hinged_lid_bimanual';
+  $('skill_field').hidden=!skillMode; $('contract_fields').hidden=!skillMode;
+  $('arm_mode').querySelector('option[value="BIMANUAL"]').disabled=!bimanual;
+  for(const arm of ['LEFT','RIGHT']) $('arm_mode').querySelector(`option[value="${arm}"]`).disabled=bimanual;
+  if(bimanual) $('arm_mode').value='BIMANUAL';
+  else if($('arm_mode').value==='BIMANUAL') $('arm_mode').value='';
+  const ready=teleoperationReady[$('arm_mode').value]===true;
+  $('contract_status').textContent=ready ? '采集元数据可声明主从示教；训练仍需逐帧数据审计。' : '训练未就绪：当前执行臂没有已验证的主从遥操作与夹爪映射。';
+}
+async function loadContract() {
+  try { const data=await readJson(await fetch('/api/contract',{cache:'no-store'})); teleoperationReady=data.teleoperation_ready; }
+  catch(error) { teleoperationReady={}; }
+  updateContract();
+}
 async function readJson(response) { const data=await response.json(); if(!response.ok || !data.ok) throw Error(data.error || '操作失败'); return data; }
 function updateButtons() {
   $('start').disabled=busy || state!=='idle'; $('stop').disabled=busy || state!=='recording';
@@ -156,12 +178,14 @@ async function action(name, payload={}) {
   } catch(error) { notice(error.message,true); await refresh(); }
   finally { busy=false; updateButtons(); }
 }
-$('mode').onchange=()=>{ $('skill_field').hidden=$('mode').value!=='skill'; };
+$('mode').onchange=updateContract; $('skill').onchange=updateContract; $('arm_mode').onchange=updateContract;
 $('start').onclick=()=>{
   const payload={mode:$('mode').value,task:$('task').value,language_instruction:$('instruction').value};
   const initial={object:$('initial_object').value,box:$('initial_box').value,lid_angle:$('initial_lid_angle').value,
     left_arm:$('initial_left_arm').value,right_arm:$('initial_right_arm').value,perturbation_id:$('initial_perturbation_id').value};
-  if(payload.mode==='skill') { payload.skill=$('skill').value; payload.initial_conditions=initial; }
+  if(payload.mode==='skill') { payload.skill=$('skill').value; payload.initial_conditions=initial;
+    payload.arm_mode=$('arm_mode').value; payload.calibration_version=$('calibration_version').value;
+    payload.normalization_version=$('normalization_version').value; }
   else if(Object.values(initial).some(value=>value.trim())) payload.initial_conditions=initial;
   action('start',payload);
 };
@@ -191,7 +215,7 @@ $('mark_failure').onclick=()=>annotate('outcome','failure');
 $('mark_exception').onclick=()=>annotate('recovery_trigger',`异常：${$('trigger_reason').value.trim() || '人工触发'}`);
 $('mark_recovery').onclick=()=>annotate('recovery_trigger',`恢复：${$('trigger_reason').value.trim() || '人工触发'}`);
 $('outcome').onchange=updateButtons;
-refresh(); loadEpisodes(); setInterval(refresh,1500); setInterval(loadEpisodes,10000);
+loadContract(); refresh(); loadEpisodes(); setInterval(refresh,1500); setInterval(loadEpisodes,10000);
 </script>
 </body>
 </html>
