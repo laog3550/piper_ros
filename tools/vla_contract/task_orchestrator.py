@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import math
 
 from action_supervisor import ActionSupervisor, SafetyError
+from runtime_trace import TraceError, derived_recovery_id, observation_summary
 from validate_contract import VERSION, validate_observation
 
 
@@ -62,13 +63,27 @@ class SnapshotObserverAdapter:
 class TaskOrchestrator:
     """依赖全部由调用方注入；目标发送路径只接受监督器 tick 的返回值。"""
 
-    def __init__(self, skills, arm_mode, observer, policy, critic, sink, clock, supervisor: ActionSupervisor):
+    def __init__(self, skills, arm_mode, observer, policy, critic, sink, clock, supervisor: ActionSupervisor,
+                 trace_hook=None, trace_ids=None):
         if arm_mode not in ("LEFT", "RIGHT") or not skills:
             raise ValueError("MVP 只允许单臂且技能序列不能为空")
         self.board = Blackboard(arm_mode, tuple(skills))
         self.observer, self.policy, self.critic = observer, policy, critic
         self.sink, self.clock, self.supervisor = sink, clock, supervisor
+        self.trace_hook, self.trace_ids = trace_hook, dict(trace_ids or {})
         self.takeover = False
+
+    def _trace(self, event_type, data, skill=None):
+        if self.trace_hook is None:
+            return
+        ids = dict(self.trace_ids)
+        if skill is not None:
+            ids["skill_id"] = skill.name
+        retry = self.board.attempt + (event_type == "recovery_requested")
+        if retry and self.trace_hook.manifest["links"].get("recovery_id") is None:
+            ids["recovery_id"] = derived_recovery_id(
+                self.trace_hook.run_id, f"{ids.get('step_id', 'skill')}:retry:{retry}")
+        self.trace_hook.record(event_type, data, ids=ids, clock_ns=self.clock.now_ns())
 
     def request_takeover(self):
         self.takeover = True
@@ -140,12 +155,31 @@ class TaskOrchestrator:
                     if self.supervisor.state == "STOP":
                         raise SafetyError(self.supervisor.reason)
                     board.goal = self._goal(skill, obs)
+                    self._trace("skill_observation", {"observation": observation_summary(obs),
+                                                      "goal": board.goal, "attempt": board.attempt}, skill)
                     self._transition("PLAN")
                 elif board.phase == "PLAN":
-                    board.action = self.policy.plan(board.observation, board.goal)
+                    self._trace("policy_request", {"observation": observation_summary(board.observation),
+                                                    "goal": board.goal, "attempt": board.attempt}, skill)
+                    try:
+                        board.action = self.policy.plan(board.observation, board.goal)
+                    except Exception as exc:
+                        self._trace("policy_failure", {"failure_category": "POLICY_FAILURE",
+                                                       "reason": type(exc).__name__}, skill)
+                        raise
                     self._check_deadline()
-                    self.supervisor.submit({"observation": board.observation, "skill_goal": board.goal,
-                                            "action_chunk": board.action}, self.clock.now_ns())
+                    self._trace("policy_result", {"action_chunk": board.action,
+                                                   "attempt": board.attempt}, skill)
+                    try:
+                        self.supervisor.submit({"observation": board.observation, "skill_goal": board.goal,
+                                                "action_chunk": board.action}, self.clock.now_ns())
+                    except Exception as exc:
+                        self._trace("preflight_rejected", {"failure_category": "SUPERVISOR_REJECTED",
+                                                          "reason": str(exc)}, skill)
+                        raise
+                    self._trace("preflight_accepted", {"safety_profile": self.supervisor.profile.profile_id,
+                                                        "action_model_version": board.action["model_version"],
+                                                        "attempt": board.attempt}, skill)
                     self._transition("EXECUTE")
                 elif board.phase == "EXECUTE":
                     self._execute()
@@ -162,11 +196,16 @@ class TaskOrchestrator:
                         raise SafetyError(self.supervisor.reason)
                     result = self.critic.verify(skill, obs)
                     self._check_deadline()
+                    self._trace("verify_result", {"result": result, "critic_output": getattr(
+                        self.critic, "last_output", None), "observation": observation_summary(obs),
+                        "attempt": board.attempt}, skill)
                     if result == "SUCCESS":
                         board.skill_index += 1
                         board.attempt = 0
                         self._transition("DONE" if board.skill_index == len(board.skills) else "OBSERVE")
                     elif result == "FAIL":
+                        self._trace("recovery_requested", {"failure_category": "VERIFY_FAILED",
+                                                           "attempt": board.attempt}, skill)
                         self._transition("RECOVER", "验证失败")
                     else:
                         self._halt(f"评估结果不可执行：{result}")
@@ -176,9 +215,20 @@ class TaskOrchestrator:
                         self._halt("重试次数耗尽")
                     else:
                         board.attempt += 1
+                        self._trace("recovery_started", {"attempt": board.attempt}, skill)
                         self._transition("OBSERVE", "重新观测后重试")
             except Exception as exc:
-                self._halt(f"{board.phase}: {exc}")
+                phase = board.phase
+                self._halt(f"{phase}: {exc}")
+                try:
+                    category = ("TRACE_FAILURE" if isinstance(exc, TraceError)
+                                else "PREFLIGHT_REJECTED" if phase in ("OBSERVE", "PLAN")
+                                else "EXECUTION_FAILURE" if phase == "EXECUTE"
+                                else "VERIFY_FAILURE")
+                    self._trace("skill_failure", {"failure_category": category,
+                                                  "phase": phase, "reason": str(exc)}, skill)
+                except Exception:
+                    pass
         return board
 
     def _execute(self):
@@ -204,7 +254,13 @@ class TaskOrchestrator:
                     raise SafetyError("目标尚未收到新反馈")
                 break
             # 执行器无法获得 policy 的原始动作；只接收监督器批准的一个目标。
+            self._trace("execution_request", {"approved_target": approved, "deadline_ns": deadline,
+                                              "attempt": board.attempt}, board.skills[board.skill_index])
             pos, vel, stamp, healthy = self.sink.dispatch(approved, now, deadline)
+            self._trace("execution_result", {"feedback": {"position": [float(value) for value in pos],
+                                                               "velocity": [float(value) for value in vel],
+                                                               "timestamp_ns": int(stamp), "healthy": bool(healthy)},
+                                             "attempt": board.attempt}, board.skills[board.skill_index])
             if self.clock.now_ns() > deadline:
                 raise TimeoutError("技能执行超时")
             self.supervisor.update_feedback(arm, pos, vel, stamp, healthy)
