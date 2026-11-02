@@ -44,9 +44,11 @@
 
 ## 2026-11-02 集成进度
 
-已合入录制器 v2 标注、Web 实时标注、模块 1 只读检查表、原子技能质量审计与 LeRobot v3 导出、Qwen 规划运行时轨迹钩子、π0.5 原子技能训练准入。集成分支的 Web 合成 ROS 测试通过；录制器和 LeRobot 转换测试 25 项通过，VLA 与录制器离线回归 78 项通过，π0.5 准入测试 5 项通过。这些测试使用合成输入验证软件契约。
+已合入录制器 v2 标注、Web 实时标注、模块 1 只读检查表、原子技能质量审计与 LeRobot v3 导出、Qwen 规划运行时轨迹钩子、π0.5 原子技能训练准入。集成分支的 Web 合成 ROS 测试通过；LeRobot 转换测试 24 项、VLA 与录制器离线回归 78 项、π0.5 准入测试 7 项、恢复缓存测试 5 项通过。v2 合成 Episode 已走通审计、成功技能转换、外部人工标签与 SFT 数据门禁。这些测试使用合成输入验证软件契约。
 
 Web 单技能采集现在要求显式选择执行臂：抓取与入盒为 `LEFT` 或 `RIGHT`，双臂翻盖为 `BIMANUAL`；并填写非空、非 `UNVERIFIED` 占位的 `calibration_version` 与 `normalization_version`。只有录制配置 `teleoperation` 明确声明 `source=master_slave_teleoperation`、`mapping_verified=true`、`gripper_mapping_verified=true`，且对应臂的主目标和从反馈话题映射与已录话题一致时，Web 才写入 `time_domain=unix_ns`、`action_space=absolute_joint_position_7`、`action_provenance=human_demonstration`。示例配置的验证开关均为 `false`；须在主从端真实遥操作、时间域和夹爪物理映射完成现场核对后才可修改。未验证时界面显示训练未就绪，Episode 元数据也不伪造这三项。即使元数据齐全，仍须通过逐帧来源审计和转换器检查；旧 `task` 请求不要求新增字段。
+
+成功 SFT 按 `task_metadata.initial_conditions.perturbation_id` 整组切分，缺组标识或少于两个不同扰动组时拒绝导出；旧转换模式保持原切分行为。π0.5 门禁按 v2 顶层技能、逐 Episode 任务文本和 v2 审计核验，并继续要求独立人工标签、来源摘要、左右臂角色与同步证据。
 
 只读审计 `/home/mips/piper_tjp/data` 的 8 段真实来源：合格 Episode 为 0，合格帧为 0。现场两路 CAN 当前为 DOWN，ROS 相机与机械臂节点未运行；本轮无法重新测量在线同步。标定版本、夹爪物理映射、同场双臂动作和反馈仍需现场核验。固定 openpi 版本的 LeRobot 读取器与 v3 导出格式还没有完成兼容验收，训练入口保持拒绝。
 
