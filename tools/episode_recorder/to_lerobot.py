@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把已保存的 rosbag2 Episode 转为本地 LeRobot v3。运行：python to_lerobot.py INPUT OUTPUT --repo-id local/piper --arm-mode LEFT --input-format can-vector --fps 10 --max-age-ms 100。"""
+"""把已保存的 rosbag2 Episode 转为本地 LeRobot v3。运行：python to_lerobot.py INPUT OUTPUT --repo-id local/piper --arm-mode LEFT --input-format can-vector --fps 10 --max-age-ms 100 --success-sft。"""
 
 import argparse
 from bisect import bisect_right
@@ -27,6 +27,7 @@ CAN_ACTIONS = {arm: f"/piper_vector/{arm}/master_target" for arm in ("left", "ri
 CAN_IDS = {"master_target": [0x155, 0x156, 0x157, 0x159],
            "slave_feedback": [0x2A5, 0x2A6, 0x2A7, 0x2A8]}
 VECTOR_TYPE = "piper_msgs/msg/PiperArmVector"
+SKILLS = ("pick_banana", "place_banana_in_box", "close_hinged_lid_bimanual")
 VECTOR_MSG = """std_msgs/Header header
 string source_topic
 string[7] joint_names
@@ -104,15 +105,17 @@ def image(message, topic, materialize, spool_dir=None):
 
 
 def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spool_dir=None,
-                 input_format="joint-state", max_can_skew_ns=30_000_000):
+                 input_format="joint-state", max_can_skew_ns=30_000_000,
+                 max_camera_gap_ns=100_000_000, max_camera_skew_ns=30_000_000,
+                 extra_frame_topics=()):
     metadata_path = path / "episode.json"
     if not metadata_path.is_file() or not (path / "bag" / "metadata.yaml").is_file():
         fail(f"{path}: 缺少 episode.json 或 bag/metadata.yaml")
     meta = json.loads(metadata_path.read_text(encoding="utf-8"))
     expected_mode = "BIMANUAL" if len(arms) == 2 else arms[0].upper()
     fields = meta.get("task_metadata", {})
-    if meta.get("schema_version") != 1 or meta.get("state") != "saved":
-        fail(f"{path}: 仅接受 schema_version=1 且 state=saved 的 Episode")
+    if meta.get("schema_version") not in (1, 2) or meta.get("state") != "saved":
+        fail(f"{path}: 仅接受 schema_version=1/2 且 state=saved 的 Episode")
     if not isinstance(fields, dict):
         fail(f"{path}: task_metadata 必须为对象")
     if (fields.get("arm_mode") != expected_mode or fields.get("time_domain") != "unix_ns"
@@ -130,7 +133,8 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
     state_topics = CAN_STATES if input_format == "can-vector" else STATES
     action_topics = CAN_ACTIONS if input_format == "can-vector" else ACTIONS
     needed = {CAMERAS["top_rgb"], *(CAMERAS[f"{arm}_wrist_rgb"] for arm in arms),
-              *(state_topics[arm] for arm in arms), *(action_topics[arm] for arm in arms)}
+              *(state_topics[arm] for arm in arms), *(action_topics[arm] for arm in arms),
+              *extra_frame_topics}
     streams = {topic: [] for topic in needed}
     with Reader(path / "bag") as reader:
         connections = [conn for conn in reader.connections if conn.topic in needed]
@@ -138,7 +142,8 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
         if found != needed:
             fail(f"{path}: 缺少话题 {sorted(needed - found)}")
         for conn in connections:
-            if conn.msgtype != TYPES[conn.topic] or conn.ext.serialization_format != "cdr":
+            expected_type = TYPES.get(conn.topic, "sensor_msgs/msg/Image")
+            if conn.msgtype != expected_type or conn.ext.serialization_format != "cdr":
                 fail(f"{conn.topic}: 消息类型或序列化格式不符")
         for conn, _, raw in reader.messages(connections=connections):
             message = TYPESTORE.deserialize_cdr(raw, conn.msgtype)
@@ -146,6 +151,8 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
             topic = conn.topic
             if topic in CAMERAS.values():
                 value, can_stamps = image(message, topic, materialize, spool_dir), None
+            elif topic in extra_frame_topics:
+                value, can_stamps = None, None
             elif input_format == "can-vector":
                 value, can_stamps = can_vector(message, topic, max_can_skew_ns)
             else:
@@ -168,6 +175,12 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
             values = deduplicated
         if any(a[0] >= b[0] for a, b in zip(values, values[1:])):
             fail(f"{path}: {topic} 的 Header 时间戳重复或倒退")
+    camera_topics = [CAMERAS["top_rgb"], *(CAMERAS[f"{arm}_wrist_rgb"] for arm in arms)]
+    camera_gaps = {topic: max((right[0] - left[0] for left, right in zip(streams[topic], streams[topic][1:])),
+                              default=0) for topic in camera_topics}
+    for topic, gap in camera_gaps.items():
+        if gap > max_camera_gap_ns:
+            fail(f"{path}: {topic} 的 RGB Header 间隔 {gap} ns 超过连续性阈值")
     if input_format == "can-vector":
         first = max(streams[action_topics[arm]][0][0] for arm in arms)
         last = min(streams[action_topics[arm]][-1][0] for arm in arms)
@@ -203,6 +216,7 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
             fail(f"{path}: {topic} 的 Header 时间不在 Episode 录制区间内")
         return streams[topic][index]
     frames = []
+    max_selected_camera_skew = 0
     for index, timestamp in enumerate(action_times):
         source_stamps, can_sources, actions = {}, {}, []
         for arm in arms:
@@ -230,7 +244,17 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
             observed_at, value, _ = preceding(CAMERAS[camera], timestamp)
             source_stamps[CAMERAS[camera]] = observed_at
             frame[f"observation.images.{camera}"] = value
+        camera_times = [source_stamps[topic] for topic in camera_topics]
+        skew = max(camera_times) - min(camera_times)
+        max_selected_camera_skew = max(max_selected_camera_skew, skew)
+        if skew > max_camera_skew_ns:
+            fail(f"{path}: RGB 之间的 Header 时间差 {skew} ns 超过同步阈值")
         frames.append(frame)
+    meta["_quality"] = {"camera_max_gap_ns": camera_gaps,
+                        "max_selected_camera_skew_ns": max_selected_camera_skew,
+                        "aligned_frame_count": len(frames)}
+    meta["_camera_header_stamps"] = {topic: [item[0] for item in streams[topic]]
+                                      for topic in (*camera_topics, *extra_frame_topics)}
     return meta, frames
 
 
@@ -257,6 +281,93 @@ def source_digest(path):
     return digest.hexdigest()
 
 
+def sft_label(meta):
+    """Return (label, reasons); v1 remains readable but has no success-SFT proof."""
+    reasons = []
+    if meta.get("schema_version") != 2:
+        return None, ["缺少 episode.json v2 技能标注"]
+    if meta.get("mode") != "skill":
+        return None, ["task 模式尚未按技能段导出"]
+    skill = meta.get("skill")
+    if skill not in SKILLS:
+        reasons.append("skill 不在固定原子技能集中")
+    fields = meta.get("task_metadata")
+    arm_mode = fields.get("arm_mode") if isinstance(fields, dict) else None
+    initial = fields.get("initial_conditions") if isinstance(fields, dict) else None
+    group_id = initial.get("perturbation_id") if isinstance(initial, dict) else None
+    if not isinstance(group_id, str) or not group_id.strip():
+        reasons.append("缺少 task_metadata.initial_conditions.perturbation_id 场景组标识")
+    if (skill == "close_hinged_lid_bimanual" and arm_mode != "BIMANUAL"
+            or skill in SKILLS[:2] and arm_mode not in ("LEFT", "RIGHT")):
+        reasons.append("skill 与 arm_mode 不匹配")
+    task_text = meta.get("task")
+    if not isinstance(task_text, str) or not task_text.strip():
+        reasons.append("缺少该 Episode 的 task 文本")
+    annotations = meta.get("annotations")
+    if not isinstance(annotations, list):
+        return None, reasons + ["annotations 不是数组"]
+    outcomes = [item for item in annotations if isinstance(item, dict) and item.get("kind") == "outcome"]
+    completes = [item for item in annotations if isinstance(item, dict) and item.get("kind") == "skill_complete"]
+    if len(outcomes) != 1 or outcomes[0].get("value") not in ("success", "failure"):
+        reasons.append("缺少唯一有效的 outcome 标注")
+    elif outcomes[0]["value"] != meta.get("outcome"):
+        reasons.append("outcome 标注与 Episode 结果不一致")
+    elif outcomes[0]["value"] != "success":
+        reasons.append("Episode 结果不是 success")
+    if len(completes) != 1 or completes[0].get("value") != skill:
+        reasons.append("缺少唯一且匹配 skill 的完成标注")
+        complete = None
+    else:
+        complete = completes[0]
+        topic, timestamp = complete.get("source_topic"), complete.get("header_stamp_ns")
+        declared_frames = meta.get("frame_topics") or []
+        camera_source = (isinstance(declared_frames, list) and topic in declared_frames
+                         and isinstance(topic, str) and topic.endswith("/image_raw"))
+        if (complete.get("frame_resolution_required") is True or not camera_source
+                or type(timestamp) is not int or timestamp <= 0):
+            reasons.append("完成帧缺少可核验的相机 Header 引用")
+        elif (type(meta.get("started_at_unix_ns")) is not int
+              or type(meta.get("stopped_at_unix_ns")) is not int
+              or not meta["started_at_unix_ns"] <= timestamp <= meta["stopped_at_unix_ns"]):
+            reasons.append("完成帧 Header 不在 Episode 区间内")
+    for item in (*outcomes, *completes):
+        recorded = item.get("recorded_at_unix_ns")
+        if (type(recorded) is not int or type(meta.get("started_at_unix_ns")) is not int
+                or type(meta.get("stopped_at_unix_ns")) is not int
+                or not meta["started_at_unix_ns"] <= recorded <= meta["stopped_at_unix_ns"]):
+            reasons.append("标注记录时间不在 Episode 区间内")
+            break
+    if reasons:
+        return None, reasons
+    return {"skill_id": skill, "task_text": task_text.strip(),
+            "group_id": group_id.strip(), "completion_frame": complete}, []
+
+
+def group_split(group_ids, test_percent):
+    """Deterministically assign complete perturbation groups to train/test."""
+    groups = set(group_ids)
+    if len(groups) < 2:
+        fail("至少需要两个不同的 perturbation_id 场景组才能划分 train/test")
+    test_count = min(len(groups) - 1, max(1, round(len(groups) * test_percent / 100)))
+    ranked = sorted(groups, key=lambda group: (hashlib.sha256(group.encode()).digest(), group))
+    return {group: "test" if group in ranked[:test_count] else "train" for group in groups}, test_count
+
+
+def select_sft_frames(meta, frames, label, arms, input_format):
+    complete = label["completion_frame"]
+    topic, timestamp = complete["source_topic"], complete["header_stamp_ns"]
+    if timestamp not in meta["_camera_header_stamps"].get(topic, ()):
+        fail("完成帧 Header 未在该 Episode 的相机消息中找到")
+    action_topics = CAN_ACTIONS if input_format == "can-vector" else ACTIONS
+    selected = [frame for frame in frames if max(frame["__source_header_ns__"][action_topics[arm]]
+                  for arm in arms) <= timestamp]
+    if len(selected) < 2:
+        fail("完成帧之前不足两帧有效示教")
+    return selected, {"aligned_frames": len(frames), "annotated_frames": len(selected),
+                      "annotation_coverage": len(selected) / len(frames),
+                      "completion_frame": {"source_topic": topic, "header_stamp_ns": timestamp}}
+
+
 def convert(args):
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
     from importlib.metadata import version
@@ -269,28 +380,66 @@ def convert(args):
     if args.output_dir.exists():
         fail("输出目录已存在，拒绝覆盖")
     prepared = []
+    excluded = []
+    success_sft = getattr(args, "success_sft", False)
+    skills = set(getattr(args, "skills", None) or ())
     ids = set()
     for path in paths:
-        meta, frames = read_episode(path, arms, args.fps, int(args.max_age_ms * 1e6),
-                                    int(args.jitter_ms * 1e6), input_format=args.input_format,
-                                    max_can_skew_ns=int(args.max_can_skew_ms * 1e6))
+        label = None
+        if success_sft:
+            try:
+                raw_meta = json.loads((path / "episode.json").read_text(encoding="utf-8"))
+                label, reasons = sft_label(raw_meta)
+            except (OSError, ValueError) as error:
+                label, reasons = None, [str(error)]
+            if label is not None and skills and label["skill_id"] not in skills:
+                reasons = ["不在 --skills 选择范围内"]
+            if label is not None and raw_meta.get("task_metadata", {}).get("arm_mode") != args.arm_mode:
+                reasons = ["与 --arm-mode 不匹配"]
+            if reasons:
+                excluded.append({"source": str(path.resolve()), "reasons": reasons})
+                continue
+        try:
+            extra_frames = (label["completion_frame"]["source_topic"],) if (
+                label and label["completion_frame"]["source_topic"] not in CAMERAS.values()) else ()
+            meta, frames = read_episode(path, arms, args.fps, int(args.max_age_ms * 1e6),
+                                        int(args.jitter_ms * 1e6), input_format=args.input_format,
+                                        max_can_skew_ns=int(args.max_can_skew_ms * 1e6),
+                                        max_camera_gap_ns=int(getattr(args, "max_camera_gap_ms", 100) * 1e6),
+                                        max_camera_skew_ns=int(getattr(args, "max_camera_skew_ms", 30) * 1e6),
+                                        extra_frame_topics=extra_frames)
+            annotation_stats = None
+            if success_sft:
+                frames, annotation_stats = select_sft_frames(meta, frames, label, arms, args.input_format)
+        except (ValueError, OSError) as error:
+            if not success_sft:
+                raise
+            excluded.append({"source": str(path.resolve()), "reasons": [str(error)]})
+            continue
         episode_id = meta.get("episode_id")
         if not isinstance(episode_id, str) or not episode_id or episode_id in ids:
             fail("episode_id 缺失或重复")
         ids.add(episode_id)
-        prepared.append((path, meta, len(frames), episode_id, source_digest(path)))
+        prepared.append((path, meta, len(frames), episode_id, source_digest(path), label, annotation_stats))
     if len(prepared) < 2:
-        fail("至少需要两个完整 Episode 才能按 Episode 划分 train/test")
-    test_count = min(len(prepared) - 1, max(1, round(len(prepared) * args.test_percent / 100)))
-    ranked = sorted(prepared, key=lambda item: hashlib.sha256(item[3].encode()).digest())
-    test_ids = {item[3] for item in ranked[:test_count]}
+        fail(f"至少需要两个合格 Episode 才能划分 train/test；排除 {len(excluded)} 段")
+    if success_sft:
+        group_splits, test_count = group_split((item[5]["group_id"] for item in prepared), args.test_percent)
+        split_rule = (f"sha256(task_metadata.initial_conditions.perturbation_id) 排序前 "
+                      f"{test_count}/{len(group_splits)} 个完整场景组为 test")
+    else:
+        test_count = min(len(prepared) - 1, max(1, round(len(prepared) * args.test_percent / 100)))
+        ranked = sorted(prepared, key=lambda item: hashlib.sha256(item[3].encode()).digest())
+        test_ids = {item[3] for item in ranked[:test_count]}
+        split_rule = f"sha256(episode_id) 排序前 {test_count}/{len(prepared)} 个为 test"
     args.output_dir.mkdir(parents=True)
     manifest = {"format": "LeRobotDataset v3.0", "lerobot_version": "0.4.4", "fps": args.fps,
+                "purpose": "success_sft" if success_sft else "legacy_unlabeled",
                 "arm_mode": args.arm_mode, "input_format": args.input_format,
                 "joint_names": [f"{arm}.{joint}" for arm in arms for joint in JOINTS],
                 "state_unit": "rad (joint1..6), m (gripper)", "action_space": "absolute_joint_position_7",
-                "split_rule": f"sha256(episode_id) 排序前 {test_count}/{len(prepared)} 个为 test",
-                "episodes": []}
+                "split_rule": split_rule,
+                "episodes": [], "excluded_episodes": excluded}
     timestamps_file = (args.output_dir / "source_timestamps.jsonl").open("w", encoding="utf-8")
     for split in ("train", "test"):
         repo_id = f"{args.repo_id}_{split}"
@@ -298,15 +447,27 @@ def convert(args):
                                         features=features(arms), root=args.output_dir / split,
                                         robot_type="piper", use_videos=False)
         expected_episodes = expected_frames = 0
-        for path, meta, count, episode_id, digest in prepared:
-            if ("test" if episode_id in test_ids else "train") != split:
+        for path, meta, count, episode_id, digest, label, annotation_stats in prepared:
+            assigned = group_splits[label["group_id"]] if success_sft else (
+                "test" if episode_id in test_ids else "train")
+            if assigned != split:
                 continue
             with tempfile.TemporaryDirectory(prefix="piper-rgb-") as temporary:
-                _, frames = read_episode(path, arms, args.fps, int(args.max_age_ms * 1e6),
+                written_meta, frames = read_episode(path, arms, args.fps, int(args.max_age_ms * 1e6),
                                          int(args.jitter_ms * 1e6), spool_dir=Path(temporary),
                                          input_format=args.input_format,
-                                         max_can_skew_ns=int(args.max_can_skew_ms * 1e6))
+                                         max_can_skew_ns=int(args.max_can_skew_ms * 1e6),
+                                         max_camera_gap_ns=int(getattr(args, "max_camera_gap_ms", 100) * 1e6),
+                                         max_camera_skew_ns=int(getattr(args, "max_camera_skew_ms", 30) * 1e6),
+                                         extra_frame_topics=(label["completion_frame"]["source_topic"],) if (
+                                             label and label["completion_frame"]["source_topic"] not in CAMERAS.values()) else ())
+                if success_sft:
+                    frames, _ = select_sft_frames(written_meta, frames, label, arms, args.input_format)
+                    if len(frames) != count:
+                        fail(f"{episode_id}: 预检与写出帧数不一致")
                 for index, frame in enumerate(frames):
+                    if success_sft:
+                        frame["task"] = label["task_text"]
                     timestamps_file.write(json.dumps({"split": split, "episode_id": episode_id,
                                                       "frame_index": index,
                                                       "header_timestamp_ns": frame.pop("__source_header_ns__"),
@@ -324,6 +485,11 @@ def convert(args):
                                          "source_sha256": digest,
                                          "calibration_version": meta["task_metadata"]["calibration_version"],
                                          "normalization_version": meta["task_metadata"]["normalization_version"],
+                                         "skill_id": label["skill_id"] if label else None,
+                                         "group_id": label["group_id"] if label else None,
+                                         "task_text": label["task_text"] if label else meta["task"],
+                                         "annotation_quality": annotation_stats,
+                                         "source_quality": meta.get("_quality"),
                                          "bag_validation": meta.get("bag_validation")})
         dataset.finalize()
         check = LeRobotDataset(repo_id, root=args.output_dir / split)
@@ -349,13 +515,21 @@ def main():
     parser.add_argument("--max-age-ms", type=float, required=True)
     parser.add_argument("--jitter-ms", type=float, default=2)
     parser.add_argument("--max-can-skew-ms", type=float, default=30)
+    parser.add_argument("--max-camera-gap-ms", type=float, default=100)
+    parser.add_argument("--max-camera-skew-ms", type=float, default=30)
+    parser.add_argument("--success-sft", action="store_true", help="仅导出 v2 已核验成功的原子技能 Episode")
+    parser.add_argument("--skills", nargs="+", choices=SKILLS, help="仅导出所列原子技能")
     parser.add_argument("--test-percent", type=int, default=20)
     args = parser.parse_args()
     if (args.fps <= 0 or not math.isfinite(args.max_age_ms) or args.max_age_ms <= 0
             or not math.isfinite(args.jitter_ms) or args.jitter_ms < 0
             or not math.isfinite(args.max_can_skew_ms) or args.max_can_skew_ms < 0
+            or not math.isfinite(args.max_camera_gap_ms) or args.max_camera_gap_ms <= 0
+            or not math.isfinite(args.max_camera_skew_ms) or args.max_camera_skew_ms < 0
             or not 0 < args.test_percent < 100):
-        parser.error("fps、max-age-ms、jitter-ms、max-can-skew-ms 或 test-percent 无效")
+        parser.error("fps 或时间阈值、test-percent 无效")
+    if args.skills and not args.success_sft:
+        parser.error("--skills 只能与 --success-sft 同用")
     try:
         convert(args)
     except (ValueError, OSError) as error:

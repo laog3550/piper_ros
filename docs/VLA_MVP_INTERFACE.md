@@ -140,6 +140,58 @@ python3 -m unittest discover -s tools/vla_contract -p 'test_piper_pi05_adapter.p
 
 真机前还需确认七维夹爪与关节反馈映射、相机手眼与外参及同时刻 TF、三机深度单位和时间同步、Piper 数据归一化及已适配 checkpoint、动作空间与周期、物理限位及扫掠碰撞模型。当前影子入口不提供这些参数，也不接入任何执行驱动。
 
+## 三个固定原子技能的 SFT 数据门禁
+
+`tools/vla_contract/atomic_skill_sft.py` 只接受专属、完整的原子技能 LeRobot 数据集。技能固定为 `pick_banana`、`place_banana_in_box` 和 `close_hinged_lid_bimanual`。前两者分别训练单臂数据，合盖需要左右两臂状态与动作各 7 维，共 14 维，且每个 Episode 显式标注 `hold_box` 与 `close_lid` 的左右角色；角色分配在同一数据集内不得混用。三个技能应分别录成单技能 Episode，不把一整段 `banana_into_box` 任务仅靠文本改名后用于训练。采集入口允许逐 Episode 填写不同的非空中文任务文本；门禁逐帧核对 LeRobot `task_index` 对应的文本与原始 `episode.json`、转换清单及独立审计一致。固定技能 ID 不依赖某一句固定提示词。此训练技能划分不修改 v1 在线 `skill_goal` 的 `pick/place` 枚举。
+
+门禁读取 `--success-sft` 转换器的 `conversion_manifest.json`、原始 v2 `episode.json` 与 bag 摘要、`source_timestamps.jsonl`、LeRobot v3 `meta/info.json`、`meta/tasks.parquet` 和实际 `data/**/*.parquet`。它兼容 `tasks.parquet` 中显式的 `task` 列及 LeRobot 0.4.4 将任务文本存为 Pandas 索引的布局。它检查：`observation.state` 与 `action` 均为有限的 7/14 维绝对位置（关节 `rad`、夹爪 `m`），RGB 列存在且无顶层空值；训练/测试 Episode 分离，至少每技能 10/3 个、每个至少 16 帧，且同一 `perturbation_id` 场景组不跨划分；来源任务文本与逐帧任务索引一致；来源时间与 Parquet 时间对应；左右动作及状态 Header 不同于同一帧超过显式同步门限；图像/状态不超过源年龄门限；CAN 四帧来源完整。同步门限最多 30 ms、源年龄最多 250 ms。独立审计须使用 `piper_real_data_audit_v2`，逐 Episode 标为 `eligible=true`。成功、原子边界、夹爪映射、标定、动作来源及双臂角色仍由独立人工核验标注确认，并绑定来源与转换清单 SHA-256。清单和标注只能证明字段及摘要一致，现场物理含义仍需人工验收。
+
+独立标注文件为 `piper_atomic_skill_labels/1`；以下展示一个 Episode 条目，实际文件的 `episodes` 必须覆盖转换清单中所有 Episode，且 `source_sha256` 等于该 Episode 的来源摘要：
+
+```json
+{
+  "schema_version": "piper_atomic_skill_labels/1",
+  "conversion_manifest_sha256": "<64 位 SHA-256>",
+  "source_audit_sha256": "<64 位 SHA-256>",
+  "episodes": {
+    "episode-id": {
+      "skill_id": "close_hinged_lid_bimanual",
+      "success": true,
+      "verified": true,
+      "atomic_episode": true,
+      "action_provenance": "human_demonstration",
+      "source_sha256": "<来源摘要>",
+      "calibration_verified": true,
+      "units_verified": true,
+      "calibration_version": "<已验收标定版本>",
+      "normalization_version": "<Piper 数据版本>",
+      "gripper_mapping_verified": true,
+      "gripper_mapping_version": "<已验收夹爪映射版本>",
+      "left_right_sync_verified": true,
+      "roles": {"left": "hold_box", "right": "close_lid"}
+    }
+  }
+}
+```
+
+准备及尝试启动使用同一入口。默认只读；`--plan` 仅在全部数据通过后写准备清单，不启动 GPU 训练。`--launch` 会复核固定 openpi checkout 与官方权重的 SHA-256，但目前仍拒绝训练：固定的 openpi commit 锁定 LeRobot `0cf864870cf29f4738d3ade893e6fd13fbd7cdb5`，其 `CODEBASE_VERSION="v2.1"`，读取入口为 `lerobot.common.datasets` 及旧版逐 Episode 布局；本项目转换器锁定 LeRobot 0.4.4，输出 `meta/tasks.parquet` 与多 Episode 的 v3.0 数据文件。旧版版本检查对新数据可能只给警告，不能把该警告当作兼容成功；后续元数据路径及读取 API 仍不匹配。现有 `PiperInputs/PiperOutputs` 也只支持单臂 7 维。必须先实现并验证 v3 读取适配或无损 v3→v2.1 桥接，对逐帧数值、解码 RGB、任务文本、Episode 边界及训练/测试隔离做回读比对；双臂还须增加 14 维输入输出适配及独立离线评估。门禁通过不等于 SFT 可运行或模型可执行。
+
+```bash
+/path/to/openpi/.venv/bin/python tools/vla_contract/atomic_skill_sft.py \
+  --dataset /path/to/one_skill_lerobot --annotations /path/to/labels.json \
+  --audit-report /path/to/independent_audit.json --skill pick_banana \
+  --max-sync-ns 30000000 --max-source-age-ns 250000000 \
+  --plan /path/to/new_training_plan.json
+
+/path/to/openpi/.venv/bin/python tools/vla_contract/atomic_skill_sft.py \
+  --dataset /path/to/one_skill_lerobot --annotations /path/to/labels.json \
+  --audit-report /path/to/independent_audit.json --skill pick_banana \
+  --max-sync-ns 30000000 --max-source-age-ns 250000000 \
+  --openpi-root /path/to/openpi --base-checkpoint /path/to/pi05_droid --launch
+```
+
+2026-11-01 只读盘点 `/home/mips/piper_tjp/data`：8 份录制中，4 份只有相机/事件，4 份仅有左侧动作与反馈；独立审计的 `eligible_episode_count=0`，三个固定技能均无合格训练/测试 Episode。门禁已用合成 v2 rosbag 完成审计、成功导出与 LeRobot 回读的端到端验证；未生成 Piper SFT 权重、未运行长时 GPU 训练、未接入机械臂。
+
 ## 官方 π0.5-DROID 离线基线边界
 
 固定上游源码为 [openpi commit `215abfb217dbac7d5f1273282331b9b1866c0479`](https://github.com/Physical-Intelligence/openpi/tree/215abfb217dbac7d5f1273282331b9b1866c0479)，依赖按该 commit 的 `uv.lock` 安装，配置为 `pi05_droid`，权重路径为 `gs://openpi-assets/checkpoints/pi05_droid`。上游代码采用 Apache-2.0，仓库另含 `LICENSE_GEMMA.txt` 中的 Gemma 使用条款；公开权重目录中未见单独的许可文件，因此不能把权重直接概括为 Apache-2.0。本次仅在本地下载并运行官方 smoke，未再分发权重。该 checkpoint 是 DROID 策略，不是 Piper 策略。

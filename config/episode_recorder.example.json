@@ -30,6 +30,15 @@
     "/camera_top/D455/color/image_raw",
     "/camera_top/D455/aligned_depth_to_color/image_raw"
   ],
+  "teleoperation": {
+    "source": "master_slave_teleoperation",
+    "mapping_verified": false,
+    "gripper_mapping_verified": false,
+    "arms": {
+      "left": {"master_target": "/piper_vector/left/master_target", "slave_feedback": "/piper_vector/left/slave_feedback"},
+      "right": {"master_target": "/piper_vector/right/master_target", "slave_feedback": "/piper_vector/right/slave_feedback"}
+    }
+  },
   "min_free_gb": 20,
   "startup_timeout_sec": 15
 }

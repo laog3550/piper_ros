@@ -6,6 +6,7 @@ import json
 import re
 
 from task_orchestrator import Skill, TaskOrchestrator
+from runtime_trace import TraceError, derived_recovery_id, observation_summary
 from validate_contract import validate_observation
 
 
@@ -267,11 +268,46 @@ class LongSequencePlanner:
 class SequenceRunner:
     """只在离线任务工厂中逐步运行；真实 critic 的 HUMAN_REVIEW 必须停机。"""
 
-    def __init__(self, planner, task_factory, world_reader, max_replans=1):
+    def __init__(self, planner, task_factory, world_reader, max_replans=1, trace_hook=None):
         if type(max_replans) is not int or not 0 <= max_replans <= 2:
             raise ValueError("重新规划次数无效")
         self.planner, self.task_factory, self.world_reader = planner, task_factory, world_reader
         self.max_replans = max_replans
+        self.trace_hook = trace_hook
+
+    def _trace(self, event_type, data, current=None, step=None, replans=0, clock=None):
+        if self.trace_hook is None:
+            return
+        ids = {}
+        if current is not None:
+            ids["request_id"] = current["request_id"]
+            ids["observation_id"] = current["observation"]["observation_id"]
+        if step is not None:
+            ids.update(step_id=step["step_id"], skill_id=step["skill"])
+        if replans and self.trace_hook.manifest["links"].get("recovery_id") is None:
+            ids["recovery_id"] = derived_recovery_id(self.trace_hook.run_id, f"replan:{replans}")
+        self.trace_hook.record(event_type, data, ids=ids,
+                               clock_ns=clock.now_ns() if clock is not None else None)
+
+    def run(self, context, clock):
+        if self.trace_hook is None:
+            return self._run(context, clock)
+        self._trace_progress, self._trace_replans = [], 0
+        try:
+            result = self._run(context, clock)
+        except TraceError as exc:
+            result = {"status": "HUMAN_REVIEW", "reason": f"轨迹导出失败：{exc}",
+                      "completed": self._trace_progress.copy(), "replans": self._trace_replans}
+        try:
+            if result["status"] != "DONE":
+                self._trace("run_failure", {"failure_category": result["status"],
+                                            "reason": result["reason"],
+                                            "completed": result["completed"]}, clock=clock)
+            self.trace_hook.finish(result["status"], clock_ns=clock.now_ns())
+        except TraceError as exc:
+            return {"status": "HUMAN_REVIEW", "reason": f"轨迹导出失败：{exc}",
+                    "completed": result["completed"], "replans": result["replans"]}
+        return result
 
     def _refresh(self, current, clock):
         if "scene_version" not in current:
@@ -321,12 +357,19 @@ class SequenceRunner:
         validate_context(refreshed, clock.now_ns(), self.planner.max_age_ns)
         return refreshed
 
-    def run(self, context, clock):
+    def _run(self, context, clock):
         progress = []
         replans = 0
         remaining = MAX_STEPS
         try:
             current = deepcopy(ground_context(context))
+            validate_context(current, clock.now_ns(), self.planner.max_age_ns)
+            if self.trace_hook is not None:
+                self._trace_progress = progress
+            self._trace("run_start", {"instruction": current.get("instruction"),
+                                      "goal_state": current.get("goal_state"),
+                                      "scene_version": current.get("scene_version")},
+                        current=current, clock=clock)
             if "scene_version" not in current:
                 raise PlanError("缺少场景版本；需要人工复核")
             if self.world_reader is None or not callable(getattr(self.world_reader, "refresh_plan_snapshot", None)):
@@ -335,13 +378,36 @@ class SequenceRunner:
             return {"status": "HUMAN_REVIEW", "reason": str(exc), "completed": progress, "replans": replans}
         while remaining > 0:
             try:
+                validate_context(current, clock.now_ns(), self.planner.max_age_ns)
+                self._trace("plan_request", {"instruction": current["instruction"],
+                                             "scene_version": current["scene_version"],
+                                             "object_ids": current["object_ids"],
+                                             "region_ids": current["region_ids"],
+                                             "goal_state": current["goal_state"],
+                                             "object_state": current["object_state"],
+                                             "available_skills": current["available_skills"],
+                                             "completed_step_ids": current["completed_step_ids"],
+                                             "observation": observation_summary(current["observation"])},
+                            current=current, replans=replans, clock=clock)
                 current, pending = self.planner.propose(current, clock.now_ns())
+                raw = getattr(self.planner.backend, "last_raw", None)
+                self._trace("plan_result", {"plan": pending,
+                                            "raw_model_output": raw if type(raw) is str else None},
+                            current=current, replans=replans, clock=clock)
                 current = self._refresh(current, clock)
                 plan = deepcopy(pending)
                 plan["observation_id"] = current["observation"]["observation_id"]
                 parse_plan(plan, current)
+                self._trace("plan_preflight", {"accepted": True, "rebound_plan": plan,
+                                               "fresh_observation": observation_summary(current["observation"])},
+                            current=current, replans=replans, clock=clock)
             except PlanError as exc:
                 status = "REOBSERVE" if "观测" in str(exc) and "过期" in str(exc) else "HUMAN_REVIEW"
+                raw = getattr(self.planner.backend, "last_raw", None)
+                self._trace("plan_preflight", {"accepted": False, "failure_category": "PLAN_REJECTED",
+                                               "reason": str(exc),
+                                               "raw_model_output": raw if type(raw) is str else None},
+                            current=current, replans=replans, clock=clock)
                 return {"status": status, "reason": str(exc), "completed": progress, "replans": replans}
             requested_replan = False
             for step in plan["steps"]:
@@ -353,8 +419,16 @@ class SequenceRunner:
                     if (step["skill"] == "pick" and object_state != {"status": "available", "region_id": None}
                             or step["skill"] == "place" and object_state != {"status": "held", "region_id": None}):
                         raise PlanError("执行前置条件已变化；需要人工复核")
+                    self._trace("step_preflight", {"accepted": True, "step": step,
+                                                   "fresh_observation": observation_summary(current["observation"]),
+                                                   "object_state": object_state},
+                                current=current, step=step, replans=replans, clock=clock)
                 except PlanError as exc:
                     status = "REOBSERVE" if "观测" in str(exc) and "过期" in str(exc) else "HUMAN_REVIEW"
+                    self._trace("step_preflight", {"accepted": False,
+                                                   "failure_category": "STEP_PREFLIGHT_REJECTED",
+                                                   "reason": str(exc)},
+                                current=current, step=step, replans=replans, clock=clock)
                     return {"status": status, "reason": str(exc), "completed": progress, "replans": replans}
                 skill = Skill(step["skill"], step["object_id"] if step["skill"] == "pick" else step["region_id"],
                               max_retries=1)
@@ -364,10 +438,24 @@ class SequenceRunner:
                         raise TypeError("必须使用 TaskOrchestrator")
                     if task.board.skills != (skill,) or task.board.arm_mode != step["arm"]:
                         raise ValueError("任务工厂与已校验步骤不匹配")
+                    if self.trace_hook is not None:
+                        if task.trace_hook not in (None, self.trace_hook):
+                            raise ValueError("任务轨迹钩子不一致")
+                        task.trace_hook = self.trace_hook
+                        task.trace_ids = {"request_id": current["request_id"], "step_id": step["step_id"],
+                                          "observation_id": current["observation"]["observation_id"]}
                     board = task.run()
                 except Exception as exc:
+                    self._trace("step_result", {"status": "HUMAN_REVIEW",
+                                                "failure_category": "ORCHESTRATION_FAILURE",
+                                                "reason": type(exc).__name__},
+                                current=current, step=step, replans=replans, clock=clock)
                     return {"status": "HUMAN_REVIEW", "reason": f"离线编排异常：{type(exc).__name__}",
                             "completed": progress, "replans": replans}
+                self._trace("step_result", {"phase": board.phase, "reason": board.reason,
+                                            "history": board.history,
+                                            "failure_category": None if board.phase == "DONE" else "TASK_SAFE_STOP"},
+                            current=current, step=step, replans=replans, clock=clock)
                 remaining -= 1
                 if board.phase != "DONE":
                     return {"status": "HUMAN_REVIEW", "reason": board.reason,
@@ -380,6 +468,10 @@ class SequenceRunner:
                         task.sink.cancel()
                     except Exception:
                         pass
+                    self._trace("world_verify", {"accepted": False,
+                                                 "failure_category": "WORLD_STATE_READ_FAILURE",
+                                                 "reason": type(exc).__name__},
+                                current=current, step=step, replans=replans, clock=clock)
                     return {"status": "HUMAN_REVIEW", "reason": f"世界状态读取失败：{type(exc).__name__}",
                             "completed": progress, "replans": replans}
                 expected = ({"status": "held", "region_id": None} if step["skill"] == "pick"
@@ -390,11 +482,18 @@ class SequenceRunner:
                         task.sink.cancel()
                     except Exception:
                         pass
+                    self._trace("world_verify", {"accepted": False,
+                                                 "failure_category": "WORLD_MISMATCH",
+                                                 "expected": expected, "actual": state},
+                                current=current, step=step, replans=replans, clock=clock)
                     return {"status": "HUMAN_REVIEW", "reason": "critic 与世界完成条件不一致",
                             "completed": progress, "replans": replans}
                 predicted = deepcopy(current["object_state"])
                 predicted[step["object_id"]] = expected
                 replan_required = replan_required or state != predicted
+                self._trace("world_verify", {"accepted": True, "expected": expected,
+                                             "actual": state, "replan_required": replan_required},
+                            current=current, step=step, replans=replans, clock=clock)
                 progress.append(step["step_id"])
                 current["object_state"] = deepcopy(state)
                 current["completed_step_ids"] = progress.copy()
@@ -411,6 +510,8 @@ class SequenceRunner:
                 return {"status": "HUMAN_REVIEW", "reason": "重新规划次数耗尽",
                         "completed": progress, "replans": replans}
             replans += 1
+            if self.trace_hook is not None:
+                self._trace_replans = replans
             try:
                 current = self._refresh(current, clock)
             except PlanError as exc:

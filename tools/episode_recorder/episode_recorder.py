@@ -26,6 +26,10 @@ from vlm_annotations import (required_text, validate_annotation, validate_plan,
                              validate_plan_link, validate_skill_context)
 
 
+SKILLS = ("pick_banana", "place_banana_in_box", "close_hinged_lid_bimanual")
+ANNOTATION_KINDS = ("skill_start", "skill_complete", "outcome", "recovery_trigger")
+
+
 def atomic_json(path, data):
     temporary = path.with_name(path.name + ".tmp")
     with temporary.open("w", encoding="utf-8") as stream:
@@ -241,6 +245,8 @@ class Recorder:
         if not isinstance(fields, dict):
             raise ValueError("metadata 必须是 JSON 对象")
         fields = dict(fields)
+        if mode == "skill" and "vlm" not in fields and skill not in SKILLS:
+            raise ValueError("skill 不在固定技能集中")
         if "vlm" in fields:
             if mode != "skill":
                 raise ValueError("VLM 技能上下文需要 mode=skill")
@@ -269,9 +275,11 @@ class Recorder:
         self.current = self.staging / uuid.uuid4().hex
         self.current.mkdir()
         self.metadata = {
-            "schema_version": 1, "state": "starting", "mode": mode,
+            "schema_version": 2 if "vlm" not in fields else 1, "state": "starting", "mode": mode,
             "episode_id": self.current.name,
             "task": task, "skill": skill if mode == "skill" else None,
+            "active_skill": skill if mode == "skill" else None,
+            "annotations": [],
             "task_metadata": fields, "topics": self.topics,
             "rosbag_relative_path": "bag",
             "duration_limit_sec": duration,
@@ -315,6 +323,62 @@ class Recorder:
         self.metadata["error"] = "rosbag2 未在超时内订阅全部配置话题；见 rosbag.log"
         self._event("failed")
         raise ValueError(self.metadata["error"])
+
+    def annotate(self, request):
+        if self.current is None or self.metadata["state"] != "recording":
+            raise ValueError("只能在录制中标注")
+        if self.metadata.get("schema_version") != 2:
+            raise ValueError("旧版 VLM 技能片段不支持 v2 实时标注")
+        kind = request.get("kind")
+        value = request.get("value")
+        if kind not in ANNOTATION_KINDS:
+            raise ValueError("未知标注类型")
+        active = self.metadata.get("active_skill")
+        next_active = active
+        if kind == "skill_start":
+            if self.metadata["mode"] != "task" or active is not None or value not in SKILLS:
+                raise ValueError("当前不能开始该技能")
+            completed = [item["value"] for item in self.metadata["annotations"]
+                         if item["kind"] == "skill_complete"]
+            if len(completed) >= len(SKILLS) or value != SKILLS[len(completed)]:
+                raise ValueError("技能顺序必须为抓取、放置、双臂翻盖")
+            next_active = value
+        elif kind == "skill_complete":
+            if active is None or value != active:
+                raise ValueError("完成标注与当前技能不一致")
+            if self.metadata["mode"] == "skill" and any(
+                item["kind"] == "skill_complete" for item in self.metadata["annotations"]
+            ):
+                raise ValueError("原子技能完成帧不能重复标注")
+            next_active = None if self.metadata["mode"] == "task" else active
+        elif kind == "outcome":
+            if value not in ("success", "failure"):
+                raise ValueError("outcome 必须为 success 或 failure")
+            if any(item["kind"] == "outcome" for item in self.metadata["annotations"]):
+                raise ValueError("结果标签不能重复标注")
+        elif not isinstance(value, str) or not value.strip():
+            raise ValueError("恢复原因不能为空")
+        topic = request.get("source_topic")
+        stamp = request.get("header_stamp_ns")
+        if (topic is None) != (stamp is None):
+            raise ValueError("source_topic 与 header_stamp_ns 必须同时提供")
+        if topic is not None and (topic not in self.frame_topics or
+                                  not isinstance(stamp, int) or isinstance(stamp, bool) or stamp <= 0):
+            raise ValueError("完成帧来源必须是配置中的图像话题及有效 Header 时间戳")
+        annotation = {"kind": kind, "value": value, "recorded_at_unix_ns": time.time_ns()}
+        if kind == "recovery_trigger":
+            annotation["recovery_id"] = uuid.uuid4().hex
+            annotation["skill"] = active
+        if topic is not None:
+            annotation.update(source_topic=topic, header_stamp_ns=stamp)
+        else:
+            annotation["frame_resolution_required"] = kind == "skill_complete"
+        self.metadata["active_skill"] = next_active
+        self.metadata["annotations"].append(annotation)
+        self._write_current()
+        self.event_publisher.publish(String(data=json.dumps({"episode_id": self.metadata["episode_id"],
+            "event": "annotation", **annotation}, ensure_ascii=False)))
+        return {"annotation": annotation, "active_skill": next_active}
 
     def _terminate(self):
         if self.process and self.process.poll() is None:
@@ -361,6 +425,12 @@ class Recorder:
             raise ValueError("只能保存已停止且通过完整性核验的 Episode")
         if outcome is not None and outcome not in ("success", "failure", "unknown"):
             raise ValueError("outcome 必须为 success、failure 或 unknown")
+        labels = [item["value"] for item in self.metadata.get("annotations", [])
+                  if item["kind"] == "outcome"]
+        if labels and outcome is not None and outcome != labels[0]:
+            raise ValueError("保存结果与录制中结果标签冲突")
+        if labels and outcome is None:
+            outcome = labels[0]
         context = self.metadata.get("task_metadata", {}).get("vlm")
         if context and annotation is None:
             raise ValueError("VLM 技能片段保存前须填写人工结果标注")
@@ -599,7 +669,7 @@ def serve(config):
                     request = json.loads(connection.recv(1_000_000).decode())
                     action = request.pop("action")
                     if action not in ("start", "stop", "save", "discard", "status", "list",
-                                      "plan_create", "plans", "vlm_export"):
+                                      "plan_create", "plans", "vlm_export", "annotate"):
                         raise ValueError("未知操作")
                     if action == "start":
                         result = recorder.start(request)
@@ -612,6 +682,8 @@ def serve(config):
                         result = recorder.list_plans()
                     elif action == "vlm_export":
                         result = recorder.export_vlm()
+                    elif action == "annotate":
+                        result = recorder.annotate(request)
                     else:
                         result = getattr(recorder, action)()
                     response = {"ok": True, "result": result}
@@ -627,7 +699,7 @@ def serve(config):
 def main():
     parser = argparse.ArgumentParser(description="ROS 2 Episode SQLite 录制器")
     parser.add_argument("action", choices=["serve", "start", "stop", "save", "discard", "status", "list",
-                                           "plan_create", "plans", "vlm_export"])
+                                           "plan_create", "plans", "vlm_export", "annotate"])
     parser.add_argument("--config", required=True, help="JSON 配置文件")
     parser.add_argument("--mode", choices=["task", "skill"])
     parser.add_argument("--task")
@@ -638,6 +710,10 @@ def main():
     parser.add_argument("--annotation", help="JSON 人工结果标注文件")
     parser.add_argument("--plan", help="JSON 规划样本文件")
     parser.add_argument("--save-dir", help="保存 Episode 的绝对目录路径")
+    parser.add_argument("--kind", choices=ANNOTATION_KINDS)
+    parser.add_argument("--value")
+    parser.add_argument("--source-topic")
+    parser.add_argument("--header-stamp-ns", type=int)
     args = parser.parse_args()
     config = load_json(args.config)
     if args.action == "serve":
@@ -656,6 +732,9 @@ def main():
         request["annotation"] = load_json(args.annotation) if args.annotation else None
     if args.action == "plan_create":
         request["plan"] = load_json(args.plan) if args.plan else None
+    if args.action == "annotate":
+        request.update(kind=args.kind, value=args.value, source_topic=args.source_topic,
+                       header_stamp_ns=args.header_stamp_ns)
     with socket.socket(socket.AF_UNIX) as connection:
         connection.connect(str(path))
         connection.sendall(json.dumps(request, ensure_ascii=False).encode())

@@ -13,14 +13,14 @@ import to_lerobot as converter
 
 
 def fixture(root, name, *, missing_action=False, bad_dimension=False, bad_stamp=False,
-            arm_mode="LEFT", camera_only=False):
+            arm_mode="LEFT", camera_only=False, wrist_lag_ns=0, frame_count=2):
     episode = root / name
     bag = episode / "bag"
     episode.mkdir()
     (episode / "episode.json").write_text(json.dumps({
         "schema_version": 1, "state": "saved", "episode_id": name, "task": "抓取方块",
         "started_at_unix_ns": 1_799_999_999_900_000_000,
-        "stopped_at_unix_ns": 1_800_000_000_200_000_000,
+        "stopped_at_unix_ns": 1_800_000_000_000_000_000 + frame_count * 100_000_000,
         "task_metadata": {"arm_mode": arm_mode, "time_domain": "unix_ns",
                           "action_space": "absolute_joint_position_7",
                           "action_provenance": "human_demonstration",
@@ -40,10 +40,12 @@ def fixture(root, name, *, missing_action=False, bad_dimension=False, bad_stamp=
     base = 1_800_000_000_000_000_000
     with Writer(bag, version=Writer.VERSION_LATEST) as writer:
         connections = {topic: writer.add_connection(topic, converter.TYPES[topic], typestore=s) for topic in topics}
-        for index in range(2):
+        for index in range(frame_count):
             timestamp = base + index * 100_000_000
             for topic in topics:
                 actual = timestamp + (10_000_000 if bad_stamp and index == 1 and topic == converter.ACTIONS[arms[0]] else 0)
+                if topic in (converter.CAMERAS["left_wrist_rgb"], converter.CAMERAS["right_wrist_rgb"]):
+                    actual -= wrist_lag_ns
                 header = Header(Time(actual // 1_000_000_000, actual % 1_000_000_000), "synthetic_frame")
                 if topic in converter.CAMERAS.values():
                     message = Image(header, 480, 640, "rgb8", 0, 640 * 3,
@@ -138,6 +140,11 @@ def test_episode_split_does_not_leak_frames(tmp_path, monkeypatch):
     for name in ("lerobot", "lerobot.datasets", "lerobot.datasets.lerobot_dataset"):
         monkeypatch.setitem(sys.modules, name, ModuleType(name))
     sys.modules["lerobot.datasets.lerobot_dataset"].LeRobotDataset = FakeDataset
+    import importlib.metadata
+    original_version = importlib.metadata.version
+    monkeypatch.setattr(importlib.metadata, "version",
+                        lambda name: {"lerobot": "0.4.4", "rosbags": "0.11.7"}.get(name)
+                        or original_version(name))
     output = tmp_path / "output"
     args = SimpleNamespace(input_dir=source, output_dir=output, repo_id="local/piper",
                            arm_mode="LEFT", input_format="joint-state", fps=10, max_age_ms=20,

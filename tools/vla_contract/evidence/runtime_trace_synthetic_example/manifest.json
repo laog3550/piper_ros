@@ -1,0 +1,22 @@
+{
+  "schema_version": "piper_runtime_trace/1.0",
+  "run_id": "synthetic-trace-example",
+  "source_kind": "synthetic",
+  "episode_manifest_sha256": null,
+  "models": {
+    "planner": "fixture-planner",
+    "policy": "synthetic-policy"
+  },
+  "links": {
+    "episode_id": "episode-test",
+    "task_group_id": "group-test",
+    "plan_id": "plan-test"
+  },
+  "created_at_unix_ns": 1793602786152679353,
+  "status": "complete",
+  "terminal_status": "DONE",
+  "event_count": 53,
+  "events_sha256": "a78b23d364f5fd785af83f1b22db9ffc8c544e5e8860da61a58c1c249ff4ec40",
+  "training_eligible": false,
+  "real_success_verified": false
+}

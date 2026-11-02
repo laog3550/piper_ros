@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数据采集控制台</title>
+<style>
+:root { color-scheme: dark; font-family: system-ui, sans-serif; background:#10151d; color:#edf3f8; }
+body { max-width:1200px; margin:0 auto; padding:24px; }
+header { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px; }
+h1 { font-size:1.6rem; margin:0; }
+.badge { border-radius:999px; padding:6px 12px; background:#273240; }
+.badge.recording { background:#922d39; color:white; animation:pulse 1.5s infinite; }
+@keyframes pulse { 50% { opacity:.65; } }
+section { background:#1b2530; border:1px solid #334354; border-radius:12px; padding:18px; margin-top:18px; }
+h2 { font-size:1.05rem; margin:0 0 14px; }
+.grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+.camera { background:#10151d; border-radius:8px; overflow:hidden; }
+.camera img { width:100%; aspect-ratio:16/9; object-fit:contain; display:block; }
+.camera p { padding:0 12px; font-size:.9rem; }
+.muted { color:#aab8c8; }
+label { display:block; margin:12px 0 6px; }
+input,textarea,select { width:100%; box-sizing:border-box; border:1px solid #607187; border-radius:7px; background:#111922; color:white; padding:10px; font:inherit; }
+textarea { min-height:75px; resize:vertical; }
+button { background:#3979dc; border:0; color:white; border-radius:7px; padding:10px 16px; cursor:pointer; font:inherit; margin:8px 8px 0 0; }
+button.secondary { background:#41546b; }
+button.danger { background:#a23644; }
+button:disabled { opacity:.45; cursor:not-allowed; }
+.row { display:flex; flex-wrap:wrap; align-items:end; gap:10px; }
+.row > * { flex:1; min-width:160px; }
+.notice { min-height:1.5em; color:#ffd47b; }
+.error { color:#ff9aa5; }
+.annotation-log { margin:8px 0; padding-left:20px; max-height:130px; overflow:auto; }
+.tablewrap { overflow-x:auto; }
+table { border-collapse:collapse; width:100%; font-size:.9rem; }
+th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
+@media(max-width:700px){ .grid { grid-template-columns:1fr; } body { padding:12px; } }
+</style>
+</head>
+<body>
+<header><h1>数据采集控制台</h1><span id="state" class="badge">连接中</span></header>
+<p class="muted">录制由独立的 Episode 服务执行。关闭本页不会中断录制；Rerun 可独立查看详细数据。</p>
+<section><h2>三路相机</h2><div id="cameras" class="grid"></div></section>
+<section>
+<h2>录制操作</h2>
+<div id="current" class="muted">正在读取状态…</div>
+<div class="row"><div><label for="mode">采集类型</label><select id="mode"><option value="task">完整任务</option><option value="skill">单技能片段</option></select></div><div id="skill_field" hidden><label for="skill">固定技能</label><select id="skill"><option value="pick_banana">抓取香蕉</option><option value="place_banana_in_box">香蕉放入盒子</option><option value="close_hinged_lid_bimanual">双臂合上翻盖</option></select></div></div>
+<label for="task">任务名</label><input id="task" maxlength="120" placeholder="例如：香蕉抓取、入盒与双臂翻盖">
+<label for="instruction">语言指令</label><textarea id="instruction" maxlength="2000" placeholder="例如：抓取香蕉放入盒中，再由双臂合上翻盖"></textarea>
+<div id="contract_fields" hidden>
+<h2>技能采集契约</h2>
+<div class="row"><div><label for="arm_mode">执行臂</label><select id="arm_mode"><option value="">请选择</option><option value="LEFT">LEFT</option><option value="RIGHT">RIGHT</option><option value="BIMANUAL">BIMANUAL</option></select></div><div><label for="calibration_version">已验收标定版本</label><input id="calibration_version" maxlength="120" placeholder="填写现场验收的版本号"></div><div><label for="normalization_version">归一化版本</label><input id="normalization_version" maxlength="120" placeholder="填写数据集版本号"></div></div>
+<p id="contract_status" class="notice">训练未就绪：正在检查主从遥操作映射。</p>
+<p class="muted">只有配置已核对主臂目标、从臂反馈及夹爪映射时，才声明人类示教动作来源。元数据就绪仍须通过原始数据审计。</p>
+</div>
+<div id="initial_fields">
+<p class="muted">起始条件由人工填写，只作为采集元数据，不会驱动机械臂。单技能片段须填写全部六项；原有任务可留空。</p>
+<div class="row"><div><label for="initial_object">对象起始位姿或扰动</label><input id="initial_object" maxlength="500" placeholder="例如：香蕉向左偏移 3 cm"></div><div><label for="initial_box">盒子起始位姿或扰动</label><input id="initial_box" maxlength="500" placeholder="例如：盒子朝向偏转 5°"></div></div>
+<div class="row"><div><label for="initial_lid_angle">翻盖初始角度</label><input id="initial_lid_angle" maxlength="500" placeholder="例如：打开约 80°"></div><div><label for="initial_perturbation_id">扰动编号</label><input id="initial_perturbation_id" maxlength="500" placeholder="例如：scene_003"></div></div>
+<div class="row"><div><label for="initial_left_arm">左臂初始条件</label><input id="initial_left_arm" maxlength="500" placeholder="人工记录关节姿态或相对位置"></div><div><label for="initial_right_arm">右臂初始条件</label><input id="initial_right_arm" maxlength="500" placeholder="人工记录关节姿态或相对位置"></div></div>
+</div>
+<div class="row"><button id="start">开始录制</button><button id="stop" class="secondary">停止录制</button></div>
+<div id="annotation_panel">
+<h2>实时标注</h2>
+<p id="active_skill" class="muted">当前技能：无</p>
+<p id="next_skill" class="muted"></p>
+<label for="annotation_source">关联画面（可留空）</label><select id="annotation_source"><option value="">只记录事件时间</option><option value="0">左腕彩色</option><option value="1">右腕彩色</option><option value="2">顶部彩色</option></select>
+<p class="muted">关联时间戳来自实际收到的 ROS 图像；画面过期时只记录事件时间，完成帧需后续核对。</p>
+<div class="row"><button id="mark_skill_start" class="secondary">开始下一技能</button><button id="mark_completion">标记当前技能完成</button><button id="mark_success" class="secondary">成功</button><button id="mark_failure" class="danger">失败</button></div>
+<label for="trigger_reason">异常或恢复原因（可提前填写；留空可一键记录）</label><input id="trigger_reason" maxlength="190" placeholder="例如：夹爪打滑；重新抓取后恢复">
+<div class="row"><button id="mark_exception" class="danger">记录异常触发</button><button id="mark_recovery" class="secondary">记录恢复触发</button></div>
+<p class="muted">近期标注</p><ul id="annotation_log" class="annotation-log"></ul>
+</div>
+<div class="row"><div><label for="outcome">结果标签</label><select id="outcome"><option value="">请选择</option><option value="success">成功</option><option value="failure">失败</option></select></div><button id="save">保存 Episode</button><button id="discard" class="danger">丢弃 Episode</button></div>
+<p class="muted">结果标签只记录任务成败；夹爪映射未经核对时，七维示教向量无效，不可用于训练。</p>
+<p id="notice" class="notice" role="status"></p>
+</section>
+<section><h2>已保存 Episode</h2><div class="tablewrap"><table><thead><tr><th>编号</th><th>任务</th><th>语言指令</th><th>结果</th><th>开始时间</th><th>路径</th></tr></thead><tbody id="episodes"></tbody></table></div></section>
+<script>
+const $ = id => document.getElementById(id);
+const labels = {idle:'空闲',starting:'启动中',recording:'录制中',stopped:'已停止，待保存',failed:'失败，待丢弃',interrupted:'意外中断，待丢弃',saved:'已保存',discarded:'已丢弃'};
+const skillNames = {pick_banana:'抓取香蕉',place_banana_in_box:'香蕉放入盒子',close_hinged_lid_bimanual:'双臂合上翻盖'};
+const skillOrder = Object.keys(skillNames);
+const cameraNodes = [];
+for (let i=0;i<3;i++) {
+  const card = document.createElement('div'); card.className='camera';
+  const img = document.createElement('img'); img.alt=['左腕预览','右腕预览','顶部预览'][i];
+  const status = document.createElement('p'); status.textContent='等待图像…';
+  card.append(img,status); $('cameras').append(card); cameraNodes.push({img,status});
+}
+let busy = false, state = 'unknown', currentMeta = {};
+let teleoperationReady = {};
+function notice(text, error=false) { $('notice').textContent=text; $('notice').className=error?'notice error':'notice'; }
+function updateContract() {
+  const skillMode=$('mode').value==='skill', bimanual=$('skill').value==='close_hinged_lid_bimanual';
+  $('skill_field').hidden=!skillMode; $('contract_fields').hidden=!skillMode;
+  $('arm_mode').querySelector('option[value="BIMANUAL"]').disabled=!bimanual;
+  for(const arm of ['LEFT','RIGHT']) $('arm_mode').querySelector(`option[value="${arm}"]`).disabled=bimanual;
+  if(bimanual) $('arm_mode').value='BIMANUAL';
+  else if($('arm_mode').value==='BIMANUAL') $('arm_mode').value='';
+  const ready=teleoperationReady[$('arm_mode').value]===true;
+  $('contract_status').textContent=ready ? '采集元数据可声明主从示教；训练仍需逐帧数据审计。' : '训练未就绪：当前执行臂没有已验证的主从遥操作与夹爪映射。';
+}
+async function loadContract() {
+  try { const data=await readJson(await fetch('/api/contract',{cache:'no-store'})); teleoperationReady=data.teleoperation_ready; }
+  catch(error) { teleoperationReady={}; }
+  updateContract();
+}
+async function readJson(response) { const data=await response.json(); if(!response.ok || !data.ok) throw Error(data.error || '操作失败'); return data; }
+function updateButtons() {
+  $('start').disabled=busy || state!=='idle'; $('stop').disabled=busy || state!=='recording';
+  $('save').disabled=busy || state!=='stopped' || !$('outcome').value;
+  $('discard').disabled=busy || !['stopped','failed','interrupted','recording','starting'].includes(state);
+  const recording=state==='recording', active=currentMeta.active_skill || (currentMeta.mode==='skill' ? currentMeta.skill : null);
+  const completed=(currentMeta.annotations || []).filter(item=>item.kind==='skill_complete').length;
+  $('mark_skill_start').disabled=busy || !recording || currentMeta.mode!=='task' || !!active || completed>=skillOrder.length;
+  $('mark_completion').disabled=busy || !recording || !active || (currentMeta.mode==='skill' && completed>0);
+  const hasOutcome=(currentMeta.annotations || []).some(item=>item.kind==='outcome');
+  for(const id of ['mark_success','mark_failure']) $(id).disabled=busy || !recording || hasOutcome;
+  for(const id of ['mark_exception','mark_recovery']) $(id).disabled=busy || !recording;
+}
+function showAnnotations(meta) {
+  const annotations=meta.annotations || [], active=meta.active_skill || (meta.mode==='skill' ? meta.skill : null);
+  $('active_skill').textContent=`当前技能：${skillNames[active] || '无'}`;
+  const completed=annotations.filter(item=>item.kind==='skill_complete').length;
+  $('next_skill').textContent=meta.mode==='task' && !active && completed<skillOrder.length ? `下一技能：${skillNames[skillOrder[completed]]}` : '';
+  const list=$('annotation_log'); list.replaceChildren();
+  for(const item of annotations.slice(-5).reverse()) {
+    const row=document.createElement('li');
+    const title={skill_start:'技能开始',skill_complete:'技能完成',outcome:'结果',recovery_trigger:'异常/恢复'}[item.kind] || item.kind;
+    const value=skillNames[item.value] || item.value;
+    const clock=item.recorded_at_unix_ns ? new Date(item.recorded_at_unix_ns/1e6).toLocaleTimeString() : '';
+    row.textContent=`${clock} · ${title}：${value}${item.header_stamp_ns ? ' · 已关联图像' : ''}`;
+    list.append(row);
+  }
+}
+async function refresh() {
+  try {
+    const data=await readJson(await fetch('/api/status', {cache:'no-store'}));
+    const result=data.result; state=result.state;
+    $('state').textContent=labels[state] || state; $('state').className='badge '+(state==='recording'?'recording':'');
+    const meta=result.metadata || {}; currentMeta=meta;
+    $('current').textContent=meta.episode_id ? `Episode ${meta.episode_id} · ${meta.task || ''} · ${skillNames[meta.active_skill] || skillNames[meta.skill] || '完整任务'} · ${meta.error || labels[state]}` : (result.pending?.length ? `有 ${result.pending.length} 个未处理暂存 Episode，请丢弃后重试` : '当前无活动 Episode');
+    showAnnotations(meta);
+    if(state==='recording' || state==='stopped') {
+      const outcomes=(meta.annotations || []).filter(item=>item.kind==='outcome');
+      if(outcomes.length && !$('outcome').value) $('outcome').value=outcomes.at(-1).value;
+    }
+    for(let i=0;i<3;i++) {
+      const camera=data.cameras[i], item=cameraNodes[i];
+      item.status.textContent=`${camera.name}：${camera.online?'在线':'无新画面'}${camera.error?' · '+camera.error:''}`;
+      if(camera.online) item.img.src=`/camera/${i}.jpg?t=${Date.now()}`; else item.img.removeAttribute('src');
+    }
+    updateButtons();
+  } catch(error) { state='unknown'; currentMeta={}; $('state').textContent='录制服务未连接'; $('state').className='badge'; $('current').textContent=error.message; updateButtons(); }
+}
+async function loadEpisodes() {
+  try {
+    const data=await readJson(await fetch('/api/episodes', {cache:'no-store'}));
+    const body=$('episodes'); body.replaceChildren();
+    for(const episode of data.result.episodes) {
+      const tr=document.createElement('tr');
+      const values=[episode.episode_number,episode.task,episode.language_instruction,episode.outcome==='success'?'成功':episode.outcome==='failure'?'失败':'未标注',episode.started_at_unix_ns?new Date(episode.started_at_unix_ns/1e6).toLocaleString():'',episode.path];
+      for(const value of values) { const td=document.createElement('td'); td.textContent=value ?? ''; tr.append(td); }
+      body.append(tr);
+    }
+    if(!data.result.episodes.length) { const tr=document.createElement('tr'), td=document.createElement('td'); td.colSpan=6; td.textContent='暂无已保存 Episode'; tr.append(td); body.append(tr); }
+  } catch(error) { notice(error.message,true); }
+}
+async function action(name, payload={}) {
+  busy=true; updateButtons(); notice('正在执行…');
+  try {
+    await readJson(await fetch(`/api/${name}`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}));
+    notice(({start:'已开始录制',stop:'已停止录制',save:'已保存 Episode',discard:'已丢弃 Episode'})[name]);
+    if(name==='start' || name==='discard') $('outcome').value='';
+    if(name==='save') { $('task').value=''; $('instruction').value=''; $('outcome').value=''; }
+    await refresh(); if(name==='save' || name==='discard') await loadEpisodes();
+  } catch(error) { notice(error.message,true); await refresh(); }
+  finally { busy=false; updateButtons(); }
+}
+$('mode').onchange=updateContract; $('skill').onchange=updateContract; $('arm_mode').onchange=updateContract;
+$('start').onclick=()=>{
+  const payload={mode:$('mode').value,task:$('task').value,language_instruction:$('instruction').value};
+  const initial={object:$('initial_object').value,box:$('initial_box').value,lid_angle:$('initial_lid_angle').value,
+    left_arm:$('initial_left_arm').value,right_arm:$('initial_right_arm').value,perturbation_id:$('initial_perturbation_id').value};
+  if(payload.mode==='skill') { payload.skill=$('skill').value; payload.initial_conditions=initial;
+    payload.arm_mode=$('arm_mode').value; payload.calibration_version=$('calibration_version').value;
+    payload.normalization_version=$('normalization_version').value; }
+  else if(Object.values(initial).some(value=>value.trim())) payload.initial_conditions=initial;
+  action('start',payload);
+};
+$('stop').onclick=()=>action('stop');
+$('save').onclick=()=>action('save',{outcome:$('outcome').value});
+$('discard').onclick=()=>{ if(confirm('确定丢弃当前 Episode？录制数据将被删除。')) action('discard'); };
+async function annotate(kind,value) {
+  busy=true; updateButtons(); notice('正在记录标注…');
+  try {
+    const chosen=$('annotation_source').value;
+    const payload={kind,value,camera_index:chosen==='' ? null : Number(chosen)};
+    const data=await readJson(await fetch('/api/annotate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}));
+    if(kind==='outcome') $('outcome').value=value;
+    if(kind==='recovery_trigger') $('trigger_reason').value='';
+    notice(data.result.annotation?.frame_resolution_required ? '标注已记录；完成帧待离线核对' : '标注已记录');
+    await refresh();
+  } catch(error) { notice(error.message,true); await refresh(); }
+  finally { busy=false; updateButtons(); }
+}
+$('mark_skill_start').onclick=()=>{
+  const completed=(currentMeta.annotations || []).filter(item=>item.kind==='skill_complete').length;
+  if(completed<skillOrder.length) annotate('skill_start',skillOrder[completed]);
+};
+$('mark_completion').onclick=()=>annotate('skill_complete',currentMeta.active_skill || currentMeta.skill);
+$('mark_success').onclick=()=>annotate('outcome','success');
+$('mark_failure').onclick=()=>annotate('outcome','failure');
+$('mark_exception').onclick=()=>annotate('recovery_trigger',`异常：${$('trigger_reason').value.trim() || '人工触发'}`);
+$('mark_recovery').onclick=()=>annotate('recovery_trigger',`恢复：${$('trigger_reason').value.trim() || '人工触发'}`);
+$('outcome').onchange=updateButtons;
+loadContract(); refresh(); loadEpisodes(); setInterval(refresh,1500); setInterval(loadEpisodes,10000);
+</script>
+</body>
+</html>

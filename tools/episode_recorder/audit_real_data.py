@@ -7,6 +7,9 @@ from pathlib import Path
 
 import yaml
 
+from to_lerobot import (CAN_ACTIONS, CAN_STATES, ACTIONS, STATES, group_split, read_episode,
+                        select_sft_frames, sft_label)
+
 CAMERAS = {"top_rgb": "/camera_top/D455/color/image_raw",
            "left_wrist_rgb": "/camera_wrist_left/color/image_raw",
            "right_wrist_rgb": "/camera_wrist_right/color/image_raw"}
@@ -61,7 +64,8 @@ def audit_legacy(metadata_path):
     }
 
 
-def audit_native(episode_path):
+def audit_native(episode_path, fps=10, max_age_ms=100, max_can_skew_ms=30,
+                 max_camera_gap_ms=100, max_camera_skew_ms=30):
     meta = json.loads((episode_path / "episode.json").read_text(encoding="utf-8"))
     info, counts = bag_info(episode_path / "bag" / "metadata.yaml")
     fields = meta.get("task_metadata") or {}
@@ -90,8 +94,35 @@ def audit_native(episode_path):
     for arm in arms:
         if arm in STATES and not counts.get(CAMERAS[f"{arm}_wrist_rgb"], 0):
             reasons.append(f"缺少 {arm} 腕视 RGB")
-    if not reasons:
-        reasons.append("清单预检通过，仍需运行 to_lerobot.py 验证逐帧内容及时间对齐")
+    label, label_reasons = sft_label(meta)
+    reasons.extend(label_reasons)
+    aligned_frames = annotated_frames = 0
+    quality = None
+    input_format = None
+    if meta.get("state") == "saved" and all(arm in STATES for arm in arms):
+        if all(counts.get(CAN_STATES[arm], 0) and counts.get(CAN_ACTIONS[arm], 0) for arm in arms):
+            input_format = "can-vector"
+        elif all(counts.get(STATES[arm], 0) and counts.get(ACTIONS[arm], 0) for arm in arms):
+            input_format = "joint-state"
+        else:
+            reasons.append("状态与动作未使用同一种完整输入格式")
+        if input_format:
+            try:
+                validated, frames = read_episode(
+                    episode_path, list(arms), fps, int(max_age_ms * 1e6), 2_000_000,
+                    input_format=input_format, max_can_skew_ns=int(max_can_skew_ms * 1e6),
+                    max_camera_gap_ns=int(max_camera_gap_ms * 1e6),
+                    max_camera_skew_ns=int(max_camera_skew_ms * 1e6),
+                    extra_frame_topics=(label["completion_frame"]["source_topic"],) if (
+                        label and label["completion_frame"]["source_topic"] not in CAMERAS.values()) else ())
+                aligned_frames = len(frames)
+                quality = validated["_quality"]
+                if label is not None:
+                    selected, coverage = select_sft_frames(validated, frames, label, list(arms), input_format)
+                    annotated_frames = len(selected)
+                    quality = {**quality, **coverage}
+            except (ValueError, OSError) as error:
+                reasons.append(str(error))
     return {
         "source": str(episode_path), "kind": "native_episode", "episode_id": meta.get("episode_id"),
         "task": meta.get("task"), "skill": meta.get("skill"), "topic_counts": counts,
@@ -103,7 +134,13 @@ def audit_native(episode_path):
         "has_rgb": any("color/image_raw" in name and count > 0 for name, count in counts.items()),
         "has_action_target": any(counts.get(t, 0) for t in (*ACTIONS.values(), *CAN_ACTIONS.values())),
         "has_feedback": any(counts.get(t, 0) for t in (*STATES.values(), *CAN_STATES.values())),
-        "eligible": False, "reasons": reasons,
+        "annotation_coverage": annotated_frames / aligned_frames if aligned_frames else 0.0,
+        "aligned_frame_count": aligned_frames, "eligible_frame_count": annotated_frames if not reasons else 0,
+        "skill_id": label["skill_id"] if label else meta.get("skill"),
+        "group_id": label["group_id"] if label else None,
+        "task_text": label["task_text"] if label else meta.get("task"),
+        "input_format": input_format, "quality": quality,
+        "eligible": not reasons, "reasons": reasons,
     }
 
 
@@ -112,17 +149,43 @@ def main():
     parser.add_argument("data_root", type=Path)
     parser.add_argument("--episode-root", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--fps", type=int, default=10)
+    parser.add_argument("--max-age-ms", type=float, default=100)
+    parser.add_argument("--max-can-skew-ms", type=float, default=30)
+    parser.add_argument("--max-camera-gap-ms", type=float, default=100)
+    parser.add_argument("--max-camera-skew-ms", type=float, default=30)
+    parser.add_argument("--test-percent", type=int, default=20)
     args = parser.parse_args()
+    if (args.fps <= 0 or not 0 < args.test_percent < 100
+            or min(args.max_age_ms, args.max_can_skew_ms,
+                   args.max_camera_gap_ms, args.max_camera_skew_ms) < 0):
+        parser.error("帧率或时间阈值无效")
     rows = [audit_legacy(path) for path in sorted(args.data_root.rglob("metadata.yaml"))
-            if not (path.parent / "episode.json").exists()]
+            if not (path.parent / "episode.json").exists()
+            and not (path.parent.parent / "episode.json").exists()]
     if args.episode_root:
-        rows += [audit_native(path.parent) for path in sorted(args.episode_root.rglob("episode.json"))
+        rows += [audit_native(path.parent, args.fps, args.max_age_ms, args.max_can_skew_ms,
+                              args.max_camera_gap_ms, args.max_camera_skew_ms)
+                 for path in sorted(args.episode_root.rglob("episode.json"))
                  if (path.parent / "bag" / "metadata.yaml").exists()]
+    eligible = [row for row in rows if row["eligible"]]
+    split_ready = len({row["group_id"] for row in eligible}) >= 2
+    if split_ready:
+        group_splits, _ = group_split((row["group_id"] for row in eligible), args.test_percent)
+        for row in eligible:
+            row["suggested_split"] = group_splits[row["group_id"]]
+    skills = {skill: sum(row.get("skill_id") == skill for row in eligible)
+              for skill in sorted({row.get("skill_id") for row in eligible})}
     report = {
-        "schema_version": "piper_real_data_audit_v1", "sources": rows,
-        "source_count": len(rows), "eligible_episode_count": 0,
-        "eligible_frame_count": 0, "train_episode_count": 0, "test_episode_count": 0,
-        "skill_coverage": {},
+        "schema_version": "piper_real_data_audit_v2", "sources": rows,
+        "source_count": len(rows), "eligible_episode_count": len(eligible),
+        "eligible_frame_count": sum(row.get("eligible_frame_count", 0) for row in eligible),
+        "split_ready": split_ready,
+        "split_blocker": None if split_ready else "至少需要两个不同的 perturbation_id 场景组",
+        "split_rule": "sha256(task_metadata.initial_conditions.perturbation_id) 按完整场景组划分",
+        "train_episode_count": sum(row.get("suggested_split") == "train" for row in eligible),
+        "test_episode_count": sum(row.get("suggested_split") == "test" for row in eligible),
+        "skill_coverage": skills,
         "note": "记录有效性不等于训练契约有效性；候选帧不得作为已验收训练帧。",
     }
     rendered = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
