@@ -13,14 +13,14 @@ import to_lerobot as converter
 
 
 def fixture(root, name, *, missing_action=False, bad_dimension=False, bad_stamp=False,
-            arm_mode="LEFT", wrist_lag_ns=0):
+            arm_mode="LEFT", wrist_lag_ns=0, frame_count=2):
     episode = root / name
     bag = episode / "bag"
     episode.mkdir()
     (episode / "episode.json").write_text(json.dumps({
         "schema_version": 1, "state": "saved", "episode_id": name, "task": "抓取方块",
         "started_at_unix_ns": 1_799_999_999_900_000_000,
-        "stopped_at_unix_ns": 1_800_000_000_200_000_000,
+        "stopped_at_unix_ns": 1_800_000_000_000_000_000 + frame_count * 100_000_000,
         "task_metadata": {"arm_mode": arm_mode, "time_domain": "unix_ns",
                           "action_space": "absolute_joint_position_7",
                           "action_provenance": "human_demonstration",
@@ -39,7 +39,7 @@ def fixture(root, name, *, missing_action=False, bad_dimension=False, bad_stamp=
     base = 1_800_000_000_000_000_000
     with Writer(bag, version=Writer.VERSION_LATEST) as writer:
         connections = {topic: writer.add_connection(topic, converter.TYPES[topic], typestore=s) for topic in topics}
-        for index in range(2):
+        for index in range(frame_count):
             timestamp = base + index * 100_000_000
             for topic in topics:
                 actual = timestamp + (10_000_000 if bad_stamp and index == 1 and topic == converter.ACTIONS[arms[0]] else 0)

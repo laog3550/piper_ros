@@ -1,17 +1,20 @@
 """合成 v2 技能 Episode 的审计与成功 SFT 导出。运行：pytest -q tools/episode_recorder/test_atomic_skill_export.py。"""
 
 import json
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
-from test_to_lerobot import fixture, vector_fixture
+sys.path.insert(0, str(Path(__file__).parents[1] / "vla_contract"))
 import audit_real_data as audit
 import to_lerobot as exporter
+from atomic_skill_sft import inspect
+from piper_pi05_openpi import digest
+from test_to_lerobot import fixture, vector_fixture
 
 
 def annotate(episode, skill="pick_banana", task="抓取香蕉", outcome="success",
@@ -237,6 +240,53 @@ def test_success_sft_real_lerobot_roundtrip_and_failure_exclusion(tmp_path):
         assert sample["observation.images.top_rgb"].shape == (3, 480, 640)
         tasks.add(sample["task"])
     assert tasks == {"抓取第一根香蕉", "抓取第二根香蕉"}
+
+
+def test_v2_export_reaches_atomic_gate_with_external_labels(tmp_path):
+    from importlib.metadata import version
+    if version("lerobot") != "0.4.4":
+        pytest.skip("需要 lerobot==0.4.4")
+    pytest.importorskip("lerobot.datasets.lerobot_dataset")
+
+    source = tmp_path / "episodes"
+    source.mkdir()
+    for index in (1, 2):
+        annotate(fixture(source, f"episode_{index:06d}", frame_count=16),
+                 task=f"抓取第{index}根香蕉")
+    report = tmp_path / "audit.json"
+    subprocess.run([sys.executable, str(Path(audit.__file__)), str(source),
+                    "--episode-root", str(source), "--output", str(report),
+                    "--max-age-ms", "30"], check=True)
+    audited = json.loads(report.read_text(encoding="utf-8"))
+    assert audited["eligible_episode_count"] == 2
+
+    output = tmp_path / "dataset"
+    exporter.convert(args(source, output, skills=["pick_banana"]))
+    manifest_path = output / "conversion_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    labels = {}
+    for row in manifest["episodes"]:
+        labels[row["episode_id"]] = {
+            "skill_id": "pick_banana", "success": True, "verified": True,
+            "atomic_episode": True, "action_provenance": "human_demonstration",
+            "source_sha256": row["source_sha256"],
+            "calibration_version": row["calibration_version"],
+            "normalization_version": row["normalization_version"],
+            "calibration_verified": True, "units_verified": True,
+            "gripper_mapping_verified": True, "gripper_mapping_version": "synthetic-gripper-v1",
+        }
+    annotations = tmp_path / "external_labels.json"
+    annotations.write_text(json.dumps({
+        "schema_version": "piper_atomic_skill_labels/1",
+        "conversion_manifest_sha256": digest(manifest_path),
+        "source_audit_sha256": digest(report), "episodes": labels,
+    }), encoding="utf-8")
+    result = inspect(output, annotations, report, "pick_banana", 30_000_000, 30_000_000,
+                     min_train=1, min_test=1)
+    assert result["status"] == "data_gate_passed_launch_blocked"
+    assert result["counts"] == {"train": 1, "test": 1}
+    assert result["model"]["task_texts"] == ["抓取第1根香蕉", "抓取第2根香蕉"]
+    assert result["launch_blockers"]
 
 
 def test_bimanual_success_sft_real_roundtrip(tmp_path):

@@ -142,9 +142,9 @@ python3 -m unittest discover -s tools/vla_contract -p 'test_piper_pi05_adapter.p
 
 ## 三个固定原子技能的 SFT 数据门禁
 
-`tools/vla_contract/atomic_skill_sft.py` 只接受专属、完整的原子技能 LeRobot 数据集。技能固定为 `pick_banana`（提示词“抓取香蕉”）、`place_banana_in_box`（“将香蕉放入纸盒”）和 `close_hinged_lid_bimanual`（“双臂合上铰接盒盖”）。前两者分别训练单臂数据，合盖需要左右两臂状态与动作各 7 维，共 14 维，且每个 Episode 显式标注 `hold_box` 与 `close_lid` 的左右角色；角色分配在同一数据集内不得混用。三个技能应分别录成单技能 Episode，不把一整段 `banana_into_box` 任务仅靠文本改名后用于训练。此训练技能划分不修改 v1 在线 `skill_goal` 的 `pick/place` 枚举。
+`tools/vla_contract/atomic_skill_sft.py` 只接受专属、完整的原子技能 LeRobot 数据集。技能固定为 `pick_banana`、`place_banana_in_box` 和 `close_hinged_lid_bimanual`。前两者分别训练单臂数据，合盖需要左右两臂状态与动作各 7 维，共 14 维，且每个 Episode 显式标注 `hold_box` 与 `close_lid` 的左右角色；角色分配在同一数据集内不得混用。三个技能应分别录成单技能 Episode，不把一整段 `banana_into_box` 任务仅靠文本改名后用于训练。采集入口允许逐 Episode 填写不同的非空中文任务文本；门禁逐帧核对 LeRobot `task_index` 对应的文本与原始 `episode.json`、转换清单及独立审计一致。固定技能 ID 不依赖某一句固定提示词。此训练技能划分不修改 v1 在线 `skill_goal` 的 `pick/place` 枚举。
 
-门禁读取转换器的 `conversion_manifest.json`、原始 `episode.json` 与 bag 摘要、`source_timestamps.jsonl`、LeRobot v3 `meta/info.json`、`meta/tasks.parquet` 和实际 `data/**/*.parquet`。它检查：`observation.state` 与 `action` 均为有限的 7/14 维绝对位置（关节 `rad`、夹爪 `m`），RGB 列存在且无顶层空值；训练/测试 Episode 分离，至少每技能 10/3 个、每个至少 16 帧；任务文本与技能一致；来源时间与 Parquet 时间对应；左右动作及状态 Header 不同于同一帧超过显式同步门限；图像/状态不超过源年龄门限；CAN 四帧来源完整。同步门限最多 30 ms、源年龄最多 250 ms。独立审计须逐 Episode 标为 `eligible=true`，成功、原子边界、夹爪映射、标定、动作来源及双臂角色由独立标注文件确认并绑定来源与转换清单 SHA-256。清单和标注只能证明字段及摘要一致，现场物理含义仍需人工验收。
+门禁读取 `--success-sft` 转换器的 `conversion_manifest.json`、原始 v2 `episode.json` 与 bag 摘要、`source_timestamps.jsonl`、LeRobot v3 `meta/info.json`、`meta/tasks.parquet` 和实际 `data/**/*.parquet`。它兼容 `tasks.parquet` 中显式的 `task` 列及 LeRobot 0.4.4 将任务文本存为 Pandas 索引的布局。它检查：`observation.state` 与 `action` 均为有限的 7/14 维绝对位置（关节 `rad`、夹爪 `m`），RGB 列存在且无顶层空值；训练/测试 Episode 分离，至少每技能 10/3 个、每个至少 16 帧，且同一 `perturbation_id` 场景组不跨划分；来源任务文本与逐帧任务索引一致；来源时间与 Parquet 时间对应；左右动作及状态 Header 不同于同一帧超过显式同步门限；图像/状态不超过源年龄门限；CAN 四帧来源完整。同步门限最多 30 ms、源年龄最多 250 ms。独立审计须使用 `piper_real_data_audit_v2`，逐 Episode 标为 `eligible=true`。成功、原子边界、夹爪映射、标定、动作来源及双臂角色仍由独立人工核验标注确认，并绑定来源与转换清单 SHA-256。清单和标注只能证明字段及摘要一致，现场物理含义仍需人工验收。
 
 独立标注文件为 `piper_atomic_skill_labels/1`；以下展示一个 Episode 条目，实际文件的 `episodes` 必须覆盖转换清单中所有 Episode，且 `source_sha256` 等于该 Episode 的来源摘要：
 
@@ -190,7 +190,7 @@ python3 -m unittest discover -s tools/vla_contract -p 'test_piper_pi05_adapter.p
   --openpi-root /path/to/openpi --base-checkpoint /path/to/pi05_droid --launch
 ```
 
-2026-11-01 只读盘点 `/home/mips/piper_tjp/data`：8 份录制中，4 份只有相机/事件，4 份仅有左侧动作与反馈；独立审计的 `eligible_episode_count=0`，三个固定技能均无合格训练/测试 Episode。本次只完成合成 Parquet 数据的门禁正反例，未生成 Piper SFT 权重、未运行长时 GPU 训练、未接入机械臂。
+2026-11-01 只读盘点 `/home/mips/piper_tjp/data`：8 份录制中，4 份只有相机/事件，4 份仅有左侧动作与反馈；独立审计的 `eligible_episode_count=0`，三个固定技能均无合格训练/测试 Episode。门禁已用合成 v2 rosbag 完成审计、成功导出与 LeRobot 回读的端到端验证；未生成 Piper SFT 权重、未运行长时 GPU 训练、未接入机械臂。
 
 ## 官方 π0.5-DROID 离线基线边界
 

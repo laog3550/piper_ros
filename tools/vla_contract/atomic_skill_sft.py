@@ -45,7 +45,7 @@ def expected_features(mode):
             **{f"observation.images.{name}": [480, 640, 3] for name in images}}
 
 
-def check_info(root, mode, skill, expected_episodes, expected_frames, fps):
+def check_info(root, mode, expected_episodes, expected_frames, fps):
     info = read_json(root / "meta" / "info.json")
     require(info.get("codebase_version") == "v3.0" and info.get("robot_type") == "piper",
             f"{root}: LeRobot 必须为 Piper v3.0")
@@ -63,10 +63,22 @@ def check_info(root, mode, skill, expected_episodes, expected_frames, fps):
         import pyarrow.parquet as pq
     except ImportError as error:
         raise ValueError("缺少 pyarrow，无法读取 LeRobot task") from error
-    tasks = pq.read_table(root / "meta" / "tasks.parquet", columns=["task_index", "task"]).to_pylist()
-    require(tasks == [{"task_index": 0, "task": SKILLS[skill]["prompt"]}],
-            f"{root}: LeRobot 任务文本不是固定原子技能")
-    return info
+    task_path = root / "meta" / "tasks.parquet"
+    schema = pq.read_schema(task_path)
+    if "task" in schema.names:
+        task_column = "task"
+    else:
+        pandas_meta = json.loads(schema.metadata.get(b"pandas", b"{}").decode()) if schema.metadata else {}
+        require("__index_level_0__" in schema.names
+                and pandas_meta.get("index_columns") == ["__index_level_0__"],
+                f"{root}: LeRobot 任务文本列缺失")
+        task_column = "__index_level_0__"
+    tasks = pq.read_table(task_path, columns=["task_index", task_column]).to_pylist()
+    require(tasks and all(type(item["task_index"]) is int and item["task_index"] >= 0
+                          and isinstance(item[task_column], str) and item[task_column].strip() for item in tasks)
+            and len({item["task_index"] for item in tasks}) == len(tasks),
+            f"{root}: LeRobot 任务表无效")
+    return {item["task_index"]: item[task_column] for item in tasks}
 
 
 def parquet_rows(root, mode):
@@ -93,7 +105,7 @@ def parquet_rows(root, mode):
     return grouped
 
 
-def check_vectors(rows, episode_id, dim, fps):
+def check_vectors(rows, episode_id, dim, fps, tasks, task_text):
     require(bool(rows), f"{episode_id}: 没有 LeRobot 帧")
     rows.sort(key=lambda row: row["frame_index"])
     require([row["frame_index"] for row in rows] == list(range(len(rows))),
@@ -104,8 +116,8 @@ def check_vectors(rows, episode_id, dim, fps):
             f"{episode_id}: LeRobot timestamp 非有限数或不递增")
     require(all(b - a <= 1.5 / fps for a, b in zip(stamps, stamps[1:])),
             f"{episode_id}: LeRobot 序列有时间缺口")
-    require(all(type(row["task_index"]) is int and row["task_index"] == 0 for row in rows),
-            f"{episode_id}: task_index 无效")
+    require(all(type(row["task_index"]) is int and tasks.get(row["task_index"]) == task_text
+                for row in rows), f"{episode_id}: task_index 与来源任务文本不符")
     for row in rows:
         for key in ("observation.state", "action"):
             vector = row[key]
@@ -123,13 +135,36 @@ def check_source(row, annotation, mode, skill):
             f"{row.get('episode_id')}: 原始 Episode 摘要不匹配")
     meta = read_json(source / "episode.json")
     task = meta.get("task_metadata", {})
-    require(meta.get("state") == "saved" and meta.get("episode_id") == row["episode_id"]
-            and meta.get("task") == SKILLS[skill]["prompt"]
+    task_text = meta.get("task")
+    initial = task.get("initial_conditions")
+    group_id = initial.get("perturbation_id") if isinstance(initial, dict) else None
+    require(meta.get("schema_version") == 2 and meta.get("mode") == "skill"
+            and meta.get("state") == "saved" and meta.get("episode_id") == row["episode_id"]
+            and meta.get("skill") == skill and meta.get("outcome") == "success"
+            and isinstance(task_text, str) and bool(task_text.strip())
+            and task_text.strip() == row.get("task_text") and row.get("skill_id") == skill
+            and isinstance(group_id, str) and bool(group_id.strip())
+            and group_id.strip() == row.get("group_id")
             and task.get("arm_mode") == mode and task.get("time_domain") == "unix_ns"
             and task.get("action_space") == ACTION_SPACE
-            and task.get("action_provenance") == "human_demonstration"
-            and task.get("skill_id") == skill,
+            and task.get("action_provenance") == "human_demonstration",
             f"{row['episode_id']}: 原始 Episode 状态/动作来源未核验")
+    marks = meta.get("annotations")
+    require(isinstance(marks, list), f"{row['episode_id']}: 缺少 v2 技能标注")
+    outcome = [item for item in marks if isinstance(item, dict) and item.get("kind") == "outcome"]
+    complete = [item for item in marks if isinstance(item, dict) and item.get("kind") == "skill_complete"]
+    quality = row.get("annotation_quality")
+    frame_topics = meta.get("frame_topics")
+    require(len(outcome) == len(complete) == 1 and outcome[0].get("value") == "success"
+            and complete[0].get("value") == skill
+            and isinstance(complete[0].get("source_topic"), str)
+            and isinstance(frame_topics, list) and complete[0]["source_topic"] in frame_topics
+            and type(complete[0].get("header_stamp_ns")) is int
+            and complete[0]["header_stamp_ns"] > 0
+            and isinstance(quality, dict) and quality.get("completion_frame") == {
+                "source_topic": complete[0]["source_topic"],
+                "header_stamp_ns": complete[0]["header_stamp_ns"]},
+            f"{row['episode_id']}: 成功完成帧与来源标注不符")
     require(task.get("calibration_version") == row.get("calibration_version")
             == annotation.get("calibration_version")
             and task.get("normalization_version") == row.get("normalization_version")
@@ -215,6 +250,7 @@ def inspect(dataset, annotations_path, audit_path, skill, max_sync_ns, max_age_n
     mode = manifest.get("arm_mode")
     require(mode in SKILLS[skill]["modes"] and manifest.get("format") == "LeRobotDataset v3.0"
             and manifest.get("lerobot_version") == "0.4.4"
+            and manifest.get("purpose") == "success_sft"
             and manifest.get("action_space") == ACTION_SPACE
             and manifest.get("state_unit") == STATE_UNIT
             and manifest.get("input_format") in ("joint-state", "can-vector"),
@@ -235,9 +271,10 @@ def inspect(dataset, annotations_path, audit_path, skill, max_sync_ns, max_age_n
     require(isinstance(labels, dict) and set(labels) == set(ids), "必须逐 Episode 提供核验标注")
     audit_rows = audit.get("sources", [])
     audited = {row.get("episode_id"): row for row in audit_rows if row.get("eligible") is True}
-    require(audit.get("schema_version") == "piper_real_data_audit_v1" and set(audited) >= set(ids),
+    require(audit.get("schema_version") == "piper_real_data_audit_v2" and set(audited) >= set(ids),
             "独立来源审计未批准所有真实 Episode")
     counts = {"train": 0, "test": 0}
+    groups = {"train": set(), "test": set()}
     versions = {"calibration_version": set(), "normalization_version": set(), "gripper_mapping_version": set()}
     role_maps = set()
     for row in episodes:
@@ -248,6 +285,9 @@ def inspect(dataset, annotations_path, audit_path, skill, max_sync_ns, max_age_n
         audit_row = audited[episode_id]
         require(audit_row.get("kind") == "native_episode"
                 and audit_row.get("source") == row.get("source")
+                and audit_row.get("skill_id") == skill
+                and audit_row.get("group_id") == row.get("group_id")
+                and audit_row.get("task_text") == row.get("task_text")
                 and audit_row.get("has_action_target") is True
                 and audit_row.get("has_feedback") is True
                 and audit_row.get("has_rgb") is True
@@ -257,25 +297,31 @@ def inspect(dataset, annotations_path, audit_path, skill, max_sync_ns, max_age_n
         if mode == "BIMANUAL":
             role_maps.add(tuple(labels[episode_id]["roles"][arm] for arm in ("left", "right")))
         counts[split] += 1
+        groups[split].add(row["group_id"])
         for field in versions:
             value = labels[episode_id][field] if field == "gripper_mapping_version" else row[field]
             versions[field].add(value)
     require(counts["train"] >= min_train and counts["test"] >= min_test,
             f"0 个合格真实 Episode 或训练/测试数量不足：{counts}；最低 {min_train}/{min_test}")
+    require(not groups["train"].intersection(groups["test"]),
+            "同一 perturbation_id 场景组跨越训练/测试划分")
     require(all(len(values) == 1 for values in versions.values()), "标定、归一化或夹爪映射版本混用")
     require(len(role_maps) <= 1, "双臂左右角色分配在 Episode 间混用")
     fps = manifest.get("fps")
     require(type(fps) is int and fps > 0, "转换清单 FPS 无效")
     parquet_times = {}
+    task_texts = set()
     for split in counts:
         rows_for_split = [row for row in episodes if row["split"] == split]
         root = dataset / split
-        check_info(root, mode, skill, len(rows_for_split), sum(row["frames"] for row in rows_for_split), fps)
+        tasks = check_info(root, mode, len(rows_for_split), sum(row["frames"] for row in rows_for_split), fps)
         grouped = parquet_rows(root, mode)
         require(set(grouped) == set(range(len(rows_for_split))), f"{split}: Parquet Episode 数量/索引不符")
         for index, row in enumerate(rows_for_split):
             require(len(grouped[index]) == row["frames"], f"{row['episode_id']}: Parquet 帧数不符")
-            check_vectors(grouped[index], row["episode_id"], 7 * len(arms_for(mode)), fps)
+            check_vectors(grouped[index], row["episode_id"], 7 * len(arms_for(mode)), fps,
+                          tasks, row["task_text"])
+            task_texts.add(row["task_text"])
             parquet_times[split, row["episode_id"]] = [frame["timestamp"] for frame in grouped[index]]
     references = check_source_timestamps(dataset / "source_timestamps.jsonl", episodes, mode,
                                          manifest["input_format"], max_sync_ns, max_age_ns)
@@ -293,7 +339,8 @@ def inspect(dataset, annotations_path, audit_path, skill, max_sync_ns, max_age_n
                       "piper_state_dim": 7 * len(arms_for(mode)),
                       "piper_action_dim": 7 * len(arms_for(mode)), "action_horizon": HORIZON,
                       "action_space": ACTION_SPACE, "rgb_slots": list(expected_features(mode))[2:],
-                      "prompt": SKILLS[skill]["prompt"],
+                      "prompt": next(iter(task_texts)) if len(task_texts) == 1 else None,
+                      "task_texts": sorted(task_texts),
                       "base_checkpoint": "gs://openpi-assets/checkpoints/pi05_droid",
                       "normalization": "仅从通过门禁的 Piper train Episode 重新计算"},
             "bimanual_roles": (dict(zip(("left", "right"), next(iter(role_maps)))) if role_maps else None),

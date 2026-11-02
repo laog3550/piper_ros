@@ -21,7 +21,7 @@ class AtomicSkillGateTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
 
-    def fixture(self, skill="pick_banana"):
+    def fixture(self, skill="pick_banana", varied_tasks=False, same_group=False):
         mode = SKILLS[skill]["modes"][0]
         arms = ("left", "right") if mode == "BIMANUAL" else ("left",)
         dim = len(arms) * 7
@@ -30,13 +30,20 @@ class AtomicSkillGateTest(unittest.TestCase):
         episodes, labels, stamps = [], {}, []
         for split in ("train", "test"):
             episode_id = f"{skill}-{split}"
+            group_id = "scene-shared" if same_group else f"scene-{split}"
+            task_text = f"{SKILLS[skill]['prompt']}（{split}）" if varied_tasks else SKILLS[skill]["prompt"]
+            completion = {"source_topic": TIMESTAMP_TOPICS["top_rgb"],
+                          "header_stamp_ns": 1_800_000_000_000_000_000 + 15 * 100_000_000 - 5_000_000}
             source = self.root / "sources" / episode_id
             (source / "bag").mkdir(parents=True)
             (source / "episode.json").write_text(json.dumps({
-                "schema_version": 1, "state": "saved", "episode_id": episode_id,
-                "task": SKILLS[skill]["prompt"],
+                "schema_version": 2, "state": "saved", "mode": "skill", "episode_id": episode_id,
+                "skill": skill, "outcome": "success", "task": task_text,
+                "frame_topics": [TIMESTAMP_TOPICS["top_rgb"]],
+                "annotations": [{"kind": "outcome", "value": "success"},
+                                {"kind": "skill_complete", "value": skill, **completion}],
                 "task_metadata": {"arm_mode": mode, "time_domain": "unix_ns",
-                                  "skill_id": skill,
+                                  "initial_conditions": {"perturbation_id": group_id},
                                   "action_space": "absolute_joint_position_7",
                                   "action_provenance": "human_demonstration",
                                   "calibration_version": "cal-v1", "normalization_version": "norm-v1"}}))
@@ -45,6 +52,8 @@ class AtomicSkillGateTest(unittest.TestCase):
             source_hash = episode_source_digest(source)
             episodes.append({"episode_id": episode_id, "split": split, "frames": 16,
                              "source": str(source), "source_sha256": source_hash,
+                             "skill_id": skill, "task_text": task_text, "group_id": group_id,
+                             "annotation_quality": {"completion_frame": completion},
                              "calibration_version": "cal-v1", "normalization_version": "norm-v1"})
             labels[episode_id] = {"skill_id": skill, "success": True, "verified": True,
                                   "atomic_episode": True, "action_provenance": "human_demonstration",
@@ -64,7 +73,7 @@ class AtomicSkillGateTest(unittest.TestCase):
                                                   else "image", "shape": shape}
                                  for name, shape in expected_features(mode).items()}}
             (root / "meta" / "info.json").write_text(json.dumps(info))
-            pq.write_table(pa.table({"task_index": [0], "task": [SKILLS[skill]["prompt"]]}),
+            pq.write_table(pa.table({"task_index": [0], "task": [task_text]}),
                            root / "meta" / "tasks.parquet")
             data = {"episode_index": [0] * 16, "frame_index": list(range(16)),
                     "timestamp": [i / 10 for i in range(16)], "task_index": [0] * 16,
@@ -84,7 +93,7 @@ class AtomicSkillGateTest(unittest.TestCase):
                                "frame_index": index, "header_timestamp_ns": header,
                                "source_can_stamps_ns": {}})
         manifest = {"format": "LeRobotDataset v3.0", "lerobot_version": "0.4.4",
-                    "arm_mode": mode, "input_format": "joint-state", "fps": 10,
+                    "purpose": "success_sft", "arm_mode": mode, "input_format": "joint-state", "fps": 10,
                     "action_space": "absolute_joint_position_7", "state_unit": STATE_UNIT,
                     "joint_names": [f"{arm}.{joint}" for arm in arms
                                     for joint in [*(f"joint{i}" for i in range(1, 7)), "gripper"]],
@@ -93,9 +102,11 @@ class AtomicSkillGateTest(unittest.TestCase):
         (dataset / "source_timestamps.jsonl").write_text(
             "".join(json.dumps(row) + "\n" for row in stamps))
         audit_path = self.root / "audit.json"
-        audit_path.write_text(json.dumps({"schema_version": "piper_real_data_audit_v1",
+        audit_path.write_text(json.dumps({"schema_version": "piper_real_data_audit_v2",
                                           "sources": [{"episode_id": row["episode_id"], "eligible": True,
                                                        "kind": "native_episode", "source": row["source"],
+                                                       "skill_id": skill, "task_text": row["task_text"],
+                                                       "group_id": row["group_id"],
                                                        "has_action_target": True, "has_feedback": True,
                                                        "has_rgb": True, "header_time_domain_declared": True}
                                                       for row in episodes]}))
@@ -120,6 +131,23 @@ class AtomicSkillGateTest(unittest.TestCase):
                 self.assertEqual(result["model"]["piper_action_dim"], 14 if "bimanual" in skill else 7)
                 self.assertEqual(result["status"], "data_gate_passed_launch_blocked")
                 self.assertTrue(result["launch_blockers"])
+
+    def test_v2_source_with_distinct_task_texts_reaches_gate(self):
+        files = self.fixture(varied_tasks=True)
+        result = self.check(files, "pick_banana")
+        self.assertEqual(result["model"]["task_texts"], ["抓取香蕉（test）", "抓取香蕉（train）"])
+        self.assertIsNone(result["model"]["prompt"])
+        source = self.root / "sources" / "pick_banana-test" / "episode.json"
+        meta = json.loads(source.read_text())
+        meta["annotations"][1]["value"] = "place_banana_in_box"
+        source.write_text(json.dumps(meta))
+        with self.assertRaisesRegex(ValueError, "摘要不匹配"):
+            self.check(files, "pick_banana")
+
+    def test_reject_perturbation_group_leak(self):
+        files = self.fixture(same_group=True)
+        with self.assertRaisesRegex(ValueError, "场景组跨越"):
+            self.check(files, "pick_banana")
 
     def test_reject_false_success_and_corrupt_action(self):
         files = self.fixture()
