@@ -49,7 +49,7 @@ def test_disabled_config_needs_no_ros_topics(tmp_path):
 
 def test_synthetic_recovery_bag_roundtrip(tmp_path):
     config = {"enabled": True, "output_dir": str(tmp_path / "recoveries"),
-              "pre_roll_sec": 0.5, "post_roll_sec": 1.0,
+              "pre_roll_sec": 0.55, "post_roll_sec": 1.0,
               "max_buffer_bytes": 100_000, "min_free_gb": 0,
               "topics": {IMAGE_TOPIC: "sensor_msgs/msg/Image", STATE_TOPIC: "std_msgs/msg/String"}}
     path = tmp_path / "config.json"
