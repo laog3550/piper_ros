@@ -107,7 +107,9 @@ def main():
             cameras = wait_for(online_cameras)
             assert [item["depth"]["max_meters"] for item in cameras] == [0.5, 0.5, 1.0]
             with urlopen(f"http://127.0.0.1:{port}/") as response:
-                assert b"<!doctype html>" in response.read()
+                page = response.read().decode()
+                assert "采集数据的训练用途" in page
+                assert "Qwen 规划与结果判断" in page and "π0.5（Pi）动作策略" in page
             for index in range(3):
                 for kind in ("color", "depth"):
                     with urlopen(f"http://127.0.0.1:{port}/camera/{kind}/{index}.jpg") as response:

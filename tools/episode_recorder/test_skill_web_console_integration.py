@@ -19,7 +19,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from piper_msgs.msg import PiperArmVector
 from rclpy.qos import qos_profile_sensor_data
-from skill_web_console import ARM_TOPICS, start_request, teleoperation_ready
+from skill_web_console import ARM_TOPICS, recorder_request, start_request, teleoperation_ready
 
 HERE = Path(__file__).parent
 TOPICS = [f"/camera_{name}/color/image_raw" for name in ("wrist_left", "wrist_right", "top")]
@@ -80,6 +80,20 @@ def publisher(node, stop):
 
 
 def main():
+    with tempfile.TemporaryDirectory(prefix="piper-socket-test-") as temp:
+        path = Path(temp) / "recorder.sock"
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(path))
+            server.listen(1)
+            def reply():
+                connection, _ = server.accept()
+                with connection:
+                    connection.recv(1024)
+                    connection.sendall(json.dumps({"ok": True, "result": {"text": "x" * 1_050_000}}).encode())
+            responder = threading.Thread(target=reply)
+            responder.start()
+            assert len(recorder_request(path, {"action": "status"})["result"]["text"]) == 1_050_000
+            responder.join(timeout=5)
     class FakePreview:
         def initial_joint_positions(self, required_arms):
             return {arm: {"position_rad": [0.1] * 6} for arm in required_arms}
@@ -128,7 +142,9 @@ def main():
             wait_for(lambda: all(item["online"] for item in http(port, "/api/status")["cameras"]))
             wait_for(lambda: all(item["online"] for item in http(port, "/api/status")["joints"].values()))
             with urlopen(f"http://127.0.0.1:{port}/") as response:
-                assert b"<!doctype html>" in response.read()
+                page = response.read().decode()
+                assert "采集数据的训练用途" in page
+                assert "π0.5（Pi）动作策略" in page and "Qwen 规划与结果判断" in page
             for index in range(3):
                 with urlopen(f"http://127.0.0.1:{port}/camera/{index}.jpg") as response:
                     assert response.read(3) == b"\xff\xd8\xff"

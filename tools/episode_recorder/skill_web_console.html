@@ -46,6 +46,11 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <p class="muted">录制由独立的 Episode 服务执行。关闭本页不会中断录制；Rerun 可独立查看详细数据。</p>
 <section><h2>三路相机</h2><p class="muted">画面由独立的 ROS 相机节点提供；无发布者时请先启动三路相机。</p><div id="cameras" class="grid"></div></section>
 <section><h2>机械臂实时关节角度</h2><p class="muted">读取左右从臂实测反馈，单位 rad。开始录制时自动保存当前六个关节角度与原始时间戳。</p><div id="joints" class="row"></div></section>
+<section><h2>采集数据的训练用途</h2><div class="tablewrap"><table><thead><tr><th>目标</th><th>本界面记录的数据</th><th>进入训练前还需要</th></tr></thead><tbody>
+<tr><td>π0.5（Pi）动作策略</td><td>单臂抓取或入盒的主臂目标、从臂反馈、顶部与对应腕部 RGB、任务文字、技能边界和人工结果。原始数据保存在 Episode 的 rosbag2 中。</td><td>有效夹爪映射与标定、Unix Header 时间对齐、成功片段审计、按扰动组切分、LeRobot 导出及独立训练核验。双臂翻盖可采集，但当前单臂 π0.5 训练入口不接收。</td></tr>
+<tr><td>Qwen 规划与结果判断</td><td>任务文字、技能顺序、结果与异常标注可作人工复核线索。</td><td>本界面不生成 Qwen 规划监督样本；须在 VLM 采集界面记录计划与技能上下文，提取并核验 RGB 帧及目标、状态变化，才可进入 Qwen 候选池。</td></tr>
+<tr><td>质量审计</td><td>深度图、相机信息、原始 CAN、恢复片段等按录制配置保存。</td><td>这些数据用于核对同步、标定和失败原因，不会因录制成功就自动成为任一模型的训练样本。</td></tr>
+</tbody></table></div></section>
 <section>
 <h2>录制操作</h2>
 <div id="current" class="muted">正在读取状态…</div>

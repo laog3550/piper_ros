@@ -40,7 +40,10 @@ def recorder_request(socket_path, request):
         client.settimeout(30)
         client.connect(str(socket_path))
         client.sendall(json.dumps(request, ensure_ascii=False).encode())
-        data = client.recv(1_000_000)
+        chunks = []
+        while chunk := client.recv(1_000_000):
+            chunks.append(chunk)
+        data = b"".join(chunks)
     if not data:
         raise OSError("录制服务未返回数据")
     result = json.loads(data)
@@ -194,6 +197,14 @@ class Console(QMainWindow):
         self.duration.setSuffix(" 秒（到时自动停止）")
         fields.addWidget(self.duration, 3, 1)
         fields.setColumnStretch(1, 1)
+
+        data_use = QLabel(
+            "数据用途：本窗口保存 RGB-D、按配置录制的机械臂/相机原始话题及任务结果，供回放和质量审计。"
+            "π0.5 动作训练需另用三技能界面采集主臂目标、从臂反馈与技能标注，并通过标定、对齐和 LeRobot 导出。"
+            "Qwen 规划训练需另用 VLM 界面采集计划、技能上下文和人工结果，再提取核验图像。"
+            "本窗口保存的 Episode 不会自动成为任一模型的训练样本。")
+        data_use.setWordWrap(True)
+        layout.addWidget(data_use)
 
         controls = QHBoxLayout()
         layout.addLayout(controls)

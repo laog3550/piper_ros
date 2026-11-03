@@ -207,7 +207,10 @@ def recorder_request(socket_path, request):
         client.settimeout(30)
         client.connect(str(socket_path))
         client.sendall(payload)
-        data = client.recv(1_000_000)
+        chunks = []
+        while chunk := client.recv(1_000_000):
+            chunks.append(chunk)
+        data = b"".join(chunks)
     if not data:
         raise OSError("录制服务未返回数据")
     return json.loads(data)

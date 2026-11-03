@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tempfile
@@ -52,6 +53,20 @@ def publish(node, stop):
 
 
 def main():
+    with tempfile.TemporaryDirectory(prefix="piper-desktop-socket-test-") as temp:
+        path = Path(temp) / "recorder.sock"
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(path))
+            server.listen(1)
+            def reply():
+                connection, _ = server.accept()
+                with connection:
+                    connection.recv(1024)
+                    connection.sendall(json.dumps({"ok": True, "result": {"text": "x" * 1_050_000}}).encode())
+            responder = threading.Thread(target=reply)
+            responder.start()
+            assert len(recorder_request(path, {"action": "status"})["text"]) == 1_050_000
+            responder.join(timeout=5)
     with (tempfile.TemporaryDirectory(prefix="piper-desktop-test-") as temp,
           tempfile.TemporaryDirectory(prefix="piper-save-test-", dir="/dev/shm") as target):
         target_dir = Path(target)

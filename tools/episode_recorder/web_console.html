@@ -41,6 +41,11 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <header><h1>数据采集控制台</h1><span id="state" class="badge">连接中</span></header>
 <p class="muted">录制由独立的 Episode 服务执行。关闭本页不会中断录制；Rerun 可独立查看详细数据。</p>
 <section><h2>三路相机</h2><div id="cameras" class="grid"></div></section>
+<section><h2>采集数据的训练用途</h2><div class="tablewrap"><table><thead><tr><th>目标</th><th>本界面记录的数据</th><th>进入训练前还需要</th></tr></thead><tbody>
+<tr><td>Qwen 规划与结果判断</td><td>人工填写的长任务计划、物体及位置 ID、技能目标与完成判据；技能 Episode 中的人工结果、失败原因和下一决策。导出的 VLM JSON 只含标注与 rosbag2 索引。</td><td>按 Header 从 bag 提取并核验 RGB 帧、目标身份和状态变化，人工审查真实轨迹后才可作为训练候选；导出 JSON 不能直接用于 Qwen LoRA。</td></tr>
+<tr><td>π0.5（Pi）动作策略</td><td>完整任务或 VLM 技能 Episode 的相机、动作与反馈话题仅按配置原样录制。</td><td>本界面不填写 π 所需执行臂、动作来源和标定版本，不能直接导出动作训练集；请用三技能采集界面和独立审计、LeRobot 转换流程。</td></tr>
+<tr><td>质量审计</td><td>三路 RGB-D、原始消息 Header、深度预览与人工结果。</td><td>深度和失败片段用于分析与审核，不会自动成为任一模型的训练样本。</td></tr>
+</tbody></table></div></section>
 <section>
 <h2>录制操作</h2>
 <div id="current" class="muted">正在读取状态…</div>
