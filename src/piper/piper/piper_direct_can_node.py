@@ -16,13 +16,17 @@ from piper.piper_direct_can_decode import C_PiperParserV2, FRAME_IDS, decode_fra
 class PiperDirectCanNode(Node):
     def __init__(self):
         super().__init__('piper_direct_can')
+        side = self.declare_parameter('side', 'all').value
+        if side not in ('all', 'left', 'right'):
+            raise ValueError('side must be all, left, or right')
+        channels = ('can_left', 'can_right') if side == 'all' else ('can_' + side,)
         self._stop = threading.Event()
         self._frame_publishers = {}
-        for channel in ('can_left', 'can_right'):
-            side = channel[4:]
+        for channel in channels:
+            channel_side = channel[4:]
             self._frame_publishers[channel] = {
                 kind: self.create_publisher(
-                    PiperDirectCanFrame, '/piper_direct/{}/{}'.format(side, kind), 1000
+                    PiperDirectCanFrame, '/piper_direct/{}/{}'.format(channel_side, kind), 1000
                 ) for kind in ('master_target', 'slave_feedback')
             }
         self._threads = [threading.Thread(target=self._listen, args=(channel,), daemon=True)

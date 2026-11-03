@@ -86,6 +86,9 @@ class DirectCanDecodeTest(unittest.TestCase):
             def __init__(self, _name):
                 self._publishers = []
 
+            def declare_parameter(self, _name, default):
+                return types.SimpleNamespace(value=default)
+
             def create_publisher(self, _message_type, topic, _queue_size):
                 publisher = Publisher(topic)
                 self._publishers.append(publisher)

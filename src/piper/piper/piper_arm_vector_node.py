@@ -23,12 +23,16 @@ class PiperArmVectorNode(Node):
         max_age_ms = self.declare_parameter('max_age_ms', 100.0).value
         max_skew_ms = self.declare_parameter('max_skew_ms', 30.0).value
         publish_hz = self.declare_parameter('publish_hz', 50.0).value
+        side = self.declare_parameter('side', 'all').value
         self._gripper_verified = self.declare_parameter(
             'gripper_mapping_verified', False).value
         if max_age_ms <= 0 or max_skew_ms < 0 or publish_hz <= 0:
             raise ValueError('invalid assembler timing parameters')
+        if side not in ('all', 'left', 'right'):
+            raise ValueError('side must be all, left, or right')
         self._streams = []
-        for side in ('left', 'right'):
+        sides = ('left', 'right') if side == 'all' else (side,)
+        for side in sides:
             for kind in ('master_target', 'slave_feedback'):
                 assembler = ArmVectorAssembler(
                     side, kind, int(max_age_ms * 1e6), int(max_skew_ms * 1e6))
