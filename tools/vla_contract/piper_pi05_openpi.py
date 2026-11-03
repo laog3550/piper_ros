@@ -17,6 +17,9 @@ from piper_pi05_adapter import ACTION_HORIZON, PiperInputs, PiperOutputs
 OPENPI_COMMIT = "215abfb217dbac7d5f1273282331b9b1866c0479"
 CONFIG_NAME = "pi05_piper_absolute_7"
 ASSET_ID = "local/piper_train"
+SINGLE_ARM_SKILLS = {"pick_banana": "pick", "place_banana_in_box": "place"}
+TRAIN_LAUNCH_BLOCKER = "固定 openpi commit 的 LeRobot v2.1 读取器尚未完成 v3.0 兼容验收"
+OPENPI_V3_COMPATIBLE = False
 
 
 def digest(path):
@@ -77,6 +80,7 @@ def check_dataset(dataset, evidence, audit_report):
     proof = json.loads(evidence.read_text(encoding="utf-8"))
     audit = json.loads(audit_report.read_text(encoding="utf-8"))
     if (manifest.get("format") != "LeRobotDataset v3.0"
+            or manifest.get("purpose") != "success_sft"
             or manifest.get("arm_mode") not in ("LEFT", "RIGHT")
             or manifest.get("action_space") != "absolute_joint_position_7"
             or manifest.get("joint_names") != [f"{manifest.get('arm_mode', '').lower()}.joint{i}" for i in range(1, 7)]
@@ -97,24 +101,62 @@ def check_dataset(dataset, evidence, audit_report):
     ids = {row.get("episode_id") for row in episodes}
     if None in ids or len(ids) != len(episodes):
         raise ValueError("Episode ID 缺失或重复")
-    if (audit.get("schema_version") != "piper_real_data_audit_v1"
+    audited = {row.get("episode_id"): row for row in audit.get("sources", [])
+               if row.get("eligible") is True}
+    if (audit.get("schema_version") != "piper_real_data_audit_v2"
+            or audit.get("split_ready") is not True
             or audit.get("eligible_episode_count", 0) < len(ids)
-            or ids - {row.get("episode_id") for row in audit.get("sources", []) if row.get("eligible") is True}):
+            or ids - set(audited)):
         raise ValueError("独立来源审计未核准所有训练 Episode")
     labels = proof.get("episode_skills")
     if not isinstance(labels, dict) or set(labels) != ids or set(labels.values()) - {"pick", "place"}:
         raise ValueError("核验证据必须逐 Episode 标注 pick/place")
     counts = {(split, skill): 0 for split in ("train", "test") for skill in ("pick", "place")}
+    groups = {"train": set(), "test": set()}
     for row in episodes:
         split = row.get("split")
         if split not in ("train", "test") or not isinstance(row.get("frames"), int) or row["frames"] < ACTION_HORIZON:
             raise ValueError("Episode 划分或连续帧数不满足 16 步训练")
+        skill, group_id, task_text = row.get("skill_id"), row.get("group_id"), row.get("task_text")
+        audited_row = audited[row["episode_id"]]
+        if (skill not in SINGLE_ARM_SKILLS or labels[row["episode_id"]] != SINGLE_ARM_SKILLS[skill]
+                or not isinstance(group_id, str) or not group_id.strip()
+                or not isinstance(task_text, str) or not task_text.strip()
+                or audited_row.get("kind") != "native_episode"
+                or audited_row.get("source") != row.get("source")
+                or audited_row.get("skill_id") != skill
+                or audited_row.get("group_id") != group_id
+                or audited_row.get("task_text") != task_text
+                or audited_row.get("suggested_split") != split):
+            raise ValueError("Episode 技能、任务文本、场景组或审计切分不一致")
         source = Path(row.get("source", ""))
         if not source.is_absolute() or row.get("source_sha256") != episode_source_digest(source):
             raise ValueError("Episode 来源文件摘要不匹配")
+        meta = json.loads((source / "episode.json").read_text(encoding="utf-8"))
+        fields = meta.get("task_metadata")
+        initial = fields.get("initial_conditions") if isinstance(fields, dict) else None
+        if (meta.get("schema_version") != 2 or meta.get("mode") != "skill"
+                or meta.get("state") != "saved" or meta.get("episode_id") != row["episode_id"]
+                or meta.get("outcome") != "success" or meta.get("skill") != skill
+                or not isinstance(meta.get("task"), str)
+                or meta["task"].strip() != task_text
+                or not isinstance(fields, dict)
+                or fields.get("arm_mode") != manifest["arm_mode"]
+                or fields.get("time_domain") != "unix_ns"
+                or fields.get("action_space") != "absolute_joint_position_7"
+                or fields.get("action_provenance") != "human_demonstration"
+                or fields.get("calibration_version") != row.get("calibration_version")
+                or fields.get("normalization_version") != row.get("normalization_version")
+                or not isinstance(initial, dict)
+                or not isinstance(initial.get("perturbation_id"), str)
+                or initial["perturbation_id"].strip() != group_id):
+            raise ValueError("Episode v2 原子技能来源与转换清单不一致")
         if not row.get("calibration_version") or not row.get("normalization_version"):
             raise ValueError("Episode 缺标定或归一化版本")
+        groups[split].add(group_id)
         counts[split, labels[row["episode_id"]]] += 1
+    if groups["train"] & groups["test"]:
+        raise ValueError("同一 perturbation_id 场景组跨越训练/测试划分")
     for field in ("calibration_version", "normalization_version"):
         versions = {row[field] for row in episodes}
         if len(versions) != 1 or proof.get(field) != next(iter(versions)):
@@ -208,9 +250,12 @@ def main():
         evidence = check_dataset(args.dataset, args.evidence, args.audit_report)
         revision = check_openpi(args.openpi_root, args.base_checkpoint)
         if not args.train:
-            print(json.dumps({"status": "ready_for_training", "openpi_commit": revision,
+            print(json.dumps({"status": "data_gate_passed_launch_blocked", "openpi_commit": revision,
+                              "launch_blockers": [TRAIN_LAUNCH_BLOCKER],
                               **evidence}, ensure_ascii=False, indent=2))
             return 0
+        if args.train and not OPENPI_V3_COMPATIBLE:
+            raise ValueError("训练启动已拒绝：" + TRAIN_LAUNCH_BLOCKER)
         verify_base_checkpoint(args.base_checkpoint)
         if args.work_dir.exists() and any(args.work_dir.iterdir()):
             raise ValueError("训练目录必须为空，防止混入旧 checkpoint")

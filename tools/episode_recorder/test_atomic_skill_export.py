@@ -52,13 +52,18 @@ def args(source, output, arm_mode="LEFT", input_format="joint-state", skills=Non
                            arm_mode=arm_mode, input_format=input_format, fps=10,
                            max_age_ms=30, jitter_ms=2, max_can_skew_ms=30,
                            max_camera_gap_ms=100, max_camera_skew_ms=30,
+                           max_source_skew_ms=30,
                            test_percent=50, success_sft=True, skills=skills)
+
+
+def checked_audit(path, **kwargs):
+    return audit.audit_native(path, max_source_skew_ms=30, **kwargs)
 
 
 def test_v2_audit_requires_resolved_success_and_complete_camera_frame(tmp_path):
     good = fixture(tmp_path, "episode_000001")
     annotate(good)
-    row = audit.audit_native(good, max_age_ms=30)
+    row = checked_audit(good, max_age_ms=30)
     assert row["eligible"] and row["eligible_frame_count"] == 2
     assert row["annotation_coverage"] == 1.0
     assert row["skill_id"] == "pick_banana"
@@ -67,28 +72,28 @@ def test_v2_audit_requires_resolved_success_and_complete_camera_frame(tmp_path):
 
     unresolved = fixture(tmp_path, "episode_000002")
     annotate(unresolved, resolved=False)
-    row = audit.audit_native(unresolved, max_age_ms=30)
+    row = checked_audit(unresolved, max_age_ms=30)
     assert not row["eligible"] and "完成帧" in " ".join(row["reasons"])
 
     failure = fixture(tmp_path, "episode_000003")
     annotate(failure, outcome="failure")
-    row = audit.audit_native(failure, max_age_ms=30)
+    row = checked_audit(failure, max_age_ms=30)
     assert not row["eligible"] and row["eligible_frame_count"] == 0
 
     absent = fixture(tmp_path, "episode_000004")
-    row = audit.audit_native(absent, max_age_ms=30)
+    row = checked_audit(absent, max_age_ms=30)
     assert not row["eligible"] and "v2" in " ".join(row["reasons"])
 
     task_episode = fixture(tmp_path, "episode_000005")
     meta = annotate(task_episode)
     meta["mode"] = "task"
     (task_episode / "episode.json").write_text(json.dumps(meta), encoding="utf-8")
-    row = audit.audit_native(task_episode, max_age_ms=30)
+    row = checked_audit(task_episode, max_age_ms=30)
     assert not row["eligible"] and "task 模式" in " ".join(row["reasons"])
 
     missing_group = fixture(tmp_path, "episode_000006")
     annotate(missing_group, group_id=None)
-    row = audit.audit_native(missing_group, max_age_ms=30)
+    row = checked_audit(missing_group, max_age_ms=30)
     assert not row["eligible"] and "perturbation_id" in " ".join(row["reasons"])
 
 
@@ -97,25 +102,37 @@ def test_v2_audit_rejects_unmapped_completion_and_camera_gap(tmp_path):
     meta = annotate(episode)
     meta["annotations"][0]["header_stamp_ns"] += 1
     (episode / "episode.json").write_text(json.dumps(meta), encoding="utf-8")
-    row = audit.audit_native(episode, max_age_ms=30)
+    row = checked_audit(episode, max_age_ms=30)
     assert not row["eligible"] and "未在该 Episode" in " ".join(row["reasons"])
 
     undeclared = fixture(tmp_path, "episode_000004")
     meta = annotate(undeclared)
     meta["frame_topics"] = []
     (undeclared / "episode.json").write_text(json.dumps(meta), encoding="utf-8")
-    row = audit.audit_native(undeclared, max_age_ms=30)
+    row = checked_audit(undeclared, max_age_ms=30)
     assert not row["eligible"] and "完成帧" in " ".join(row["reasons"])
 
     episode2 = fixture(tmp_path, "episode_000002")
     annotate(episode2)
-    row = audit.audit_native(episode2, max_age_ms=30, max_camera_gap_ms=50)
+    row = checked_audit(episode2, max_age_ms=30, max_camera_gap_ms=50)
     assert not row["eligible"] and "连续性阈值" in " ".join(row["reasons"])
 
     episode3 = fixture(tmp_path, "episode_000003", wrist_lag_ns=50_000_000)
     annotate(episode3)
-    row = audit.audit_native(episode3, max_age_ms=100, max_camera_skew_ms=30)
+    row = checked_audit(episode3, max_age_ms=100, max_camera_skew_ms=30)
     assert not row["eligible"] and "同步阈值" in " ".join(row["reasons"])
+
+
+def test_state_camera_source_skew_requires_explicit_bound(tmp_path):
+    episode = fixture(tmp_path, "episode_000001", state_lag_ns=50_000_000)
+    annotate(episode)
+    no_bound = audit.audit_native(episode, max_age_ms=100)
+    assert not no_bound["eligible"] and "--max-source-skew-ms" in " ".join(no_bound["reasons"])
+    row = checked_audit(episode, max_age_ms=100)
+    assert not row["eligible"] and "总体时间差" in " ".join(row["reasons"])
+    meta, _ = exporter.read_episode(episode, ["left"], 10, 100_000_000, 2_000_000)
+    assert meta["_quality"]["max_selected_camera_skew_ns"] == 0
+    assert meta["_quality"]["max_selected_source_skew_ns"] == 50_000_000
 
 
 def test_bimanual_audit_rejects_invalid_action_state(tmp_path):
@@ -135,7 +152,7 @@ def test_bimanual_audit_rejects_invalid_action_state(tmp_path):
                              {"kind": "outcome", "value": "success",
                               "recorded_at_unix_ns": recorded + 1}])
     path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-    row = audit.audit_native(episode, max_age_ms=30)
+    row = checked_audit(episode, max_age_ms=30)
     assert not row["eligible"] and "夹爪映射未核实" in " ".join(row["reasons"])
 
 
@@ -146,7 +163,7 @@ def test_completion_can_resolve_declared_depth_header(tmp_path):
     meta["frame_topics"] = [exporter.CAMERAS["top_rgb"], depth]
     meta["annotations"][0]["source_topic"] = depth
     (episode / "episode.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-    row = audit.audit_native(episode, max_age_ms=30)
+    row = checked_audit(episode, max_age_ms=30)
     assert row["eligible"] and row["quality"]["completion_frame"]["source_topic"] == depth
 
 
@@ -158,7 +175,7 @@ def test_audit_cli_splits_complete_episodes(tmp_path):
     report = tmp_path / "audit.json"
     subprocess.run([sys.executable, str(Path(audit.__file__)), str(source),
                     "--episode-root", str(source), "--output", str(report),
-                    "--max-age-ms", "30"], check=True)
+                    "--max-age-ms", "30", "--max-source-skew-ms", "30"], check=True)
     data = json.loads(report.read_text(encoding="utf-8"))
     assert data["source_count"] == data["eligible_episode_count"] == 2
     assert data["train_episode_count"] == data["test_episode_count"] == 1
@@ -176,7 +193,8 @@ def test_audit_and_export_keep_perturbation_group_together(tmp_path):
     report = tmp_path / "audit.json"
     subprocess.run([sys.executable, str(Path(audit.__file__)), str(source),
                     "--episode-root", str(source), "--output", str(report),
-                    "--max-age-ms", "30", "--test-percent", "50"], check=True)
+                    "--max-age-ms", "30", "--max-source-skew-ms", "30",
+                    "--test-percent", "50"], check=True)
     data = json.loads(report.read_text(encoding="utf-8"))
     assert data["split_ready"]
     assert len({row["suggested_split"] for row in data["sources"]
@@ -198,7 +216,7 @@ def test_success_sft_requires_two_distinct_groups(tmp_path):
     report = tmp_path / "audit.json"
     subprocess.run([sys.executable, str(Path(audit.__file__)), str(source),
                     "--episode-root", str(source), "--output", str(report),
-                    "--max-age-ms", "30"], check=True)
+                    "--max-age-ms", "30", "--max-source-skew-ms", "30"], check=True)
     data = json.loads(report.read_text(encoding="utf-8"))
     assert not data["split_ready"] and "两个不同" in data["split_blocker"]
     assert data["train_episode_count"] == data["test_episode_count"] == 0
@@ -256,7 +274,7 @@ def test_v2_export_reaches_atomic_gate_with_external_labels(tmp_path):
     report = tmp_path / "audit.json"
     subprocess.run([sys.executable, str(Path(audit.__file__)), str(source),
                     "--episode-root", str(source), "--output", str(report),
-                    "--max-age-ms", "30"], check=True)
+                    "--max-age-ms", "30", "--max-source-skew-ms", "30"], check=True)
     audited = json.loads(report.read_text(encoding="utf-8"))
     assert audited["eligible_episode_count"] == 2
 

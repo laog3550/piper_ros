@@ -223,6 +223,9 @@ def check_source_timestamps(path, episodes, mode, input_format, max_sync_ns, max
                     f"{row['episode_id']}: 左右臂时间不同步")
             require(all(0 <= reference - stamps[key] <= max_age_ns for key in topics + states),
                     f"{row['episode_id']}: RGB 或状态超窗")
+            sources = [stamps[key] for key in topics + states + actions]
+            require(max(sources) - min(sources) <= max_sync_ns,
+                    f"{row['episode_id']}: RGB、状态与动作 Header 总体不同步")
             if input_format == "can-vector":
                 sources = item.get("source_can_stamps_ns", {})
                 require(set(states + actions) <= set(sources)
@@ -271,7 +274,8 @@ def inspect(dataset, annotations_path, audit_path, skill, max_sync_ns, max_age_n
     require(isinstance(labels, dict) and set(labels) == set(ids), "必须逐 Episode 提供核验标注")
     audit_rows = audit.get("sources", [])
     audited = {row.get("episode_id"): row for row in audit_rows if row.get("eligible") is True}
-    require(audit.get("schema_version") == "piper_real_data_audit_v2" and set(audited) >= set(ids),
+    require(audit.get("schema_version") == "piper_real_data_audit_v2"
+            and audit.get("split_ready") is True and set(audited) >= set(ids),
             "独立来源审计未批准所有真实 Episode")
     counts = {"train": 0, "test": 0}
     groups = {"train": set(), "test": set()}
@@ -288,11 +292,12 @@ def inspect(dataset, annotations_path, audit_path, skill, max_sync_ns, max_age_n
                 and audit_row.get("skill_id") == skill
                 and audit_row.get("group_id") == row.get("group_id")
                 and audit_row.get("task_text") == row.get("task_text")
+                and audit_row.get("suggested_split") == split
                 and audit_row.get("has_action_target") is True
                 and audit_row.get("has_feedback") is True
                 and audit_row.get("has_rgb") is True
                 and audit_row.get("header_time_domain_declared") is True,
-                f"{episode_id}: 独立审计缺真实动作、反馈、RGB 或来源关联")
+                f"{episode_id}: 独立审计来源、技能、场景组、任务文本、切分或传感器条件不一致")
         check_source(row, labels[episode_id], mode, skill)
         if mode == "BIMANUAL":
             role_maps.add(tuple(labels[episode_id]["roles"][arm] for arm in ("left", "right")))

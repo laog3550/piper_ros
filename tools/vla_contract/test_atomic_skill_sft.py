@@ -103,10 +103,12 @@ class AtomicSkillGateTest(unittest.TestCase):
             "".join(json.dumps(row) + "\n" for row in stamps))
         audit_path = self.root / "audit.json"
         audit_path.write_text(json.dumps({"schema_version": "piper_real_data_audit_v2",
+                                          "split_ready": True,
                                           "sources": [{"episode_id": row["episode_id"], "eligible": True,
                                                        "kind": "native_episode", "source": row["source"],
                                                        "skill_id": skill, "task_text": row["task_text"],
                                                        "group_id": row["group_id"],
+                                                       "suggested_split": row["split"],
                                                        "has_action_target": True, "has_feedback": True,
                                                        "has_rgb": True, "header_time_domain_declared": True}
                                                       for row in episodes]}))
@@ -149,6 +151,17 @@ class AtomicSkillGateTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "场景组跨越"):
             self.check(files, "pick_banana")
 
+    def test_reject_audit_split_disagreement(self):
+        dataset, annotations_path, audit_path = self.fixture()
+        audit = json.loads(audit_path.read_text())
+        audit["sources"][0]["suggested_split"] = "test"
+        audit_path.write_text(json.dumps(audit))
+        annotations = json.loads(annotations_path.read_text())
+        annotations["source_audit_sha256"] = digest(audit_path)
+        annotations_path.write_text(json.dumps(annotations))
+        with self.assertRaisesRegex(ValueError, "审计来源"):
+            self.check((dataset, annotations_path, audit_path), "pick_banana")
+
     def test_reject_false_success_and_corrupt_action(self):
         files = self.fixture()
         annotations = json.loads(files[1].read_text())
@@ -178,6 +191,15 @@ class AtomicSkillGateTest(unittest.TestCase):
         manifest_path.write_text(json.dumps(manifest))
         with self.assertRaisesRegex(ValueError, "0 个合格"):
             self.check(files, "close_hinged_lid_bimanual")
+
+    def test_reject_state_camera_skew_within_age_window(self):
+        files = self.fixture()
+        path = files[0] / "source_timestamps.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        rows[0]["header_timestamp_ns"]["/joint_left"] -= 12_000_000
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        with self.assertRaisesRegex(ValueError, "总体不同步"):
+            self.check(files, "pick_banana")
 
     def test_reject_unverified_calibration_and_wrong_task(self):
         files = self.fixture("place_banana_in_box")

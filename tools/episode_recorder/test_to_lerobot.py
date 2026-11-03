@@ -13,7 +13,7 @@ import to_lerobot as converter
 
 
 def fixture(root, name, *, missing_action=False, bad_dimension=False, bad_stamp=False,
-            arm_mode="LEFT", camera_only=False, wrist_lag_ns=0, frame_count=2):
+            arm_mode="LEFT", camera_only=False, wrist_lag_ns=0, state_lag_ns=0, frame_count=2):
     episode = root / name
     bag = episode / "bag"
     episode.mkdir()
@@ -46,6 +46,8 @@ def fixture(root, name, *, missing_action=False, bad_dimension=False, bad_stamp=
                 actual = timestamp + (10_000_000 if bad_stamp and index == 1 and topic == converter.ACTIONS[arms[0]] else 0)
                 if topic in (converter.CAMERAS["left_wrist_rgb"], converter.CAMERAS["right_wrist_rgb"]):
                     actual -= wrist_lag_ns
+                if topic in converter.STATES.values():
+                    actual -= state_lag_ns
                 header = Header(Time(actual // 1_000_000_000, actual % 1_000_000_000), "synthetic_frame")
                 if topic in converter.CAMERAS.values():
                     message = Image(header, 480, 640, "rgb8", 0, 640 * 3,

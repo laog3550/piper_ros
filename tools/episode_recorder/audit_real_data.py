@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""只读盘点真实录制并给出训练契约拒绝原因。运行：python3 audit_real_data.py DATA_ROOT [--episode-root PATH] [--output PATH]。"""
+"""只读盘点真实录制并给出训练契约拒绝原因。成功 SFT 审计须显式传入 --max-source-skew-ms；运行：python3 audit_real_data.py DATA_ROOT [--episode-root PATH] [--output PATH]。"""
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import yaml
@@ -65,7 +66,7 @@ def audit_legacy(metadata_path):
 
 
 def audit_native(episode_path, fps=10, max_age_ms=100, max_can_skew_ms=30,
-                 max_camera_gap_ms=100, max_camera_skew_ms=30):
+                 max_camera_gap_ms=100, max_camera_skew_ms=30, max_source_skew_ms=None):
     meta = json.loads((episode_path / "episode.json").read_text(encoding="utf-8"))
     info, counts = bag_info(episode_path / "bag" / "metadata.yaml")
     fields = meta.get("task_metadata") or {}
@@ -96,6 +97,8 @@ def audit_native(episode_path, fps=10, max_age_ms=100, max_can_skew_ms=30,
             reasons.append(f"缺少 {arm} 腕视 RGB")
     label, label_reasons = sft_label(meta)
     reasons.extend(label_reasons)
+    if label is not None and max_source_skew_ms is None:
+        reasons.append("未指定 RGB、状态与示教目标 Header 的总体同步阈值 --max-source-skew-ms")
     aligned_frames = annotated_frames = 0
     quality = None
     input_format = None
@@ -113,6 +116,8 @@ def audit_native(episode_path, fps=10, max_age_ms=100, max_can_skew_ms=30,
                     input_format=input_format, max_can_skew_ns=int(max_can_skew_ms * 1e6),
                     max_camera_gap_ns=int(max_camera_gap_ms * 1e6),
                     max_camera_skew_ns=int(max_camera_skew_ms * 1e6),
+                    max_source_skew_ns=(int(max_source_skew_ms * 1e6)
+                                        if max_source_skew_ms is not None else None),
                     extra_frame_topics=(label["completion_frame"]["source_topic"],) if (
                         label and label["completion_frame"]["source_topic"] not in CAMERAS.values()) else ())
                 aligned_frames = len(frames)
@@ -154,18 +159,24 @@ def main():
     parser.add_argument("--max-can-skew-ms", type=float, default=30)
     parser.add_argument("--max-camera-gap-ms", type=float, default=100)
     parser.add_argument("--max-camera-skew-ms", type=float, default=30)
+    parser.add_argument("--max-source-skew-ms", type=float,
+                        help="成功 SFT 审计必填；RGB、状态、示教目标 Header 的最大总体跨度")
     parser.add_argument("--test-percent", type=int, default=20)
     args = parser.parse_args()
     if (args.fps <= 0 or not 0 < args.test_percent < 100
             or min(args.max_age_ms, args.max_can_skew_ms,
                    args.max_camera_gap_ms, args.max_camera_skew_ms) < 0):
         parser.error("帧率或时间阈值无效")
+    if args.max_source_skew_ms is not None and (not math.isfinite(args.max_source_skew_ms)
+                                                or args.max_source_skew_ms <= 0):
+        parser.error("--max-source-skew-ms 必须为正数")
     rows = [audit_legacy(path) for path in sorted(args.data_root.rglob("metadata.yaml"))
             if not (path.parent / "episode.json").exists()
             and not (path.parent.parent / "episode.json").exists()]
     if args.episode_root:
         rows += [audit_native(path.parent, args.fps, args.max_age_ms, args.max_can_skew_ms,
-                              args.max_camera_gap_ms, args.max_camera_skew_ms)
+                              args.max_camera_gap_ms, args.max_camera_skew_ms,
+                              args.max_source_skew_ms)
                  for path in sorted(args.episode_root.rglob("episode.json"))
                  if (path.parent / "bag" / "metadata.yaml").exists()]
     eligible = [row for row in rows if row["eligible"]]

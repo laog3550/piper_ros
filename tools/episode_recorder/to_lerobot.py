@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把已保存的 rosbag2 Episode 转为本地 LeRobot v3。运行：python to_lerobot.py INPUT OUTPUT --repo-id local/piper --arm-mode LEFT --input-format can-vector --fps 10 --max-age-ms 100 --success-sft。"""
+"""把已保存的 rosbag2 Episode 转为本地 LeRobot v3。成功 SFT 示例：python to_lerobot.py INPUT OUTPUT --repo-id local/piper --arm-mode LEFT --input-format can-vector --fps 10 --max-age-ms 100 --max-source-skew-ms 30 --success-sft；阈值须按现场证据指定。"""
 
 import argparse
 from bisect import bisect_right
@@ -107,7 +107,7 @@ def image(message, topic, materialize, spool_dir=None):
 def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spool_dir=None,
                  input_format="joint-state", max_can_skew_ns=30_000_000,
                  max_camera_gap_ns=100_000_000, max_camera_skew_ns=30_000_000,
-                 extra_frame_topics=()):
+                 extra_frame_topics=(), max_source_skew_ns=None):
     metadata_path = path / "episode.json"
     if not metadata_path.is_file() or not (path / "bag" / "metadata.yaml").is_file():
         fail(f"{path}: 缺少 episode.json 或 bag/metadata.yaml")
@@ -217,6 +217,7 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
         return streams[topic][index]
     frames = []
     max_selected_camera_skew = 0
+    max_selected_source_skew = 0
     for index, timestamp in enumerate(action_times):
         source_stamps, can_sources, actions = {}, {}, []
         for arm in arms:
@@ -249,9 +250,16 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
         max_selected_camera_skew = max(max_selected_camera_skew, skew)
         if skew > max_camera_skew_ns:
             fail(f"{path}: RGB 之间的 Header 时间差 {skew} ns 超过同步阈值")
+        source_times = [source_stamps[topic] for topic in (*camera_topics,
+                        *(state_topics[arm] for arm in arms), *(action_topics[arm] for arm in arms))]
+        source_skew = max(source_times) - min(source_times)
+        max_selected_source_skew = max(max_selected_source_skew, source_skew)
+        if max_source_skew_ns is not None and source_skew > max_source_skew_ns:
+            fail(f"{path}: RGB、状态与示教目标 Header 总体时间差 {source_skew} ns 超过同步阈值")
         frames.append(frame)
     meta["_quality"] = {"camera_max_gap_ns": camera_gaps,
                         "max_selected_camera_skew_ns": max_selected_camera_skew,
+                        "max_selected_source_skew_ns": max_selected_source_skew,
                         "aligned_frame_count": len(frames)}
     meta["_camera_header_stamps"] = {topic: [item[0] for item in streams[topic]]
                                       for topic in (*camera_topics, *extra_frame_topics)}
@@ -382,6 +390,9 @@ def convert(args):
     prepared = []
     excluded = []
     success_sft = getattr(args, "success_sft", False)
+    source_skew_ms = getattr(args, "max_source_skew_ms", None)
+    if success_sft and source_skew_ms is None:
+        fail("成功 SFT 必须显式指定 --max-source-skew-ms")
     skills = set(getattr(args, "skills", None) or ())
     ids = set()
     for path in paths:
@@ -407,6 +418,7 @@ def convert(args):
                                         max_can_skew_ns=int(args.max_can_skew_ms * 1e6),
                                         max_camera_gap_ns=int(getattr(args, "max_camera_gap_ms", 100) * 1e6),
                                         max_camera_skew_ns=int(getattr(args, "max_camera_skew_ms", 30) * 1e6),
+                                        max_source_skew_ns=int(source_skew_ms * 1e6) if success_sft else None,
                                         extra_frame_topics=extra_frames)
             annotation_stats = None
             if success_sft:
@@ -435,6 +447,7 @@ def convert(args):
     args.output_dir.mkdir(parents=True)
     manifest = {"format": "LeRobotDataset v3.0", "lerobot_version": "0.4.4", "fps": args.fps,
                 "purpose": "success_sft" if success_sft else "legacy_unlabeled",
+                "max_source_skew_ms": source_skew_ms if success_sft else None,
                 "arm_mode": args.arm_mode, "input_format": args.input_format,
                 "joint_names": [f"{arm}.{joint}" for arm in arms for joint in JOINTS],
                 "state_unit": "rad (joint1..6), m (gripper)", "action_space": "absolute_joint_position_7",
@@ -459,6 +472,7 @@ def convert(args):
                                          max_can_skew_ns=int(args.max_can_skew_ms * 1e6),
                                          max_camera_gap_ns=int(getattr(args, "max_camera_gap_ms", 100) * 1e6),
                                          max_camera_skew_ns=int(getattr(args, "max_camera_skew_ms", 30) * 1e6),
+                                         max_source_skew_ns=int(source_skew_ms * 1e6) if success_sft else None,
                                          extra_frame_topics=(label["completion_frame"]["source_topic"],) if (
                                              label and label["completion_frame"]["source_topic"] not in CAMERAS.values()) else ())
                 if success_sft:
@@ -517,6 +531,8 @@ def main():
     parser.add_argument("--max-can-skew-ms", type=float, default=30)
     parser.add_argument("--max-camera-gap-ms", type=float, default=100)
     parser.add_argument("--max-camera-skew-ms", type=float, default=30)
+    parser.add_argument("--max-source-skew-ms", type=float,
+                        help="成功 SFT 必填；每帧 RGB、状态、示教目标 Header 的最大总体跨度")
     parser.add_argument("--success-sft", action="store_true", help="仅导出 v2 已核验成功的原子技能 Episode")
     parser.add_argument("--skills", nargs="+", choices=SKILLS, help="仅导出所列原子技能")
     parser.add_argument("--test-percent", type=int, default=20)
@@ -526,8 +542,12 @@ def main():
             or not math.isfinite(args.max_can_skew_ms) or args.max_can_skew_ms < 0
             or not math.isfinite(args.max_camera_gap_ms) or args.max_camera_gap_ms <= 0
             or not math.isfinite(args.max_camera_skew_ms) or args.max_camera_skew_ms < 0
+            or (args.max_source_skew_ms is not None
+                and (not math.isfinite(args.max_source_skew_ms) or args.max_source_skew_ms <= 0))
             or not 0 < args.test_percent < 100):
         parser.error("fps 或时间阈值、test-percent 无效")
+    if args.success_sft and args.max_source_skew_ms is None:
+        parser.error("--success-sft 必须显式指定 --max-source-skew-ms")
     if args.skills and not args.success_sft:
         parser.error("--skills 只能与 --success-sft 同用")
     try:
