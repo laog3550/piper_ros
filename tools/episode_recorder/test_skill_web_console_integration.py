@@ -19,7 +19,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from piper_msgs.msg import PiperArmVector
 from rclpy.qos import qos_profile_sensor_data
-from skill_web_console import ARM_TOPICS, recorder_request, start_request, teleoperation_ready
+from skill_web_console import ARM_TOPICS, Preview, recorder_request, start_request, teleoperation_ready
 
 HERE = Path(__file__).parent
 TOPICS = [f"/camera_{name}/color/image_raw" for name in ("wrist_left", "wrist_right", "top")]
@@ -80,6 +80,21 @@ def publisher(node, stop):
 
 
 def main():
+    preview = object.__new__(Preview)
+    preview.lock = threading.Lock()
+    preview.frames, preview.errors, preview.times = [None] * 3, [None] * 3, [0.0] * 3
+    preview.header_stamps, preview.source_times = [None] * 3, [0.0] * 3
+    preview.topics, preview.frame_topics = TOPICS, set(TOPICS)
+    frame = Image()
+    frame.width, frame.height, frame.step, frame.encoding = 2, 2, 6, "rgb8"
+    frame.data = bytes([10, 20, 30] * 4)
+    frame.header.stamp.sec = 1_700_000_000
+    Preview.on_image(preview, 0, frame)
+    first_stamp = preview.header_stamps[0]
+    frame.header.stamp.nanosec = 100_000_000
+    Preview.on_image(preview, 0, frame)
+    assert preview.header_stamps[0] == first_stamp
+    assert Preview.latest_reference(preview, 0) == (TOPICS[0], first_stamp)
     with tempfile.TemporaryDirectory(prefix="piper-socket-test-") as temp:
         path = Path(temp) / "recorder.sock"
         with socket.socket(socket.AF_UNIX) as server:
@@ -95,8 +110,22 @@ def main():
             assert len(recorder_request(path, {"action": "status"})["result"]["text"]) == 1_050_000
             responder.join(timeout=5)
     class FakePreview:
+        def snapshot(self):
+            return [{"name": name, "online": True} for name in ("左腕", "右腕", "顶部")]
+
         def initial_joint_positions(self, required_arms):
             return {arm: {"position_rad": [0.1] * 6} for arm in required_arms}
+
+    class MissingCamera(FakePreview):
+        def snapshot(self):
+            return [{"name": "左腕", "online": False}]
+
+    try:
+        start_request({"task": "合成任务", "language_instruction": "测试"}, {}, MissingCamera())
+    except ValueError as error:
+        assert "相机预览未就绪" in str(error)
+    else:
+        raise AssertionError("无相机时仍允许开始录制")
 
     declared = {"topics": list(ARM_TOPICS["left"].values()),
                 "teleoperation": {"source": "master_slave_teleoperation",

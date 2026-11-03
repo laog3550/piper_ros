@@ -44,8 +44,8 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <body>
 <header><h1>数据采集控制台</h1><span id="state" class="badge">连接中</span></header>
 <p class="muted">录制由独立的 Episode 服务执行。关闭本页不会中断录制；Rerun 可独立查看详细数据。</p>
-<section><h2>三路相机</h2><p class="muted">画面由独立的 ROS 相机节点提供；无发布者时请先启动三路相机。</p><div id="cameras" class="grid"></div></section>
-<section><h2>机械臂实时关节角度</h2><p class="muted">读取左右从臂实测反馈，单位 rad。开始录制时自动保存当前六个关节角度与原始时间戳。</p><div id="joints" class="row"></div></section>
+<section><h2>三路相机</h2><p class="muted">画面由独立的 ROS 相机节点提供；无发布者时请先启动三路相机。三路 RGB 预览未就绪时，开始录制请求会被拒绝，避免结束后才发现关键图像缺失。</p><div id="cameras" class="grid"></div></section>
+<section><h2>机械臂实时关节角度</h2><p class="muted">主从臂由同侧 CAN 总线和固件直连遥操作；ROS 不参与运动控制。采集需另外运行只读旁路 <code>piper_direct_can</code> 与 <code>piper_arm_vector</code>，本页读取左右从臂实测反馈，单位 rad。开始录制时自动保存当前六个关节角度与原始时间戳；没有有效反馈时开始请求会被拒绝。</p><div id="joints" class="row"></div></section>
 <section><h2>采集数据的训练用途</h2><div class="tablewrap"><table><thead><tr><th>目标</th><th>本界面记录的数据</th><th>进入训练前还需要</th></tr></thead><tbody>
 <tr><td>π0.5（Pi）动作策略</td><td>单臂抓取或入盒的主臂目标、从臂反馈、顶部与对应腕部 RGB、任务文字、技能边界和人工结果。原始数据保存在 Episode 的 rosbag2 中。</td><td>有效夹爪映射与标定、Unix Header 时间对齐、成功片段审计、按扰动组切分、LeRobot 导出及独立训练核验。双臂翻盖可采集，但当前单臂 π0.5 训练入口不接收。</td></tr>
 <tr><td>Qwen 规划与结果判断</td><td>任务文字、技能顺序、结果与异常标注可作人工复核线索。</td><td>本界面不生成 Qwen 规划监督样本；须在 VLM 采集界面记录计划与技能上下文，提取并核验 RGB 帧及目标、状态变化，才可进入 Qwen 候选池。</td></tr>
@@ -74,7 +74,7 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <p id="active_skill" class="muted">当前技能：无</p>
 <p id="next_skill" class="muted"></p>
 <label for="annotation_source">关联画面（可留空）</label><select id="annotation_source"><option value="">只记录事件时间</option><option value="0">左腕彩色</option><option value="1">右腕彩色</option><option value="2">顶部彩色</option></select>
-<p class="muted">关联时间戳来自实际收到的 ROS 图像；画面过期时只记录事件时间，完成帧需后续核对。</p>
+<p class="muted">关联时间戳来自服务器最近编码的预览帧；画面过期时只记录事件时间。浏览器刷新可能稍晚，完成帧仍须离线核对。</p>
 <div class="row"><button id="mark_skill_start" class="secondary">开始下一技能</button><button id="mark_completion">标记当前技能完成</button><button id="mark_success" class="secondary">成功</button><button id="mark_failure" class="danger">失败</button></div>
 <label for="trigger_reason">异常或恢复原因（可提前填写；留空可一键记录）</label><input id="trigger_reason" maxlength="190" placeholder="例如：夹爪打滑；重新抓取后恢复">
 <div class="row"><button id="mark_exception" class="danger">记录异常触发</button><button id="mark_recovery" class="secondary">记录恢复触发</button></div>

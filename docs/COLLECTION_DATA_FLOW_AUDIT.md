@@ -6,7 +6,27 @@
 
 本次只读运行 `audit_real_data.py /home/mips/piper_tjp/data`：8 段来源、合格 Episode 0、合格训练帧 0、`split_ready=false`。旧包缺完整 Episode 契约、示教动作/反馈的核验或原子技能标签；不能把已有 RGB-D 包直接作为 π0.5 或 Qwen 的训练集。审计结果在 `/tmp/piper_collection_real_audit_20261103.json`。
 
+随后仅启动三台相机的 ROS 驱动，不启动机械臂控制或修改 CAN。12 秒六路被动订阅得到 28.5–29.8 fps，所有收到的 Header 单调；右腕深度在六路 Python 探针中出现一次最长约 200 ms 间隔，单路 15 秒复测为 29.85 fps、最长约 66.6 ms，因此不能把前者直接归因于相机驱动。另用**真正的 Episode 录制器**完成一次 12 秒相机专用录制、自动停止、SQLite 核验和保存：六路各 341–343 帧，左右腕 RGB/Depth 最近 Header 差最大分别为 0.154/0.132 ms，顶部 RGB/对齐深度有一帧缺口，最近差最大约 33.373 ms；顶部与左右腕 RGB 最近差最大约 20.213/20.754 ms。这是相机专用短测，不包含 CAN 或主从向量，不能视为模块 1 全链路同步合格。证据为 `/tmp/piper_framework_camera_bag_probe_20261103.json`、`/tmp/piper_camera_pairing_probe_20261103.json` 和 `/tmp/piper_framework_camera_probe_20261103/episode_000001`。相机节点已正常停止。
+
+将这条相机专用 Episode 交给只读来源审计时，得到 1 段来源、合格 Episode 0、合格帧 0；明确列出缺少执行臂、时间域、动作空间/来源、标定/归一化版本、关节反馈与示教目标，且 `task` 尚未拆成原子技能。该结果证明录制成功没有绕过 π0.5 数据门禁，见 `/tmp/piper_camera_only_training_audit_20261103.json`。
+
+## 七模块对照
+
+| 模块 | 软件状态 | 现场或训练状态 |
+| --- | --- | --- |
+| 1 硬件与时钟 | 左右 USB-CAN 序列号与 `config/pi05_can_map.json` 一致；两台 Orbbec 和顶部 D455 均被 USB 枚举。主从臂按每侧同一 CAN 总线固件直连，`piper_direct_can` 与 `piper_arm_vector` 仅作只读 ROS 旁路。 | `can_left`、`can_right` 为 `DOWN/STOPPED`；默认 ROS 图没有相机或机械臂数据话题。今天无法测量真实 Header、同步或连续性。 |
+| 2 技能状态机 | `task` 固定抓取、入盒、双臂翻盖顺序；另有三种 `skill` 原子 Episode。开始时保存从臂六关节起点及原始时间；技能片段要求 `perturbation_id`。三路 RGB 预览与所需从臂反馈未就绪时，开始请求会被拒绝。 | 扰动编号是人工场景分组，不证明物体、盒子和翻盖真实位姿；需现场记录对应场景。 |
+| 3 轻量标注 | 录制中写技能开始/完成、结果、恢复触发，关联相机 Header；无法引用时明确待离线核对。预览限频时，完成帧引用现在与实际编码的预览帧绑定。 | 浏览器刷新可能落后于服务器画面，完成边界仍须在 bag 中人工复核。 |
+| 4 恢复触发 | 独立 `recovery_cache.py` 默认关闭，有时间和字节双上限，写标准 rosbag2 与 `complete/failed` 清单。 | 合成高负载出现缺帧；真实相机负载未验收。恢复包没有自动回流训练。 |
+| 5 质量审计 | 录制停机检查 SQLite 与话题覆盖，离线审计再检查 Header、动作/反馈有效性、相机配对、标注和场景组。 | 停机时可保存不等于训练合格；阈值与真实跨设备偏差仍待同录测量。 |
+| 6 LeRobot v3.0 与 π0.5 | 合成 Episode 可经 `to_lerobot.py` 导出并回读；成功原子技能按扰动组切分，π0.5 有独立训练门禁。 | 真实合格帧为 0；固定 openpi 读取器的 v3 兼容、实测夹爪映射与标定尚未验收，当前不得启动真实 SFT。 |
+| 7 运行轨迹与 Qwen | `runtime_trace.py` 记录规划、预检、执行、验证、失败和恢复关联，默认 `training_eligible=false`。`qwen_lora_candidates.py` 只读核对真实轨迹、Episode、图像 bag 和人工审核记录，可导出 `candidate_only` 候选；外部恢复 ID 还须绑定完整恢复清单。 | 尚无真实完整轨迹与审核记录；候选导出不是 Qwen LoRA 训练器，也不授予训练资格。合成轨迹不等于真机训练样本。 |
+
+只读复核时发现两个数据契约问题：旧门禁对来源审计版本和技能标签的解释与 v2 Episode 不完全一致；三技能 Web 预览限频曾让标注 Header 超前于被编码的 JPEG。两处均已修复。针对性离线测试验证了 v2 审计、逐段任务文本和跨源时间约束；真实样本、现场同步阈值及固定 openpi 读取器的 LeRobot v3 兼容性仍未验收，因此模块 6 的真机训练闭环尚未通过。
+
 ## 数据从采集到训练的路径
+
+实际遥操作是每侧主臂与从臂共用一条 CAN 总线、由固件直连联动；采集程序不介入控制。`piper_direct_can` 只读监听 `can_left`/`can_right` 并发布逐帧 ROS 观测，`piper_arm_vector` 再将四帧合成为七维主目标与从反馈。`episode_recorder.py` 录制这些旁路 ROS 话题和相机话题。物理 CAN 接入与 ROS 旁路出流是不同的验收项：只有 USB 设备在位、但 CAN 接口或旁路节点未运行时，不能采集可转换的示教 Episode。
 
 | 入口与产物 | π0.5（Pi）用途 | Qwen 用途 |
 | --- | --- | --- |
@@ -16,6 +36,23 @@
 | 深度、相机信息、原始 CAN、恢复缓存 | 用于同步、标定、故障及边界审计；训练转换器当前主要读取顶部与对应腕部 RGB、动作和反馈。 | 可作人工复核依据；需独立提取与标注才能成为候选。 |
 
 采集配置中的 `teleoperation.mapping_verified` 和 `gripper_mapping_verified` 默认均为 `false`。界面仅在配置明确声明已核对主从映射，且对应主目标、从反馈话题列入录制范围时，写入 `human_demonstration` 等动作契约字段。这个配置声明不能替代现场证据；转换器仍要求逐条向量 `valid=true`、来源和时间一致。界面保存成功也不代表训练资格。
+
+## 现场只读复验入口
+
+主从臂上电即可由固件直连联动，不需要 ROS 控制节点。以下命令仅用于**电脑在 CAN 接口已经由现场流程启用后**观察并发布旁路数据；不执行 `ip link set`、启用机械臂、发送 CAN 帧或动作目标。所有终端应使用相同的 `ROS_DOMAIN_ID`。
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/mips/piper_ros/install/setup.bash
+ip -details -statistics link show can_left
+ip -details -statistics link show can_right
+ros2 run piper piper_direct_can
+# 另一个终端运行：
+ros2 run piper piper_arm_vector --ros-args -p gripper_mapping_verified:=false
+# 再核对 /piper_direct/* 和 /piper_vector/* 的 Header、valid、missing、stale。
+```
+
+相机驱动可单独用 `ros2 launch piper start_cameras.launch.py` 启动。`gripper_mapping_verified=false` 是未验收时的正确状态，此时七维向量 `valid=false`，只能用于观察，不能作为训练动作。完成现场夹爪实测和版本证据后，才按模块 1 检查表调整该参数与采集配置；仅修改布尔值不构成验收。
 
 ## 本次稳定性检查
 

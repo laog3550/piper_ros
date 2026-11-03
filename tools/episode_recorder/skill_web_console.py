@@ -131,7 +131,7 @@ class Preview:
                            "header_stamp_ns": value["header_stamp_ns"] if online else None,
                            "received_at_unix_ns": value["received_at_unix_ns"] if online else None,
                            "position_rad": value["position_rad"] if online else None,
-                           "error": None if online else ("话题无发布者；请启动 piper_arm_vector" if not publishers else
+                           "error": None if online else ("话题无发布者；请检查只读 piper_direct_can 与 piper_arm_vector" if not publishers else
                                    "未收到关节反馈" if value is None else
                                    "关节反馈过期" if age > 1.5 else "关节反馈缺帧或时间不一致")}
         return result
@@ -149,14 +149,9 @@ class Preview:
 
     def on_image(self, index, message):
         now = time.monotonic()
-        channels = {"rgb8": 3, "bgr8": 3, "rgba8": 4, "bgra8": 4, "mono8": 1}
         stamp = message.header.stamp
         stamp_ns = stamp.sec * 1_000_000_000 + stamp.nanosec
         with self.lock:
-            if (message.encoding in channels and message.width > 0 and message.height > 0
-                    and message.step >= message.width * channels[message.encoding]
-                    and len(message.data) >= message.step * message.height and stamp_ns > 0):
-                self.header_stamps[index], self.source_times[index] = stamp_ns, now
             if now - self.times[index] < 0.4:
                 return
         try:
@@ -166,12 +161,14 @@ class Preview:
             frame, error = None, str(exc)
         with self.lock:
             self.frames[index], self.errors[index], self.times[index] = frame, error, now
+            self.header_stamps[index] = stamp_ns if frame and stamp_ns > 0 else None
+            self.source_times[index] = now if frame and stamp_ns > 0 else 0.0
 
     def latest_reference(self, index):
         with self.lock:
             stamp = self.header_stamps[index]
             if (self.topics[index] in self.frame_topics and self.frames[index]
-                    and stamp and time.monotonic() - self.source_times[index] <= 0.15):
+                    and stamp and time.monotonic() - self.source_times[index] <= 0.5):
                 return self.topics[index], stamp
         return None
 
@@ -225,6 +222,9 @@ def start_request(body, config, preview):
     mode = body.get("mode", "task")
     if mode not in ("task", "skill"):
         raise ValueError("采集类型必须为 task 或 skill")
+    missing_cameras = [camera["name"] for camera in preview.snapshot() if not camera["online"]]
+    if missing_cameras:
+        raise ValueError("相机预览未就绪：" + "、".join(missing_cameras))
     metadata = {"language_instruction": instruction.strip()}
     perturbation_id = body.get("perturbation_id", "")
     if not isinstance(perturbation_id, str) or len(perturbation_id.strip()) > 120:
