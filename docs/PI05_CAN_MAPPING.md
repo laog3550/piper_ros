@@ -20,6 +20,8 @@ ros2 run piper piper_pi05_can verify all --require-up
 sudo python3 src/piper/piper/pi05_can.py activate --apply
 ```
 
+采集旁路只接收 CAN 帧时，可由现场人员在接口尚为 `DOWN` 的状态下，以管理员权限按映射配置 1 Mbit/s `listen-only` 并启用接口。接口已经 `UP` 时，不要重复执行 `ip link set ... type can bitrate ...`；内核返回 `Device or resource busy` 属于运行中无法改参数，应先用 `ip -details -statistics link show can_left` 和 `can_right` 核对现有模式、速率、收发及错误计数。不得为了重复配置而在遥操作期间将接口拉下。`listen-only` 不发送 CAN 帧，也不代替主从臂的固件联动。
+
 ## 地址配置
 
 当前方案使用官方角色：主臂 `0xFA`、从臂 `0xFC`，三个地址偏移均为 `0`。

@@ -54,8 +54,8 @@ Web 单技能采集现在要求显式选择执行臂：抓取与入盒为 `LEFT`
 
 成功 SFT 按 `task_metadata.initial_conditions.perturbation_id` 整组切分，缺组标识或少于两个不同扰动组时拒绝导出；旧转换模式保持原切分行为。π0.5 门禁按 v2 顶层技能、逐 Episode 任务文本和 v2 审计核验，并继续要求独立人工标签、来源摘要、左右臂角色与同步证据。
 
-只读审计 `/home/mips/piper_tjp/data` 的 8 段真实来源：合格 Episode 为 0，合格帧为 0。现场两路 CAN 当前为 DOWN，ROS 相机与机械臂节点未运行；本轮无法重新测量在线同步。标定版本、夹爪物理映射、同场双臂动作和反馈仍需现场核验。固定 openpi 版本的 LeRobot 读取器与 v3 导出格式还没有完成兼容验收，训练入口保持拒绝。
+只读审计 `/home/mips/piper_tjp/data` 的 8 段真实来源：合格 Episode 为 0，合格帧为 0。初检时现场两路 CAN 为 DOWN，ROS 相机与机械臂节点未运行；本轮尚未测量跨设备在线同步。标定版本、夹爪物理映射、同场双臂动作和反馈仍需现场核验。固定 openpi 版本的 LeRobot 读取器与 v3 导出格式还没有完成兼容验收，训练入口保持拒绝。
 
 可选恢复缓存已作为独立组件合入，默认关闭；合成 ROS 测试 5 项通过，验证标准 rosbag2 回读、触发边界不重复写帧和磁盘下限失败标记。六路合成 RGB-D 短时压测仍检测到缺帧，清单标为 `failed`，`training_approved=false`。真实相机与双臂同时采集的性能、同步及恢复片段回流仍需现场验收。
 
-2026-11-03 再按七模块框架复核：主从遥操作确认为同侧 CAN 固件直连，ROS 的 `piper_direct_can` 和 `piper_arm_vector` 是只读采集旁路。当前两路电脑 CAN 接口仍为 `DOWN`，尚不能测量真实主目标与从反馈；已完成三机相机专用短时真机 Episode，见[数据流与稳定性审计](COLLECTION_DATA_FLOW_AUDIT.md)。成功 SFT 的 v2 审计/技能标签门禁已对齐，RGB、状态、动作 Header 总体同步阈值须按现场证据显式指定；固定 openpi 读取器的 LeRobot v3 兼容性仍阻断训练启动。模块 7 新增只读、人工审核绑定的 Qwen LoRA 候选导出，始终不自动授予训练资格。
+2026-11-03 再按七模块框架复核：主从遥操作确认为同侧 CAN 固件直连，ROS 的 `piper_direct_can` 和 `piper_arm_vector` 是只读采集旁路。初检时两路 CAN 为 `DOWN`；随后恢复为 1 Mbit/s `LISTEN-ONLY`，两侧持续收到从臂反馈且短窗口错误增量为 0，但尚未在动作窗口核验主目标或与相机同录。已完成三机相机专用短时真机 Episode，见[数据流与稳定性审计](COLLECTION_DATA_FLOW_AUDIT.md)。成功 SFT 的 v2 审计/技能标签门禁已对齐，RGB、状态、动作 Header 总体同步阈值须按现场证据显式指定；固定 openpi 读取器的 LeRobot v3 兼容性仍阻断训练启动。模块 7 新增只读、人工审核绑定的 Qwen LoRA 候选导出，始终不自动授予训练资格。

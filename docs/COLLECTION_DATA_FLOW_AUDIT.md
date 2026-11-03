@@ -2,7 +2,9 @@
 
 ## 当前结论
 
-采集软件的合成 ROS 闭环、保存/丢弃、自动停止、重启读取、基础审计与离线转换测试通过；这只证明软件流程在合成输入下工作，不等于现场相机、双臂 CAN、主从遥操作或训练数据质量已验收。本机 `can_left`、`can_right` 均为 `DOWN`；默认 ROS 图只见 `/parameter_events` 和 `/rosout`，没有真实相机或机械臂发布者。因此当前无法测量现场帧率、跨设备时间偏差、长时间写盘稳定性与夹爪物理映射。
+采集软件的合成 ROS 闭环、保存/丢弃、自动停止、重启读取、基础审计与离线转换测试通过；这只证明软件流程在合成输入下工作，不等于现场相机、双臂 CAN、主从遥操作或训练数据质量已验收。初检时本机 `can_left`、`can_right` 均为 `DOWN`；默认 ROS 图只见 `/parameter_events` 和 `/rosout`，没有真实相机或机械臂发布者。后续两路 CAN 已恢复接收，见下文；跨设备时间偏差、长时间同录稳定性与夹爪物理映射仍未测量。
+
+同日 CAN 复验：两路接口均为 `UP`、`ERROR-ACTIVE`、1 Mbit/s、`LISTEN-ONLY`，左右适配器身份与映射一致。2 秒被动计数中左侧新增 6087 帧、右侧新增 6084 帧；两侧发送计数与接收错误增量均为 0。抽样可见两侧 `0x2A5`～`0x2A8` 从臂反馈。临时启动只读 `piper_direct_can` 与 `piper_arm_vector` 后，4 秒内四路向量话题各发布约 200 条；左右从臂反馈均具有完整四源 Header，`missing/stale/time_inconsistent` 均为 `false`。主臂目标在静止窗口没有控制帧，四源 `missing=true`；夹爪映射尚未核验，故向量 `valid=false`，符合门禁预期。旁路节点随后正常退出。接口已启动时重复执行 `ip link set ... type can bitrate ...` 会得到 `Device or resource busy`，这不表示接收故障。没有在动作窗口核验主臂控制帧或与相机同录，因此这些项目仍待验收。重启后接口状态须重新检查。
 
 本次只读运行 `audit_real_data.py /home/mips/piper_tjp/data`：8 段来源、合格 Episode 0、合格训练帧 0、`split_ready=false`。旧包缺完整 Episode 契约、示教动作/反馈的核验或原子技能标签；不能把已有 RGB-D 包直接作为 π0.5 或 Qwen 的训练集。审计结果在 `/tmp/piper_collection_real_audit_20261103.json`。
 
@@ -14,7 +16,7 @@
 
 | 模块 | 软件状态 | 现场或训练状态 |
 | --- | --- | --- |
-| 1 硬件与时钟 | 左右 USB-CAN 序列号与 `config/pi05_can_map.json` 一致；两台 Orbbec 和顶部 D455 均被 USB 枚举。主从臂按每侧同一 CAN 总线固件直连，`piper_direct_can` 与 `piper_arm_vector` 仅作只读 ROS 旁路。 | `can_left`、`can_right` 为 `DOWN/STOPPED`；默认 ROS 图没有相机或机械臂数据话题。今天无法测量真实 Header、同步或连续性。 |
+| 1 硬件与时钟 | 左右 USB-CAN 序列号与 `config/pi05_can_map.json` 一致；两台 Orbbec 和顶部 D455 均被 USB 枚举。主从臂按每侧同一 CAN 总线固件直连，`piper_direct_can` 与 `piper_arm_vector` 仅作只读 ROS 旁路。 | 两路 CAN 后续恢复为 1 Mbit/s 只听模式，均有从臂反馈，短窗口无接收错误；从臂 ROS 向量四源完整。尚未核验主臂动作帧或与相机同录的同步和连续性。 |
 | 2 技能状态机 | `task` 固定抓取、入盒、双臂翻盖顺序；另有三种 `skill` 原子 Episode。开始时保存从臂六关节起点及原始时间；技能片段要求 `perturbation_id`。三路 RGB 预览与所需从臂反馈未就绪时，开始请求会被拒绝。 | 扰动编号是人工场景分组，不证明物体、盒子和翻盖真实位姿；需现场记录对应场景。 |
 | 3 轻量标注 | 录制中写技能开始/完成、结果、恢复触发，关联相机 Header；无法引用时明确待离线核对。预览限频时，完成帧引用现在与实际编码的预览帧绑定。 | 浏览器刷新可能落后于服务器画面，完成边界仍须在 bag 中人工复核。 |
 | 4 恢复触发 | 独立 `recovery_cache.py` 默认关闭，有时间和字节双上限，写标准 rosbag2 与 `complete/failed` 清单。 | 合成高负载出现缺帧；真实相机负载未验收。恢复包没有自动回流训练。 |
