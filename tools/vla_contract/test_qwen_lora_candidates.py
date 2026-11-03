@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import struct
 import tempfile
 import unittest
 
@@ -24,11 +25,14 @@ class CandidateTests(unittest.TestCase):
         bag = self.episode / "bag"
         bag.mkdir(parents=True)
         self.db = bag / "data_0.db3"
+        self.stamp_ns = 1_800_000_000_123_456_789
+        image_cdr = b"\x00\x01\x00\x00" + struct.pack("<iI", 1_800_000_000, 123_456_789)
         with sqlite3.connect(self.db) as connection:
-            connection.executescript("CREATE TABLE topics(id INTEGER PRIMARY KEY, type TEXT);"
-                                     "CREATE TABLE messages(id INTEGER PRIMARY KEY, topic_id INTEGER);"
-                                     "INSERT INTO topics VALUES(1, 'sensor_msgs/msg/Image');"
-                                     "INSERT INTO messages VALUES(7, 1);")
+            connection.executescript("CREATE TABLE topics(id INTEGER PRIMARY KEY, name TEXT, type TEXT);"
+                                     "CREATE TABLE messages(id INTEGER PRIMARY KEY, topic_id INTEGER, data BLOB);"
+                                     "INSERT INTO topics VALUES(1, '/camera_top/D455/color/image_raw', "
+                                     "'sensor_msgs/msg/Image');")
+            connection.execute("INSERT INTO messages VALUES(7, 1, ?)", (image_cdr,))
         self.uri = f"rosbag2://{self.db}#message=7"
         self.episode_manifest = self.episode / "episode.json"
         self.episode_manifest.write_text(json.dumps({"episode_id": "episode-1", "state": "saved",
@@ -38,7 +42,8 @@ class CandidateTests(unittest.TestCase):
                                   links={"episode_id": "episode-1", "recovery_id": "a" * 32},
                                   episode_manifest_sha256=digest(self.episode_manifest))
         self.trace.record("plan_request", {"instruction": "把香蕉放入盒子",
-                           "observation": {"images": {"top_rgb": {"uri": self.uri}}}},
+                           "observation": {"images": {"top_rgb": {"uri": self.uri,
+                               "header_timestamp_ns": self.stamp_ns}}}},
                           ids={"request_id": "request-1"})
         self.trace.record("plan_result", {"plan": {"steps": [{"skill": "pick"}]}},
                           ids={"request_id": "request-1"})
@@ -99,12 +104,29 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaises(TraceError):
             self.build()
         with sqlite3.connect(self.db) as connection:
-            connection.executescript("CREATE TABLE topics(id INTEGER PRIMARY KEY, type TEXT);"
-                                     "CREATE TABLE messages(id INTEGER PRIMARY KEY, topic_id INTEGER);")
+            connection.executescript("CREATE TABLE topics(id INTEGER PRIMARY KEY, name TEXT, type TEXT);"
+                                     "CREATE TABLE messages(id INTEGER PRIMARY KEY, topic_id INTEGER, data BLOB);")
         with self.assertRaises(TraceError):
             self.build()
         with self.assertRaises(TraceError):
             build_candidates(self.trace.path, self.episode_manifest, self.review)
+
+    def test_same_bag_wrong_frame_timestamp_is_rejected(self):
+        other_frame = b"\x00\x01\x00\x00" + struct.pack("<iI", 1_800_000_001, 123_456_789)
+        with sqlite3.connect(self.db) as connection:
+            connection.execute("UPDATE messages SET data=? WHERE id=7", (other_frame,))
+        self.review_data["verified_image_sha256"] = {self.uri: digest(self.db)}
+        self.save_review()
+        with self.assertRaisesRegex(TraceError, "Header 时间"):
+            self.build()
+
+    def test_non_camera_topic_is_rejected(self):
+        with sqlite3.connect(self.db) as connection:
+            connection.execute("UPDATE topics SET name='/other/image' WHERE id=1")
+        self.review_data["verified_image_sha256"] = {self.uri: digest(self.db)}
+        self.save_review()
+        with self.assertRaisesRegex(TraceError, "话题"):
+            self.build()
 
     def test_synthetic_and_incomplete_trace_are_rejected(self):
         synthetic = TraceSession(self.root / "synthetic", source_kind="synthetic",

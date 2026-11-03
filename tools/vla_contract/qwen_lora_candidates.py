@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import struct
 
 from runtime_trace import TraceError, read_trace
 
@@ -15,6 +16,11 @@ from runtime_trace import TraceError, read_trace
 IMAGE_URI = re.compile(r"^rosbag2://(.+\.db3)#message=([1-9][0-9]*)$")
 REVIEW_VERSION = "piper_qwen_lora_review/1.0"
 CANDIDATE_VERSION = "piper_qwen_lora_candidate/1.0"
+CAMERA_TOPICS = {
+    "top_rgb": "/camera_top/D455/color/image_raw",
+    "left_wrist_rgb": "/camera_wrist_left/color/image_raw",
+    "right_wrist_rgb": "/camera_wrist_right/color/image_raw",
+}
 
 
 def _sha256(path):
@@ -35,7 +41,10 @@ def _load(path):
     return value
 
 
-def _check_image(uri, bag_root):
+def _check_image(role, frame, bag_root):
+    if type(frame) is not dict or role not in CAMERA_TOPICS:
+        raise TraceError("图像角色无效")
+    uri = frame.get("uri")
     if type(uri) is not str:
         raise TraceError("图像 URI 无效")
     match = IMAGE_URI.fullmatch(uri)
@@ -47,12 +56,24 @@ def _check_image(uri, bag_root):
     try:
         with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as connection:
             row = connection.execute(
-                "SELECT topics.type FROM messages JOIN topics ON messages.topic_id = topics.id "
+                "SELECT topics.name, topics.type, substr(messages.data, 1, 12) "
+                "FROM messages JOIN topics ON messages.topic_id = topics.id "
                 "WHERE messages.id = ?", (int(match.group(2)),)).fetchone()
     except sqlite3.Error as exc:
         raise TraceError("无法核对图像消息") from exc
-    if row is None or row[0] != "sensor_msgs/msg/Image":
-        raise TraceError("图像消息 ID 或类型不匹配")
+    if (row is None or row[0] != CAMERA_TOPICS[role] or row[1] != "sensor_msgs/msg/Image"
+            or frame.get("topic", row[0]) != row[0]):
+        raise TraceError("图像消息 ID、话题或类型不匹配")
+    prefix = row[2]
+    if (type(prefix) is not bytes or len(prefix) < 12 or prefix[0] != 0
+            or prefix[1] not in (0, 1)):
+        raise TraceError("图像消息 CDR Header 无效")
+    sec, nanosec = struct.unpack_from("<iI" if prefix[1] == 1 else ">iI", prefix, 4)
+    stamp = sec * 1_000_000_000 + nanosec
+    if (sec <= 0 or nanosec >= 1_000_000_000
+            or type(frame.get("header_timestamp_ns")) is not int
+            or frame["header_timestamp_ns"] != stamp):
+        raise TraceError("图像 Header 时间与轨迹不一致")
     return _sha256(path)
 
 
@@ -123,9 +144,10 @@ def build_candidates(trace_dir, episode_manifest_path, review_path, recovery_man
         images = request["data"]["observation"]["images"]
         if type(images) is not dict or not images:
             raise TraceError("规划输入缺少图像")
-        for frame in images.values():
+        for role, frame in images.items():
+            image_digest = _check_image(role, frame, bag_root)
             uri = frame["uri"]
-            image_digests[uri] = _check_image(uri, bag_root)
+            image_digests[uri] = image_digest
             used_uris.add(uri)
         candidates.append({"plan_result_seq": seq, "input": request["data"],
                            "target_plan": result["data"]["plan"], "images": images})
