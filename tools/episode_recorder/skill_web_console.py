@@ -4,6 +4,7 @@
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 from pathlib import Path
 import socket
 import signal
@@ -18,12 +19,12 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
+from piper_msgs.msg import PiperArmVector
 
 
 PAGE = Path(__file__).with_name("skill_web_console.html").read_bytes()
 CAMERA_NAMES = ("左腕", "右腕", "顶部")
 SKILLS = ("pick_banana", "place_banana_in_box", "close_hinged_lid_bimanual")
-INITIAL_FIELDS = ("object", "box", "lid_angle", "left_arm", "right_arm", "perturbation_id")
 ARM_TOPICS = {arm: {"master_target": f"/piper_vector/{arm}/master_target",
                     "slave_feedback": f"/piper_vector/{arm}/slave_feedback"}
               for arm in ("left", "right")}
@@ -87,11 +88,64 @@ class Preview:
         self.header_stamps = [None] * 3
         self.source_times = [0.0] * 3
         self.event = None
+        self.joints = {arm: None for arm in ARM_TOPICS}
         self.topics = list(camera_topics(config))
         self.frame_topics = set(config.get("frame_topics", ()))
         for index, topic in enumerate(self.topics):
             self.node.create_subscription(Image, topic, lambda msg, i=index: self.on_image(i, msg), qos_profile_sensor_data)
+        for arm, topics in ARM_TOPICS.items():
+            self.node.create_subscription(PiperArmVector, topics["slave_feedback"],
+                                          lambda msg, side=arm: self.on_joint(side, msg), 10)
         self.node.create_subscription(String, "/collection/events", self.on_event, 10)
+
+    def on_joint(self, arm, message):
+        source_stamps = [stamp.sec * 1_000_000_000 + stamp.nanosec
+                         for stamp in message.source_stamps[:3]]
+        stamp_ns = max(source_stamps)
+        positions = list(message.position[:6])
+        usable = (all(stamp > 0 for stamp in source_stamps)
+                  and max(source_stamps) - min(source_stamps) <= 30_000_000
+                  and len(positions) == 6
+                  and all(math.isfinite(value) for value in positions)
+                  and not any(message.missing[:3]) and not any(message.stale[:3])
+                  and message.source_topic == f"/piper_direct/{arm}/slave_feedback")
+        with self.lock:
+            self.joints[arm] = {"topic": ARM_TOPICS[arm]["slave_feedback"],
+                                "header_stamp_ns": stamp_ns, "received_at_unix_ns": time.time_ns(),
+                                "received_at_monotonic": time.monotonic(),
+                                "position_rad": positions if usable else None,
+                                "usable": usable}
+
+    def joint_snapshot(self):
+        with self.lock:
+            latest = {arm: dict(value) if value else None for arm, value in self.joints.items()}
+        now = time.monotonic()
+        result = {}
+        for arm, value in latest.items():
+            topic = ARM_TOPICS[arm]["slave_feedback"]
+            publishers = self.node.count_publishers(topic)
+            age = now - value["received_at_monotonic"] if value else None
+            online = bool(value and value["usable"] and age <= 1.5)
+            result[arm] = {"topic": topic, "publishers": publishers, "online": online,
+                           "age_sec": round(age, 2) if age is not None else None,
+                           "header_stamp_ns": value["header_stamp_ns"] if online else None,
+                           "received_at_unix_ns": value["received_at_unix_ns"] if online else None,
+                           "position_rad": value["position_rad"] if online else None,
+                           "error": None if online else ("话题无发布者；请启动 piper_arm_vector" if not publishers else
+                                   "未收到关节反馈" if value is None else
+                                   "关节反馈过期" if age > 1.5 else "关节反馈缺帧或时间不一致")}
+        return result
+
+    def initial_joint_positions(self, required_arms):
+        snapshot = self.joint_snapshot()
+        for arm in required_arms:
+            if not snapshot[arm]["online"]:
+                raise ValueError(f"{arm} 臂没有可用的实时关节反馈：{snapshot[arm]['error']}")
+        return {arm: {"topic": item["topic"], "header_stamp_ns": item["header_stamp_ns"],
+                      "received_at_unix_ns": item["received_at_unix_ns"],
+                      "joint_names": [f"joint{index}" for index in range(1, 7)],
+                      "position_rad": item["position_rad"]}
+                for arm, item in snapshot.items() if item["online"]}
 
     def on_image(self, index, message):
         now = time.monotonic()
@@ -132,9 +186,19 @@ class Preview:
     def snapshot(self):
         with self.lock:
             now = time.monotonic()
-            return [{"name": CAMERA_NAMES[i], "topic": topic, "online": bool(self.frames[i]) and now - self.times[i] < 3,
-                     "age_sec": round(now - self.times[i], 1) if self.times[i] else None,
-                     "error": self.errors[i]} for i, topic in enumerate(self.topics)]
+            frames = list(self.frames)
+            times = list(self.times)
+            errors = list(self.errors)
+        result = []
+        for i, topic in enumerate(self.topics):
+            publishers = self.node.count_publishers(topic)
+            online = bool(frames[i]) and now - times[i] < 3
+            error = None if online else ("话题无发布者；请启动相机 ROS 节点" if not publishers else
+                    errors[i] or ("图像已过期" if times[i] else "已发现发布者，尚未收到图像"))
+            result.append({"name": CAMERA_NAMES[i], "topic": topic, "publishers": publishers,
+                           "online": online, "age_sec": round(now - times[i], 1) if times[i] else None,
+                           "error": error})
+        return result
 
 
 def recorder_request(socket_path, request):
@@ -149,7 +213,7 @@ def recorder_request(socket_path, request):
     return json.loads(data)
 
 
-def start_request(body, config):
+def start_request(body, config, preview):
     task, instruction = body.get("task"), body.get("language_instruction")
     if (not isinstance(task, str) or not isinstance(instruction, str)
             or not task.strip() or not instruction.strip()
@@ -159,18 +223,11 @@ def start_request(body, config):
     if mode not in ("task", "skill"):
         raise ValueError("采集类型必须为 task 或 skill")
     metadata = {"language_instruction": instruction.strip()}
-    initial = body.get("initial_conditions")
-    if mode == "skill" or initial is not None:
-        if not isinstance(initial, dict):
-            raise ValueError("请填写人工设置的初始条件")
-        values = {key: initial.get(key) for key in INITIAL_FIELDS}
-        if any(not isinstance(value, str) or len(value.strip()) > 500 for value in values.values()):
-            raise ValueError("初始条件各项须为最多 500 字的文本")
-        if mode == "skill" and any(not value.strip() for value in values.values()):
-            raise ValueError("单技能采集须填写对象、盒子、翻盖、两臂及扰动编号")
-        if any(value.strip() for value in values.values()):
-            metadata["initial_conditions"] = {"source": "human", **{
-                key: value.strip() for key, value in values.items()}}
+    perturbation_id = body.get("perturbation_id", "")
+    if not isinstance(perturbation_id, str) or len(perturbation_id.strip()) > 120:
+        raise ValueError("扰动编号须为最多 120 字的文本")
+    if mode == "skill" and not perturbation_id.strip():
+        raise ValueError("单技能采集须填写扰动编号，以便按场景划分训练与测试")
     skill = body.get("skill") if mode == "skill" else None
     if mode == "skill" and skill not in SKILLS:
         raise ValueError("请选择固定技能")
@@ -194,6 +251,11 @@ def start_request(body, config):
             metadata["collection_contract_status"] = "metadata_ready_pending_data_audit"
         else:
             metadata["collection_contract_status"] = "training_not_ready_unverified_teleoperation_mapping"
+    required_arms = ("left", "right") if mode == "task" or arm_mode == "BIMANUAL" else (arm_mode.lower(),)
+    metadata["initial_conditions"] = {"source": "ros_slave_feedback",
+                                      "joint_positions": preview.initial_joint_positions(required_arms)}
+    if perturbation_id.strip():
+        metadata["initial_conditions"]["perturbation_id"] = perturbation_id.strip()
     return {"action": "start", "mode": mode, "task": task.strip(), "skill": skill,
             "metadata": metadata}
 
@@ -246,10 +308,12 @@ def handler_factory(socket_path, preview, config):
                     with preview.lock:
                         event = preview.event
                     result["cameras"] = preview.snapshot()
+                    result["joints"] = preview.joint_snapshot()
                     result["event"] = event
                     return self.respond(200, result)
                 except (OSError, ValueError, json.JSONDecodeError) as exc:
-                    return self.respond(503, {"ok": False, "error": str(exc), "cameras": preview.snapshot()})
+                    return self.respond(503, {"ok": False, "error": str(exc),
+                                              "cameras": preview.snapshot(), "joints": preview.joint_snapshot()})
             if path == "/api/episodes":
                 try:
                     return self.respond(200, recorder_request(socket_path, {"action": "list"}))
@@ -286,7 +350,7 @@ def handler_factory(socket_path, preview, config):
                 if not isinstance(body, dict):
                     raise ValueError("请求必须为 JSON 对象")
                 if action == "start":
-                    request = start_request(body, config)
+                    request = start_request(body, config, preview)
                 elif action == "annotate":
                     request = annotation_request(body, preview)
                 elif action == "save":

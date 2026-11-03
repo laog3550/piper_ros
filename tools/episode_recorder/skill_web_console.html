@@ -18,6 +18,10 @@ h2 { font-size:1.05rem; margin:0 0 14px; }
 .camera { background:#10151d; border-radius:8px; overflow:hidden; }
 .camera img { width:100%; aspect-ratio:16/9; object-fit:contain; display:block; }
 .camera p { padding:0 12px; font-size:.9rem; }
+.camera code { display:block; padding:0 12px 12px; overflow-wrap:anywhere; color:#aab8c8; font-size:.75rem; }
+.joint-card { background:#10151d; border-radius:8px; padding:12px; }
+.joint-card p { margin:6px 0; }
+.joint-values { font-variant-numeric:tabular-nums; line-height:1.8; }
 .muted { color:#aab8c8; }
 label { display:block; margin:12px 0 6px; }
 input,textarea,select { width:100%; box-sizing:border-box; border:1px solid #607187; border-radius:7px; background:#111922; color:white; padding:10px; font:inherit; }
@@ -40,10 +44,12 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <body>
 <header><h1>数据采集控制台</h1><span id="state" class="badge">连接中</span></header>
 <p class="muted">录制由独立的 Episode 服务执行。关闭本页不会中断录制；Rerun 可独立查看详细数据。</p>
-<section><h2>三路相机</h2><div id="cameras" class="grid"></div></section>
+<section><h2>三路相机</h2><p class="muted">画面由独立的 ROS 相机节点提供；无发布者时请先启动三路相机。</p><div id="cameras" class="grid"></div></section>
+<section><h2>机械臂实时关节角度</h2><p class="muted">读取左右从臂实测反馈，单位 rad。开始录制时自动保存当前六个关节角度与原始时间戳。</p><div id="joints" class="row"></div></section>
 <section>
 <h2>录制操作</h2>
 <div id="current" class="muted">正在读取状态…</div>
+<div id="captured_initial" class="muted"></div>
 <div class="row"><div><label for="mode">采集类型</label><select id="mode"><option value="task">完整任务</option><option value="skill">单技能片段</option></select></div><div id="skill_field" hidden><label for="skill">固定技能</label><select id="skill"><option value="pick_banana">抓取香蕉</option><option value="place_banana_in_box">香蕉放入盒子</option><option value="close_hinged_lid_bimanual">双臂合上翻盖</option></select></div></div>
 <label for="task">任务名</label><input id="task" maxlength="120" placeholder="例如：香蕉抓取、入盒与双臂翻盖">
 <label for="instruction">语言指令</label><textarea id="instruction" maxlength="2000" placeholder="例如：抓取香蕉放入盒中，再由双臂合上翻盖"></textarea>
@@ -54,10 +60,8 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <p class="muted">只有配置已核对主臂目标、从臂反馈及夹爪映射时，才声明人类示教动作来源。元数据就绪仍须通过原始数据审计。</p>
 </div>
 <div id="initial_fields">
-<p class="muted">起始条件由人工填写，只作为采集元数据，不会驱动机械臂。单技能片段须填写全部六项；原有任务可留空。</p>
-<div class="row"><div><label for="initial_object">对象起始位姿或扰动</label><input id="initial_object" maxlength="500" placeholder="例如：香蕉向左偏移 3 cm"></div><div><label for="initial_box">盒子起始位姿或扰动</label><input id="initial_box" maxlength="500" placeholder="例如：盒子朝向偏转 5°"></div></div>
-<div class="row"><div><label for="initial_lid_angle">翻盖初始角度</label><input id="initial_lid_angle" maxlength="500" placeholder="例如：打开约 80°"></div><div><label for="initial_perturbation_id">扰动编号</label><input id="initial_perturbation_id" maxlength="500" placeholder="例如：scene_003"></div></div>
-<div class="row"><div><label for="initial_left_arm">左臂初始条件</label><input id="initial_left_arm" maxlength="500" placeholder="人工记录关节姿态或相对位置"></div><div><label for="initial_right_arm">右臂初始条件</label><input id="initial_right_arm" maxlength="500" placeholder="人工记录关节姿态或相对位置"></div></div>
+<p class="muted">机械臂初始关节角度会自动读取并写入 Episode。单技能采集需填写扰动编号，以便按场景划分训练与测试。</p>
+<label for="initial_perturbation_id">扰动编号</label><input id="initial_perturbation_id" maxlength="120" placeholder="例如：scene_003">
 </div>
 <div class="row"><button id="start">开始录制</button><button id="stop" class="secondary">停止录制</button></div>
 <div id="annotation_panel">
@@ -86,7 +90,18 @@ for (let i=0;i<3;i++) {
   const card = document.createElement('div'); card.className='camera';
   const img = document.createElement('img'); img.alt=['左腕预览','右腕预览','顶部预览'][i];
   const status = document.createElement('p'); status.textContent='等待图像…';
-  card.append(img,status); $('cameras').append(card); cameraNodes.push({img,status});
+  const topic=document.createElement('code');
+  card.append(img,status,topic); $('cameras').append(card); cameraNodes.push({img,status,topic});
+}
+const jointNodes={};
+for(const [arm,name] of [['left','左臂'],['right','右臂']]) {
+  const card=document.createElement('div'); card.className='joint-card';
+  const title=document.createElement('strong'); title.textContent=name;
+  const status=document.createElement('p'); status.className='muted'; status.textContent='等待反馈…';
+  const values=document.createElement('div'); values.className='joint-values';
+  const topic=document.createElement('code'); topic.className='muted';
+  card.append(title,status,values,topic); $('joints').append(card);
+  jointNodes[arm]={status,values,topic};
 }
 let busy = false, state = 'unknown', currentMeta = {};
 let teleoperationReady = {};
@@ -107,6 +122,22 @@ async function loadContract() {
   updateContract();
 }
 async function readJson(response) { const data=await response.json(); if(!response.ok || !data.ok) throw Error(data.error || '操作失败'); return data; }
+function showSensors(data) {
+  for(let i=0;i<3;i++) {
+    const camera=data.cameras?.[i], item=cameraNodes[i];
+    if(!camera) continue;
+    item.topic.textContent=camera.topic;
+    item.status.textContent=`${camera.name}：${camera.online?'在线':camera.error || '无新画面'}`;
+    if(camera.online) item.img.src=`/camera/${i}.jpg?t=${Date.now()}`; else item.img.removeAttribute('src');
+  }
+  for(const arm of ['left','right']) {
+    const joint=data.joints?.[arm], item=jointNodes[arm];
+    if(!joint) continue;
+    item.topic.textContent=joint.topic;
+    item.status.textContent=joint.online ? `在线 · 最新反馈 ${joint.age_sec} 秒前` : joint.error;
+    item.values.textContent=joint.online ? joint.position_rad.map((v,i)=>`J${i+1}: ${v.toFixed(3)} rad`).join('　') : '暂无可用关节角度';
+  }
+}
 function updateButtons() {
   $('start').disabled=busy || state!=='idle'; $('stop').disabled=busy || state!=='recording';
   $('save').disabled=busy || state!=='stopped' || !$('outcome').value;
@@ -136,20 +167,20 @@ function showAnnotations(meta) {
 }
 async function refresh() {
   try {
-    const data=await readJson(await fetch('/api/status', {cache:'no-store'}));
+    const response=await fetch('/api/status', {cache:'no-store'});
+    const data=await response.json();
+    showSensors(data);
+    if(!response.ok || !data.ok) throw Error(data.error || '录制服务未连接');
     const result=data.result; state=result.state;
     $('state').textContent=labels[state] || state; $('state').className='badge '+(state==='recording'?'recording':'');
     const meta=result.metadata || {}; currentMeta=meta;
     $('current').textContent=meta.episode_id ? `Episode ${meta.episode_id} · ${meta.task || ''} · ${skillNames[meta.active_skill] || skillNames[meta.skill] || '完整任务'} · ${meta.error || labels[state]}` : (result.pending?.length ? `有 ${result.pending.length} 个未处理暂存 Episode，请丢弃后重试` : '当前无活动 Episode');
+    const initial=meta.task_metadata?.initial_conditions?.joint_positions || {};
+    $('captured_initial').textContent=Object.entries(initial).map(([arm,item])=>`${arm==='left'?'左臂':'右臂'}录制起点：${item.position_rad.map(value=>value.toFixed(3)).join(', ')} rad`).join('；');
     showAnnotations(meta);
     if(state==='recording' || state==='stopped') {
       const outcomes=(meta.annotations || []).filter(item=>item.kind==='outcome');
       if(outcomes.length && !$('outcome').value) $('outcome').value=outcomes.at(-1).value;
-    }
-    for(let i=0;i<3;i++) {
-      const camera=data.cameras[i], item=cameraNodes[i];
-      item.status.textContent=`${camera.name}：${camera.online?'在线':'无新画面'}${camera.error?' · '+camera.error:''}`;
-      if(camera.online) item.img.src=`/camera/${i}.jpg?t=${Date.now()}`; else item.img.removeAttribute('src');
     }
     updateButtons();
   } catch(error) { state='unknown'; currentMeta={}; $('state').textContent='录制服务未连接'; $('state').className='badge'; $('current').textContent=error.message; updateButtons(); }
@@ -181,12 +212,10 @@ async function action(name, payload={}) {
 $('mode').onchange=updateContract; $('skill').onchange=updateContract; $('arm_mode').onchange=updateContract;
 $('start').onclick=()=>{
   const payload={mode:$('mode').value,task:$('task').value,language_instruction:$('instruction').value};
-  const initial={object:$('initial_object').value,box:$('initial_box').value,lid_angle:$('initial_lid_angle').value,
-    left_arm:$('initial_left_arm').value,right_arm:$('initial_right_arm').value,perturbation_id:$('initial_perturbation_id').value};
-  if(payload.mode==='skill') { payload.skill=$('skill').value; payload.initial_conditions=initial;
+  payload.perturbation_id=$('initial_perturbation_id').value;
+  if(payload.mode==='skill') { payload.skill=$('skill').value;
     payload.arm_mode=$('arm_mode').value; payload.calibration_version=$('calibration_version').value;
     payload.normalization_version=$('normalization_version').value; }
-  else if(Object.values(initial).some(value=>value.trim())) payload.initial_conditions=initial;
   action('start',payload);
 };
 $('stop').onclick=()=>action('stop');

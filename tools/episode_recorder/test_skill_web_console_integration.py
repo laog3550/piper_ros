@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 import rclpy
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
+from piper_msgs.msg import PiperArmVector
 from rclpy.qos import qos_profile_sensor_data
 from skill_web_console import ARM_TOPICS, start_request, teleoperation_ready
 
@@ -61,15 +62,28 @@ def publisher(node, stop):
     image.data = bytes([50, 100, 200]) * (image.height * image.width)
     images = [node.create_publisher(Image, topic, qos_profile_sensor_data) for topic in TOPICS]
     can = node.create_publisher(String, "/synthetic/can_feedback", 10)
+    joints = {arm: node.create_publisher(PiperArmVector, ARM_TOPICS[arm]["slave_feedback"], 10)
+              for arm in ("left", "right")}
     while not stop.is_set():
         image.header.stamp = node.get_clock().now().to_msg()
         for item in images:
             item.publish(image)
         can.publish(String(data="synthetic; no CAN device"))
+        for arm, item in joints.items():
+            joint = PiperArmVector()
+            joint.header.stamp = image.header.stamp
+            joint.source_topic = f"/piper_direct/{arm}/slave_feedback"
+            joint.source_stamps = [image.header.stamp] * 4
+            joint.position = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.01]
+            item.publish(joint)
         stop.wait(0.1)
 
 
 def main():
+    class FakePreview:
+        def initial_joint_positions(self, required_arms):
+            return {arm: {"position_rad": [0.1] * 6} for arm in required_arms}
+
     declared = {"topics": list(ARM_TOPICS["left"].values()),
                 "teleoperation": {"source": "master_slave_teleoperation",
                                   "mapping_verified": True, "gripper_mapping_verified": True,
@@ -78,9 +92,8 @@ def main():
     assert not teleoperation_ready(declared, "RIGHT")
     verified_request = start_request({
         "mode": "skill", "skill": "pick_banana", "task": "合成抓取", "language_instruction": "抓取香蕉",
-        "initial_conditions": {name: "人工设置" for name in
-                               ("object", "box", "lid_angle", "left_arm", "right_arm", "perturbation_id")},
-        "arm_mode": "LEFT", "calibration_version": "cal-v1", "normalization_version": "norm-v1"}, declared)
+        "perturbation_id": "scene_001",
+        "arm_mode": "LEFT", "calibration_version": "cal-v1", "normalization_version": "norm-v1"}, declared, FakePreview())
     assert {key: verified_request["metadata"][key] for key in
             ("arm_mode", "time_domain", "action_space", "action_provenance",
              "calibration_version", "normalization_version")} == {
@@ -92,7 +105,9 @@ def main():
         root = Path(temp)
         config = root / "config.json"
         config.write_text(json.dumps({"output_dir": str(root / "episodes"),
-                                      "topics": [*TOPICS, "/synthetic/can_feedback"],
+                                      "topics": [*TOPICS, "/synthetic/can_feedback",
+                                                 ARM_TOPICS["left"]["slave_feedback"],
+                                                 ARM_TOPICS["right"]["slave_feedback"]],
                                       "frame_topics": TOPICS, "min_free_gb": 0,
                                       "startup_timeout_sec": 15}))
         with closing(socket.socket()) as probe:
@@ -111,6 +126,7 @@ def main():
         try:
             wait_for(lambda: http(port, "/api/status")["ok"])
             wait_for(lambda: all(item["online"] for item in http(port, "/api/status")["cameras"]))
+            wait_for(lambda: all(item["online"] for item in http(port, "/api/status")["joints"].values()))
             with urlopen(f"http://127.0.0.1:{port}/") as response:
                 assert b"<!doctype html>" in response.read()
             for index in range(3):
@@ -119,6 +135,10 @@ def main():
             start = http(port, "/api/start", {"task": "合成拾取", "language_instruction": "拿起测试物体"})
             assert start["result"]["state"] == "recording"
             assert start["result"]["metadata"]["mode"] == "task"
+            captured = start["result"]["metadata"]["task_metadata"]["initial_conditions"]
+            assert captured["source"] == "ros_slave_feedback"
+            assert set(captured["joint_positions"]) == {"left", "right"}
+            assert captured["joint_positions"]["left"]["position_rad"] == [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
             web.terminate(); web.wait(timeout=5)
             time.sleep(1)
             assert recorder.poll() is None
@@ -155,8 +175,6 @@ def main():
             entries = http(port, "/api/episodes")["result"]["episodes"]
             assert len(entries) == 1 and entries[0]["outcome"] == "success"
             assert entries[0]["language_instruction"] == "拿起测试物体"
-            initial = {"object": "香蕉左偏 3 cm", "box": "盒子右移 2 cm", "lid_angle": "80°",
-                       "left_arm": "左臂在起始位", "right_arm": "右臂在起始位", "perturbation_id": "scene_003"}
             rejected(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
                                           "language_instruction": "双臂合上翻盖",
                                           "skill": "close_hinged_lid_bimanual"})
@@ -165,21 +183,24 @@ def main():
             rejected(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
                                           "language_instruction": "双臂合上翻盖",
                                           "skill": "close_hinged_lid_bimanual",
-                                          "initial_conditions": initial, "arm_mode": "LEFT",
+                                          "perturbation_id": "scene_003", "arm_mode": "LEFT",
                                           "calibration_version": "cal-v1", "normalization_version": "norm-v1"})
             rejected(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
                                           "language_instruction": "双臂合上翻盖",
                                           "skill": "close_hinged_lid_bimanual",
-                                          "initial_conditions": initial, "arm_mode": "BIMANUAL",
+                                          "perturbation_id": "scene_003", "arm_mode": "BIMANUAL",
                                           "calibration_version": "UNVERIFIED_PLACEHOLDER",
                                           "normalization_version": "norm-v1"})
             skill = http(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
                                                "language_instruction": "双臂合上翻盖",
                                                "skill": "close_hinged_lid_bimanual",
-                                               "initial_conditions": initial, "arm_mode": "BIMANUAL",
+                                               "perturbation_id": "scene_003", "arm_mode": "BIMANUAL",
                                                "calibration_version": "cal-v1",
                                                "normalization_version": "norm-v1"})["result"]
-            assert skill["metadata"]["task_metadata"]["initial_conditions"] == {"source": "human", **initial}
+            initial = skill["metadata"]["task_metadata"]["initial_conditions"]
+            assert initial["source"] == "ros_slave_feedback"
+            assert initial["perturbation_id"] == "scene_003"
+            assert set(initial["joint_positions"]) == {"left", "right"}
             skill_contract = skill["metadata"]["task_metadata"]
             assert skill_contract["arm_mode"] == "BIMANUAL"
             assert skill_contract["calibration_version"] == "cal-v1"

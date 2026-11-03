@@ -8,7 +8,7 @@
 
 完整任务保留一条 `mode=task` Episode，顺序为 `pick_banana`、`place_banana_in_box`、`close_hinged_lid_bimanual`。另分别采集三个 `mode=skill` Episode，避免只从成功长序列里截取训练片段。翻盖按一个双臂协同技能录制：一臂稳定盒体，另一臂沿真实铰链转动盖子，记录两臂连续的真实动作与反馈；不要把单臂运动复制成另一臂标签。
 
-起始位姿扰动由人员在安全范围内摆放后记录在 `task_metadata.initial_conditions`，包括香蕉、盒体、盖子角度、两臂初始状态和扰动编号。采集器只记录，不自动移动机械臂。每个扰动编号应覆盖成功与失败/恢复实例；训练/测试按完整 Episode 和场景组切分，防止同一重复动作泄漏。
+起始位姿由采集控制台在开始录制时从 `/piper_vector/{left,right}/slave_feedback` 自动读取六个关节角度及原始时间戳，记录在 `task_metadata.initial_conditions.joint_positions`；不要求人员填写香蕉、盒体、翻盖角度或机械臂起始位姿。任务模式要求双臂实时反馈，单技能模式要求执行臂实时反馈，双臂翻盖要求双臂反馈。采集器只记录，不自动移动机械臂。单技能采集仍需填写 `perturbation_id`，以便按场景组划分训练/测试，避免重复动作泄漏。
 
 成功 SFT 导出要求每段原子技能 Episode 明确记录非空字符串 `task_metadata.initial_conditions.perturbation_id`。同一编号在所有技能中视为同一场景组，完整划入 train 或 test；缺少编号的 Episode 拒绝导出，合格数据不足两个不同场景组时不能建立训练/测试切分。旧版未标注转换保持按 `episode_id` 切分。
 
@@ -49,6 +49,8 @@
 已合入录制器 v2 标注、Web 实时标注、模块 1 只读检查表、原子技能质量审计与 LeRobot v3 导出、Qwen 规划运行时轨迹钩子、π0.5 原子技能训练准入。集成分支的 Web 合成 ROS 测试通过；LeRobot 转换测试 24 项、VLA 与录制器离线回归 78 项、π0.5 准入测试 7 项、恢复缓存测试 5 项通过。v2 合成 Episode 已走通审计、成功技能转换、外部人工标签与 SFT 数据门禁。这些测试使用合成输入验证软件契约。
 
 Web 单技能采集现在要求显式选择执行臂：抓取与入盒为 `LEFT` 或 `RIGHT`，双臂翻盖为 `BIMANUAL`；并填写非空、非 `UNVERIFIED` 占位的 `calibration_version` 与 `normalization_version`。只有录制配置 `teleoperation` 明确声明 `source=master_slave_teleoperation`、`mapping_verified=true`、`gripper_mapping_verified=true`，且对应臂的主目标和从反馈话题映射与已录话题一致时，Web 才写入 `time_domain=unix_ns`、`action_space=absolute_joint_position_7`、`action_provenance=human_demonstration`。示例配置的验证开关均为 `false`；须在主从端真实遥操作、时间域和夹爪物理映射完成现场核对后才可修改。未验证时界面显示训练未就绪，Episode 元数据也不伪造这三项。即使元数据齐全，仍须通过逐帧来源审计和转换器检查；旧 `task` 请求不要求新增字段。
+
+采集控制台实时显示左右从臂六个关节角度；开始录制时自动冻结反馈值、来源话题和时间戳。页面同时显示相机话题的发布者与图像错误，便于区分未启动相机节点、尚未收到图像及编码失败。相机驱动仍由 `ros2 launch piper start_cameras.launch.py` 独立启动；控制台不会替代相机驱动。
 
 成功 SFT 按 `task_metadata.initial_conditions.perturbation_id` 整组切分，缺组标识或少于两个不同扰动组时拒绝导出；旧转换模式保持原切分行为。π0.5 门禁按 v2 顶层技能、逐 Episode 任务文本和 v2 审计核验，并继续要求独立人工标签、来源摘要、左右臂角色与同步证据。
 
