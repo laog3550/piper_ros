@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把已保存 Episode 的左右从臂六关节反馈导出为只读 LeRobot v3 数据集。"""
+"""把已保存 Episode 的左右从臂关节与夹爪反馈导出为只读 LeRobot v3 数据集。"""
 
 import argparse
 from bisect import bisect_right
@@ -17,7 +17,7 @@ from rosbags.typesys import get_types_from_msg
 from to_lerobot import CAN_STATES, TYPESTORE, VECTOR_TYPE, source_digest, stamp_value
 
 
-JOINT_IDS = (0x2A5, 0x2A6, 0x2A7)
+SOURCE_IDS = (0x2A5, 0x2A6, 0x2A7, 0x2A8)
 DIRECT_TYPE = "piper_msgs/msg/PiperDirectCanFrame"
 DIRECT_MSG = """std_msgs/Header header
 uint32 can_id
@@ -30,7 +30,7 @@ uint8 gripper_status
 uint8 gripper_set_zero
 """
 TYPESTORE.register(get_types_from_msg(DIRECT_MSG, DIRECT_TYPE))
-JOINT_NAMES = tuple(f"joint{index}" for index in range(1, 7))
+STATE_NAMES = tuple(f"joint{index}" for index in range(1, 7)) + ("gripper",)
 ARMS = ("left", "right")
 
 
@@ -57,28 +57,28 @@ def read_states(episode, max_can_skew_ns):
                 reason = None
                 if (msg.header.frame_id != f"can_{arm}"
                         or msg.source_topic != f"/piper_direct/{arm}/slave_feedback"
-                        or tuple(msg.source_can_ids[:3]) != JOINT_IDS):
+                        or tuple(msg.source_can_ids) != SOURCE_IDS):
                     reason = "来源不符"
-                elif (tuple(msg.joint_names[:6]) != JOINT_NAMES
-                      or len(msg.position) < 6
-                      or not all(math.isfinite(value) for value in msg.position[:6])):
-                    reason = "关节数值无效"
-                elif any(msg.missing[:3]) or any(msg.stale[:3]):
-                    reason = "关节来源缺失或过期"
+                elif (tuple(msg.joint_names) != STATE_NAMES
+                      or len(msg.position) != 7
+                      or not all(math.isfinite(value) for value in msg.position)):
+                    reason = "关节或夹爪数值无效"
+                elif any(msg.missing) or any(msg.stale):
+                    reason = "关节或夹爪来源缺失或过期"
                 else:
                     try:
-                        stamps = [stamp_value(value) for value in msg.source_stamps[:3]]
+                        stamps = [stamp_value(value) for value in msg.source_stamps]
                     except ValueError:
-                        reason = "关节来源时间无效"
+                        reason = "关节或夹爪来源时间无效"
                     else:
                         if (max(stamps) - min(stamps) > max_can_skew_ns
                                 or not start <= min(stamps) <= max(stamps) <= stop):
-                            reason = "关节来源时间超窗"
+                            reason = "关节或夹爪来源时间超窗"
                 if reason:
                     rejected[arm][reason] = rejected[arm].get(reason, 0) + 1
                     continue
                 stamp_ns = max(stamps)
-                position = np.asarray(msg.position[:6], dtype=np.float32)
+                position = np.asarray(msg.position, dtype=np.float32)
                 previous = rows[arm].get(stamp_ns)
                 if previous is not None and (not np.array_equal(previous[0], position)
                                              or previous[1] != tuple(stamps)):
@@ -88,19 +88,22 @@ def read_states(episode, max_can_skew_ns):
             if direct is not None and direct.msgtype == DIRECT_TYPE:
                 for _, _, raw in reader.messages(connections=[direct]):
                     msg = TYPESTORE.deserialize_cdr(raw, DIRECT_TYPE)
-                    if msg.can_id not in JOINT_IDS:
+                    if msg.can_id not in SOURCE_IDS:
                         continue
                     payload = bytes(msg.raw_data)
                     if len(payload) != 8:
                         continue
                     joint_stamp = stamp_value(msg.header.stamp)
-                    values = struct.unpack(">ii", payload)
-                    raw_joints[arm][(msg.can_id, joint_stamp)] = tuple(
-                        value * math.pi / 180000 for value in values)
+                    if msg.can_id == 0x2A8:
+                        decoded = (struct.unpack(">i", payload[:4])[0] * 1e-6,)
+                    else:
+                        decoded = tuple(value * math.pi / 180000
+                                        for value in struct.unpack(">ii", payload))
+                    raw_joints[arm][(msg.can_id, joint_stamp)] = decoded
     streams = {arm: [(stamp, *value) for stamp, value in sorted(rows[arm].items())]
                for arm in ARMS}
     if any(len(streams[arm]) < 2 for arm in ARMS):
-        raise ValueError("左右从臂均须至少有两条完整关节反馈")
+        raise ValueError("左右从臂均须至少有两条完整关节与夹爪反馈")
     return metadata, streams, rejected, raw_joints
 
 
@@ -145,10 +148,10 @@ def export(episode, output, repo_id, fps, max_age_ms, max_can_skew_ms,
         episode, round(max_can_skew_ms * 1e6))
     selected, skipped = align_states(streams, fps, round(max_age_ms * 1e6),
                                      round(max_cross_arm_skew_ms * 1e6))
-    names = [f"{arm}.{joint}" for arm in ARMS for joint in JOINT_NAMES]
+    names = [f"{arm}.{state}" for arm in ARMS for state in STATE_NAMES]
     dataset = LeRobotDataset.create(
         repo_id=repo_id, fps=fps,
-        features={"observation.state": {"dtype": "float32", "shape": (12,), "names": names}},
+        features={"observation.state": {"dtype": "float32", "shape": (14,), "names": names}},
         root=output, robot_type="piper", use_videos=False)
     task = metadata.get("task") or "从臂关节状态只读验收"
     raw_verified = 0
@@ -167,15 +170,15 @@ def export(episode, output, repo_id, fps, max_age_ms, max_can_skew_ms,
             verified = True
             for arm, row in zip(ARMS, (left, right)):
                 decoded = []
-                for can_id, joint_stamp in zip(JOINT_IDS, row[2]):
+                for can_id, joint_stamp in zip(SOURCE_IDS, row[2]):
                     values = raw_joints[arm].get((can_id, joint_stamp))
                     if values is None:
                         verified = False
                         break
                     decoded.extend(values)
-                if len(decoded) == 6 and any(abs(a - b) > 1e-9
+                if len(decoded) == 7 and any(abs(a - b) > 1e-9
                                              for a, b in zip(decoded, row[1])):
-                    raise ValueError(f"{arm}: 原始 CAN 与从臂向量关节值不一致")
+                    raise ValueError(f"{arm}: 原始 CAN 与从臂向量状态值不一致")
             raw_verified += int(verified)
             state = np.concatenate((left[1], right[1]))
             dataset.add_frame({"task": task, "observation.state": state})
@@ -194,14 +197,16 @@ def export(episode, output, repo_id, fps, max_age_ms, max_can_skew_ms,
     dataset.finalize()
     check = LeRobotDataset(repo_id, root=output)
     if (check.meta.total_episodes != len(segment_lengths) or len(check) != len(selected)
-            or tuple(check[0]["observation.state"].shape) != (12,)
+            or tuple(check[0]["observation.state"].shape) != (14,)
             or not np.array_equal(check[0]["observation.state"].numpy(),
                                   np.concatenate((selected[0][1][1], selected[0][2][1])))):
         raise ValueError("LeRobot 回读帧数、维度或首帧状态不匹配")
     manifest = {"format": "LeRobotDataset v3.0", "lerobot_version": "0.4.4",
                 "purpose": "follower_joint_state_readonly_validation",
                 "training_eligible": False, "contains_action": False,
-                "contains_gripper": False, "joint_names": names, "joint_unit": "rad",
+                "contains_gripper": True, "gripper_calibration_verified": False,
+                "joint_names": names, "joint_unit": "rad",
+                "gripper_value": "原始有符号 CAN 计数 × 1e-6 m；零点与方向未核验",
                 "source": str(episode.resolve()), "source_sha256": source_digest(episode),
                 "episode_id": metadata.get("episode_id"), "fps": fps,
                 "frames": len(selected), "episodes": len(segment_lengths),
@@ -217,7 +222,7 @@ def export(episode, output, repo_id, fps, max_age_ms, max_can_skew_ms,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="从臂六关节 rosbag2 → 只读 LeRobot v3")
+    parser = argparse.ArgumentParser(description="从臂六关节加夹爪 rosbag2 → 只读 LeRobot v3")
     parser.add_argument("episode_dir", type=Path)
     parser.add_argument("output_dir", type=Path)
     parser.add_argument("--repo-id", default="local/piper_follower_state_validation")

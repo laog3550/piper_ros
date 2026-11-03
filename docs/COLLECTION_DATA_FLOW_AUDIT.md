@@ -10,7 +10,7 @@
 
 **质量阻断仍在**：左右约 3 秒动作窗口内，50 Hz 目标向量中四源齐全、新鲜且时间一致的分别只有 25/160、11/140 条；原始四种主臂目标 ID 数量不均。临时原始 CAN 与 ROS 旁路对照窗口没有捕获新的主臂动作，尚不能判定缺口发生于总线、SocketCAN 接收还是 ROS 发布/记录。`piper_direct_can` 与 `piper_arm_vector` 在现场分别长期占用约 94% 和 83% 的一个 CPU 核，需进一步压测与优化。夹爪映射未核验，所有向量 `valid=false`。该验收 Episode 的离线来源审计为合格 Episode 0、合格帧 0，原因包括缺少动作契约、标定、归一化版本及原子技能标注，见 `/tmp/piper_full_live_audit_20261103.json`；不能把同录成功解释成可训练。
 
-针对从臂关节状态进一步定位到动作负载下只读 ROS 旁路积压：原双侧进程中从臂来源 Header 到 ROS 接收延迟约 200～355 ms，运动区间无法稳定通过 100 ms 新鲜度门禁。左右各自运行独立 CAN 监听与向量组装进程后，真机动作时在线最大 Header 年龄分别约 9.6/9.4 ms。40 秒新 Episode 自动保存，导出并回读为 10 fps、1 条连续 LeRobot v3 Episode、402 帧、左右共 12 维六关节状态；左右动作窗口分别覆盖 24、12 帧，均能与保存的原始 CAN 字节逐值核对。全段 394/402 帧具有完整原始 CAN 旁证。该产物仅有 `observation.state`，不含 `action` 或未核验的夹爪，也不授予训练资格。详见[从臂状态导出验收](FOLLOWER_STATE_LEROBOT_VALIDATION.md)。
+针对从臂状态进一步定位到动作负载下只读 ROS 旁路积压：原双侧进程中从臂来源 Header 到 ROS 接收延迟约 200～355 ms，运动区间无法稳定通过 100 ms 新鲜度门禁。左右各自运行独立 CAN 监听与向量组装进程后，真机动作时在线最大 Header 年龄分别约 9.6/9.4 ms。40 秒新 Episode 自动保存，导出并回读为 10 fps、1 条连续 LeRobot v3 Episode、402 帧、左右各六关节加夹爪的 14 维状态；左右动作窗口分别覆盖 24、12 帧，均能与保存的原始 CAN 字节逐值核对。全段 393/402 帧具有完整原始 CAN 旁证。该产物仅有 `observation.state`，不含 `action`；夹爪零点及方向未实物核验，也不授予训练资格。详见[从臂状态导出验收](FOLLOWER_STATE_LEROBOT_VALIDATION.md)。
 
 本次只读运行 `audit_real_data.py /home/mips/piper_tjp/data`：8 段来源、合格 Episode 0、合格训练帧 0、`split_ready=false`。旧包缺完整 Episode 契约、示教动作/反馈的核验或原子技能标签；不能把已有 RGB-D 包直接作为 π0.5 或 Qwen 的训练集。审计结果在 `/tmp/piper_collection_real_audit_20261103.json`。
 
