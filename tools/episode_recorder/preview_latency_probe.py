@@ -77,12 +77,13 @@ class RosStream:
 
 
 class WebProbe:
-    def __init__(self, url, poll_seconds):
+    def __init__(self, url, poll_seconds, console):
         parsed = urlparse(url)
         if parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
             raise ValueError("网页探针仅允许本机 HTTP 地址")
         self.base = url.rstrip("/")
         self.poll_seconds = poll_seconds
+        self.console = console
         self.stop = threading.Event()
         self.stats = [{"responses": 0, "changes": [], "last_hash": None,
                        "rtt_ms": [], "errors": Counter()} for _ in ROLES]
@@ -92,7 +93,9 @@ class WebProbe:
             cycle_start = time.monotonic()
             for index, item in enumerate(self.stats):
                 started = time.monotonic_ns()
-                request = Request(f"{self.base}/camera/color/{index}.jpg?t={started}",
+                path = (f"/camera/{index}.jpg" if self.console == "skill"
+                        else f"/camera/color/{index}.jpg")
+                request = Request(f"{self.base}{path}?t={started}",
                                   headers={"Cache-Control": "no-cache"})
                 try:
                     with urlopen(request, timeout=0.7) as response:
@@ -129,6 +132,8 @@ def main():
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--seconds", type=float, default=30)
     parser.add_argument("--web-url", help="可选：现有网页地址，例如 http://127.0.0.1:8765")
+    parser.add_argument("--web-console", choices=("skill", "legacy"), default="skill",
+                        help="网页入口；默认测香蕉技能采集页面")
     parser.add_argument("--web-poll-seconds", type=float, default=0.2)
     parser.add_argument("--output", type=Path, help="可选 JSON 路径；默认只打印到标准输出")
     args = parser.parse_args()
@@ -136,7 +141,7 @@ def main():
         parser.error("测量时长和网页轮询间隔必须大于 0")
     config = json.loads(args.config.read_text(encoding="utf-8"))
     streams = {role: RosStream(color) for role, (color, _depth) in zip(ROLES, camera_topics(config))}
-    web = WebProbe(args.web_url, args.web_poll_seconds) if args.web_url else None
+    web = WebProbe(args.web_url, args.web_poll_seconds, args.web_console) if args.web_url else None
     web_thread = threading.Thread(target=web.run, daemon=True) if web else None
     started_wall_ns = time.time_ns()
     started_mono = time.monotonic()

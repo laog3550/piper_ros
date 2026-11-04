@@ -10,27 +10,27 @@
 
 | 路径 | 代码行为 | 能推出什么 |
 | --- | --- | --- |
-| 网页服务端 | [`web_console.py`](../tools/episode_recorder/web_console.py) 对每路 RGB/Depth 的 JPEG 编码至少间隔 `0.4 s` | 理想情况下每路缓存最多约 `2.5` 次新图像/秒；编码慢时更少。 |
-| 网页客户端 | [`web_console.html`](../tools/episode_recorder/web_console.html) 每 `1500 ms` 调一次 `refresh()`，等 `/api/status` 成功后才重设六张图的 URL | 理想情况下每路浏览器至多约 `0.67` 次图像请求/秒；状态接口慢或失败会再降低频率。这是代码上限，**不是现场绘制帧率实测**。 |
+| 网页服务端 | [`skill_web_console.py`](../tools/episode_recorder/skill_web_console.py) 对每路 RGB 的 JPEG 编码至少间隔 `0.4 s` | 理想情况下每路缓存最多约 `2.5` 次新图像/秒；编码慢时更少。 |
+| 网页客户端 | [`skill_web_console.html`](../tools/episode_recorder/skill_web_console.html) 每 `1500 ms` 调一次 `refresh()`，等 `/api/status` 成功后才重设三张图的 URL | 理想情况下每路浏览器至多约 `0.67` 次图像请求/秒；状态接口慢或失败会再降低频率。这是代码上限，**不是现场绘制帧率实测**。 |
 | 现有本地 PyQt5 | [`desktop_console.py`](../tools/episode_recorder/desktop_console.py) 的图像定时器为 `33 ms`，深度提交另有 `0.2 s` 节流 | 设计上 RGB 可接近 `30 fps`、Depth 可接近 `5 fps`；实际刷新和绘制延迟仍须实测。现有 `display_fps` 计数在 `setPixmap` 后增加，不等于屏幕实际绘制率。 |
 
-网页的 `/camera/color/{i}.jpg` 只返回最新 JPEG 字节，没有原图 Header 时间或序号。仅测 HTTP RTT 或 JPEG 哈希变化，无法推算图像从曝光到浏览器显示的时延。
+网页的 `/camera/{i}.jpg` 只返回最新 JPEG 字节，没有原图 Header 时间或序号。仅测 HTTP RTT 或 JPEG 哈希变化，无法推算图像从曝光到浏览器显示的时延。
 
 ## 只读探针与测量口径
 
 工具：[`preview_latency_probe.py`](../tools/episode_recorder/preview_latency_probe.py)。它按录制配置订阅三路 RGB，使用与网页相同的 `qos_profile_sensor_data`；可选地只对本机网页 JPEG 地址执行 GET，不调用录制控制接口、不写相机/CAN 参数。推荐在三机和网页服务均已由现场操作者正常启动、画面稳定后运行 `60 s`：
 
 ```bash
-cd /home/mips/.codex/worktrees/7a5c/piper_ros
+cd /home/mips/piper_ros
 source /opt/ros/humble/setup.bash
 source /home/mips/piper_ros/install/setup.bash
 python3 tools/episode_recorder/preview_latency_probe.py \
-  --config config/episode_recorder.example.json --seconds 60 \
+  --config /tmp/piper_episode_config.json --seconds 60 \
   --web-url http://127.0.0.1:8765 \
   --output /tmp/piper-preview-baseline.json
 ```
 
-若网页未运行，省略 `--web-url`；若实际网页端口或配置文件不同，用运行中的值。探针不会自行启动相机、网页或录制器。输出中的每路 `header_fps` 是首末 Header 跨度上的帧率，`receive_fps` 是本探针回调到达率；`header_gap_gt_50ms`、`header_gap_gt_100ms`、`header_nonincreasing` 是源 Header 异常计数。`header_to_callback_age_ms = 本机回调入口 time.time_ns − Image.header.stamp`，按最近秩报告 `p50/p95/p99/max`；其中包含相机采集、USB、驱动、DDS、进程调度和本探针订阅开销。出现零 Header、负年龄或远超预期的年龄时先查时钟域，不能截断为零后计算。**该值不是 GUI 延迟。**
+若网页未运行，省略 `--web-url`；若使用旧版深度预览网页，再加 `--web-console legacy`。实际端口或配置文件不同则使用运行中的值。探针不会自行启动相机、网页或录制器。输出中的每路 `header_fps` 是首末 Header 跨度上的帧率，`receive_fps` 是本探针回调到达率；`header_gap_gt_50ms`、`header_gap_gt_100ms`、`header_nonincreasing` 是源 Header 异常计数。`header_to_callback_age_ms = 本机回调入口 time.time_ns − Image.header.stamp`，按最近秩报告 `p50/p95/p99/max`；其中包含相机采集、USB、驱动、DDS、进程调度和本探针订阅开销。出现零 Header、负年龄或远超预期的年龄时先查时钟域，不能截断为零后计算。**该值不是 GUI 延迟。**
 
 可选网页字段 `jpeg_hash_changes` 与 `observed_change_rate_hz_lower_bound` 表示高于浏览器频率的 GET 抽样中实际看到不同 JPEG 字节的次数及其速率；静止画面可能编码出相同字节，所以只是服务端缓存变化的**可观测下界**。`http_rtt_ms` 只表示本机 GET 往返，不是浏览器绘制耗时。网页实际 `0.67 Hz` 上限需按代码核对，若要实测浏览器绘制还须在浏览器侧记录每张图的 `load`/绘制时间与原帧标识。
 

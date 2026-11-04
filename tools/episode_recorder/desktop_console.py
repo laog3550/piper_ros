@@ -305,9 +305,9 @@ class Console(QMainWindow):
 
         data_use = QLabel(
             "数据用途：本窗口保存 RGB-D、按配置录制的机械臂/相机原始话题及任务结果，供回放和质量审计。"
-            "π0.5 动作训练需另用三技能界面采集主臂目标、从臂反馈与技能标注，并通过标定、对齐和 LeRobot 导出。"
-            "Qwen 规划训练需另用 VLM 界面采集计划、技能上下文和人工结果，再提取核验图像。"
-            "本窗口保存的 Episode 不会自动成为任一模型的训练样本。")
+            "原子技能 Episode 可在标定、夹爪映射和逐帧审计通过后导出为 π0.5 候选数据；"
+            "完整任务与运行轨迹经人工核验后可整理为 Qwen 规划候选数据。"
+            "保存的 Episode 不会自动成为训练样本。")
         data_use.setWordWrap(True)
         layout.addWidget(data_use)
 
@@ -452,6 +452,11 @@ class Console(QMainWindow):
 
     def update_buttons(self):
         busy = "action" in self.pending
+        editable = not busy and self.state == "idle"
+        for widget in (self.mode, self.task, self.instruction, self.duration, self.perturbation):
+            widget.setEnabled(editable)
+        for widget in (self.skill, self.arm_mode, self.calibration, self.normalization):
+            widget.setEnabled(editable and self.mode.currentData() == "skill")
         self.start.setEnabled(not busy and self.state == "idle")
         self.stop.setEnabled(not busy and self.state == "recording")
         self.save.setEnabled(not busy and self.state == "stopped" and self.outcome.currentIndex() > 0)

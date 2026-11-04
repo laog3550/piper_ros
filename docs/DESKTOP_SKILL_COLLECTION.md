@@ -2,18 +2,22 @@
 
 ## 启动
 
-在两个终端中分别运行；先按现场既有流程启用只读 CAN 旁路、三路相机、`piper_arm_vector` 和录制器所需的 ROS 环境。主从臂仍由原有 CAN 直连遥操作，控制台不发送机械臂控制帧。
+在每个终端先进入 `/home/mips/piper_ros`，执行 `source /opt/ros/humble/setup.bash` 和 `source install/setup.bash`。按现场流程启动主从臂后，分别运行以下四个进程。主从臂仍由原有 CAN 直连遥操作，控制台不发送机械臂控制帧。
 
 ```bash
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-python3 tools/episode_recorder/episode_recorder.py serve --config config/episode_recorder.example.json
+ros2 launch piper start_cameras.launch.py camera_map:=$PWD/config/camera_map.json
 ```
 
 ```bash
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-python3 tools/episode_recorder/desktop_console.py --config config/episode_recorder.example.json
+ros2 launch piper start_readonly_can_collection.launch.py
+```
+
+```bash
+python3 tools/episode_recorder/episode_recorder.py serve --config /tmp/piper_episode_config.json
+```
+
+```bash
+python3 tools/episode_recorder/desktop_console.py --config /tmp/piper_episode_config.json
 ```
 
 采集前应按现场目录修改配置中的 `output_dir`、相机与 CAN 话题。窗口内的「Episode 保存目录」可逐条修改；「本条时长上限」到时自动停止，之后选择结果并保存或丢弃。关闭窗口不会停止录制器。
