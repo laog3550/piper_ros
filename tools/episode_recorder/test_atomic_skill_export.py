@@ -135,6 +135,22 @@ def test_state_camera_source_skew_requires_explicit_bound(tmp_path):
     assert meta["_quality"]["max_selected_source_skew_ns"] == 50_000_000
 
 
+def test_audit_rejects_clock_step_and_nonmonotonic_camera_header(tmp_path):
+    episode = fixture(tmp_path, "episode_000001")
+    meta = annotate(episode)
+    meta["clock_adjustments"] = [{"observed_at_unix_ns": 1_800_000_100_000_000_000,
+                                   "offset_delta_ns": 700_000_000}]
+    meta["bag_validation"] = {"frame_stats_by_header_stamp": {
+        exporter.CAMERAS["top_rgb"]: {"non_increasing_stamps": 1}}}
+    (episode / "episode.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+    row = checked_audit(episode, max_age_ms=100)
+
+    assert not row["eligible"]
+    assert "系统时钟跳变" in " ".join(row["reasons"])
+    assert "Header 时间戳不单调" in " ".join(row["reasons"])
+
+
 def test_bimanual_audit_rejects_invalid_action_state(tmp_path):
     episode = vector_fixture(tmp_path, "episode_000001", verified=False)
     # 标注不调用深检；默认未核实的夹爪绝不能获得成功资格。

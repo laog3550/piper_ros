@@ -54,6 +54,7 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <section>
 <h2>录制操作</h2>
 <div id="current" class="muted">正在读取状态…</div>
+<p id="quality_warning" class="error" role="status"></p>
 <div id="captured_initial" class="muted"></div>
 <div class="row"><div><label for="mode">采集类型</label><select id="mode"><option value="task">完整任务</option><option value="skill">单技能片段</option></select></div><div id="skill_field" hidden><label for="skill">固定技能</label><select id="skill"><option value="pick_banana">抓取香蕉</option><option value="place_banana_in_box">香蕉放入盒子</option><option value="close_hinged_lid_bimanual">双臂合上翻盖</option></select></div></div>
 <label for="task">任务名</label><input id="task" maxlength="120" placeholder="例如：香蕉抓取、入盒与双臂翻盖">
@@ -183,6 +184,8 @@ async function refresh() {
     $('state').textContent=labels[state] || state; $('state').className='badge '+(state==='recording'?'recording':'');
     const meta=result.metadata || {}; currentMeta=meta;
     $('current').textContent=meta.episode_id ? `Episode ${meta.episode_id} · ${meta.task || ''} · ${skillNames[meta.active_skill] || skillNames[meta.skill] || '完整任务'} · ${meta.error || labels[state]}${state==='recording' && result.remaining_sec!=null ? ` · 剩余 ${Math.ceil(result.remaining_sec)} 秒` : ''}` : (result.pending?.length ? `有 ${result.pending.length} 个未处理暂存 Episode，请丢弃后重试` : '当前无活动 Episode');
+    const badHeaders=Object.entries(meta.bag_validation?.frame_stats_by_header_stamp || {}).filter(([,stats])=>stats.non_increasing_stamps>0).map(([topic])=>topic);
+    $('quality_warning').textContent=meta.clock_adjustments?.length || badHeaders.length ? `时间同步异常：${meta.clock_adjustments?.length || 0} 次系统时钟跳变，${badHeaders.length} 路图像 Header 不单调；该 Episode 不应进入训练。` : '';
     const initial=meta.task_metadata?.initial_conditions?.joint_positions || {};
     $('captured_initial').textContent=Object.entries(initial).map(([arm,item])=>`${arm==='left'?'左臂':'右臂'}录制起点：${item.position_rad.map(value=>value.toFixed(3)).join(', ')} rad`).join('；');
     showAnnotations(meta);
@@ -191,7 +194,7 @@ async function refresh() {
       if(outcomes.length && !$('outcome').value) $('outcome').value=outcomes.at(-1).value;
     }
     updateButtons();
-  } catch(error) { state='unknown'; currentMeta={}; $('state').textContent='录制服务未连接'; $('state').className='badge'; $('current').textContent=error.message; updateButtons(); }
+  } catch(error) { state='unknown'; currentMeta={}; $('state').textContent='录制服务未连接'; $('state').className='badge'; $('current').textContent=error.message; $('quality_warning').textContent=''; updateButtons(); }
 }
 async function loadEpisodes() {
   try {

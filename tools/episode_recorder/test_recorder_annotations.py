@@ -87,3 +87,17 @@ def test_recovery_trigger_has_stable_link(recorder):
     result = recorder.annotate({"kind": "recovery_trigger", "value": "grasp_slip"})
     assert len(result["annotation"]["recovery_id"]) == 32
     assert result["annotation"]["skill"] == "pick_banana"
+
+
+def test_clock_step_is_recorded_for_quality_audit(recorder, monkeypatch):
+    recorder._last_clock_offset_ns = 1_000_000_000
+    clock = recorder._sample_clock.__globals__["time"]
+    monkeypatch.setattr(clock, "time_ns", lambda: 2_000_000_000)
+    monkeypatch.setattr(clock, "monotonic_ns", lambda: 900_000_000)
+
+    recorder._sample_clock()
+
+    assert recorder.metadata["clock_adjustments"] == [{
+        "observed_at_unix_ns": 2_000_000_000,
+        "offset_delta_ns": 100_000_000,
+    }]

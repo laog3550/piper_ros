@@ -175,6 +175,7 @@ def main():
                 assert "采集数据的训练用途" in page
                 assert "π0.5（Pi）动作策略" in page and "Qwen 规划与结果判断" in page
                 assert 'id="duration_sec"' in page and 'id="save_dir"' in page
+                assert 'id="quality_warning"' in page
             for index in range(3):
                 with urlopen(f"http://127.0.0.1:{port}/camera/{index}.jpg") as response:
                     assert response.read(3) == b"\xff\xd8\xff"
@@ -183,6 +184,7 @@ def main():
             assert start["result"]["state"] == "recording"
             assert start["result"]["metadata"]["mode"] == "task"
             assert start["result"]["metadata"]["duration_limit_sec"] == 60
+            assert start["result"]["metadata"]["rosbag_cache_bytes"] == 268_435_456
             captured = start["result"]["metadata"]["task_metadata"]["initial_conditions"]
             assert captured["source"] == "ros_slave_feedback"
             assert set(captured["joint_positions"]) == {"left", "right"}

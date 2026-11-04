@@ -40,5 +40,6 @@
     }
   },
   "min_free_gb": 20,
+  "rosbag_cache_bytes": 268435456,
   "startup_timeout_sec": 15
 }

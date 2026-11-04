@@ -28,6 +28,7 @@ from vlm_annotations import (required_text, validate_annotation, validate_plan,
 
 SKILLS = ("pick_banana", "place_banana_in_box", "close_hinged_lid_bimanual")
 ANNOTATION_KINDS = ("skill_start", "skill_complete", "outcome", "recovery_trigger")
+CLOCK_STEP_THRESHOLD_NS = 50_000_000
 
 
 def atomic_json(path, data):
@@ -131,6 +132,12 @@ class Recorder:
             raise ValueError("expected_fps 只能为 frame_topics 指定正数帧率")
         self.min_free_bytes = int(float(config.get("min_free_gb", 1)) * 1_000_000_000)
         self.timeout = float(config.get("startup_timeout_sec", 15))
+        self._last_clock_offset_ns = None
+        self.rosbag_cache_bytes = config.get("rosbag_cache_bytes", 268_435_456)
+        if (isinstance(self.rosbag_cache_bytes, bool)
+                or not isinstance(self.rosbag_cache_bytes, int)
+                or not 0 <= self.rosbag_cache_bytes <= 2_147_483_648):
+            raise ValueError("rosbag_cache_bytes 必须为 0 至 2147483648 的整数")
         self.socket_path = Path(config.get("socket_path", str(self.root / "recorder.sock"))).expanduser().resolve()
         self.lock = (self.root / ".recorder.lock").open("w")
         fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -284,12 +291,14 @@ class Recorder:
             "rosbag_relative_path": "bag",
             "duration_limit_sec": duration,
             "frame_topics": self.frame_topics, "expected_fps": self.expected_fps,
+            "rosbag_cache_bytes": self.rosbag_cache_bytes,
             "started_at_unix_ns": time.time_ns(),
             "timestamp_note": "rosbag2 messages.timestamp 是接收时间；原始消息 header.stamp 保留在 CDR 消息中",
         }
         self._write_current()
         node_name = f"piper_episode_{os.getpid()}"
-        command = ["ros2", "bag", "record", "--storage", "sqlite3", "--max-cache-size", "0",
+        command = ["ros2", "bag", "record", "--storage", "sqlite3", "--max-cache-size",
+                   str(self.rosbag_cache_bytes),
                    "--node-name", node_name, "-o", str(self.current / "bag"), *self.topics]
         log = (self.current / "rosbag.log").open("w")
         try:
@@ -311,6 +320,8 @@ class Recorder:
                 self.metadata["state"] = "recording"
                 ready = time.time_ns()
                 self.metadata["ready_at_unix_ns"] = ready
+                self._last_clock_offset_ns = ready - time.monotonic_ns()
+                self.metadata["clock_adjustments"] = []
                 if duration is not None:
                     duration_ns = round(duration * 1_000_000_000)
                     self.ready_monotonic_ns = time.monotonic_ns()
@@ -393,6 +404,7 @@ class Recorder:
     def stop(self, reason="manual"):
         if self.current is None or self.metadata["state"] != "recording":
             raise ValueError("没有正在录制的 Episode")
+        self._sample_clock()
         if self.process is None or self.process.poll() is not None:
             self.metadata["state"] = "interrupted"
             self.metadata["error"] = "rosbag2 已意外退出"
@@ -530,6 +542,8 @@ class Recorder:
 
     def status(self):
         if self.current is not None:
+            if self.metadata["state"] == "recording":
+                self._sample_clock()
             if self.process and self.process.poll() is not None and self.metadata["state"] == "recording":
                 self.metadata["state"] = "interrupted"
                 self.metadata["error"] = "rosbag2 意外退出"
@@ -548,6 +562,16 @@ class Recorder:
                     "remaining_sec": max(0, (deadline - time.monotonic_ns()) / 1_000_000_000) if deadline else None}
         pending = [str(p) for p in self.staging.iterdir() if p.is_dir()]
         return {"state": "idle", "pending": pending, "free_bytes": self._available()}
+
+    def _sample_clock(self):
+        now_ns = time.time_ns()
+        offset_ns = now_ns - time.monotonic_ns()
+        previous = self._last_clock_offset_ns
+        self._last_clock_offset_ns = offset_ns
+        if previous is not None and abs(offset_ns - previous) >= CLOCK_STEP_THRESHOLD_NS:
+            self.metadata.setdefault("clock_adjustments", []).append({
+                "observed_at_unix_ns": now_ns, "offset_delta_ns": offset_ns - previous})
+            self._write_current()
 
     def _saved_paths(self):
         paths = list(self.root.glob("episode_[0-9]*"))

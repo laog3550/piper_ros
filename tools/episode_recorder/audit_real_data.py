@@ -73,6 +73,11 @@ def audit_native(episode_path, fps=10, max_age_ms=100, max_can_skew_ms=30,
     reasons = []
     if meta.get("state") != "saved":
         reasons.append("Episode 尚未保存完成")
+    if meta.get("clock_adjustments"):
+        reasons.append("录制期间检测到系统时钟跳变")
+    for topic, stats in (meta.get("bag_validation") or {}).get("frame_stats_by_header_stamp", {}).items():
+        if stats.get("non_increasing_stamps", 0):
+            reasons.append(f"{topic} 的 Header 时间戳不单调")
     for key in ("arm_mode", "time_domain", "action_space", "action_provenance",
                 "calibration_version", "normalization_version"):
         if not fields.get(key):
