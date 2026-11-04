@@ -56,6 +56,7 @@ def test_load_percent_is_the_worst_case_over_the_bitrate():
 
 def test_verdict_follows_degradation_then_load_then_errors():
     assert _quality().verdict == 'CLEAN'
+    assert _quality(frames=0, worst_case_load_kbit_s=0).verdict == 'NO_SIGNAL'
     assert _quality(error_frames=1).verdict == 'ERRORS'
     assert _quality(worst_case_load_kbit_s=900.0).verdict == 'OVERLOAD'
     assert _quality(error_frames=5, degradation_frames=1).verdict == 'DEGRADED'
@@ -67,6 +68,8 @@ def test_verdict_rank_orders_the_severities():
     assert _verdict_rank(_quality(error_frames=1)) < _verdict_rank(
         _quality(worst_case_load_kbit_s=900.0))
     assert _verdict_rank(_quality(worst_case_load_kbit_s=900.0)) < (
+        _verdict_rank(_quality(frames=0, worst_case_load_kbit_s=0)))
+    assert _verdict_rank(_quality(frames=0, worst_case_load_kbit_s=0)) < (
         _verdict_rank(_quality(degradation_frames=1)))
 
 
@@ -110,6 +113,18 @@ def test_enable_summary_treats_a_mixed_joint_as_enabled():
     })
 
     assert summary == (False, True, True, False, False, False)
+    assert _enable_summary({1: set(), 2: set()}) == ()
+
+
+def test_no_signal_report_does_not_claim_clean_or_disabled():
+    quality = _quality(frames=0, worst_case_load_kbit_s=0,
+                       nominal_load_kbit_s=0, joint_enable_samples=())
+
+    text = render(quality)
+
+    assert '结论：NO_SIGNAL' in text
+    assert '状态未知' in text
+    assert '全部 disabled' not in text
 
 
 def test_render_and_summary_line_report_the_key_numbers():

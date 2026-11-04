@@ -86,9 +86,11 @@ class BusQuality:
 
     @property
     def verdict(self) -> str:
-        """Return one of CLEAN / ERRORS / DEGRADED / OVERLOAD."""
+        """Return one of CLEAN / ERRORS / DEGRADED / OVERLOAD / NO_SIGNAL."""
         if self.degradation_frames:
             return 'DEGRADED'
+        if self.frames == 0 and self.error_frames == 0:
+            return 'NO_SIGNAL'
         if self.load_percent >= 80.0:
             return 'OVERLOAD'
         if self.error_frames:
@@ -226,6 +228,8 @@ def _enable_summary(samples: Dict[int, set]) -> Tuple[bool, ...]:
     enabled, because that is the unsafe direction: the follower must never be
     assumed disabled when some frame claimed it was on.
     """
+    if not any(samples.values()):
+        return ()
     summary = []
     for joint in range(1, JOINT_COUNT + 1):
         values = samples.get(joint) or set()
@@ -284,6 +288,8 @@ def render(quality: BusQuality) -> str:
                     if all(quality.joint_enable_samples)
                     else 'enabled／disabled 混合')
         lines.append(f'  六关节使能（低速反馈）：{observed}')
+    else:
+        lines.append('  六关节使能（低速反馈）：未收到样本，状态未知')
     lines.append(f'  CAN 错误帧：{quality.error_frames} 个，平均 '
                  f'{quality.error_rate_hz:.2f}/s，单秒峰值 '
                  f'{quality.peak_error_rate_hz:.1f}/s，状态退化帧 '
@@ -370,7 +376,7 @@ def main(args=None) -> int:
     print(interface_state(options.port))
     if worst is None:
         return EXIT_OK
-    if worst.verdict == 'DEGRADED':
+    if worst.verdict in ('DEGRADED', 'NO_SIGNAL'):
         return EXIT_DEGRADED
     if worst.verdict == 'CLEAN':
         return EXIT_OK
@@ -379,7 +385,8 @@ def main(args=None) -> int:
 
 def _verdict_rank(quality: BusQuality) -> int:
     """Order verdicts by severity so a repeat run reports the worst one."""
-    return {'CLEAN': 0, 'ERRORS': 1, 'OVERLOAD': 2, 'DEGRADED': 3}[
+    return {'CLEAN': 0, 'ERRORS': 1, 'OVERLOAD': 2,
+            'NO_SIGNAL': 3, 'DEGRADED': 4}[
         quality.verdict]
 
 
