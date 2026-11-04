@@ -174,12 +174,15 @@ def main():
                 page = response.read().decode()
                 assert "采集数据的训练用途" in page
                 assert "π0.5（Pi）动作策略" in page and "Qwen 规划与结果判断" in page
+                assert 'id="duration_sec"' in page and 'id="save_dir"' in page
             for index in range(3):
                 with urlopen(f"http://127.0.0.1:{port}/camera/{index}.jpg") as response:
                     assert response.read(3) == b"\xff\xd8\xff"
-            start = http(port, "/api/start", {"task": "合成拾取", "language_instruction": "拿起测试物体"})
+            start = http(port, "/api/start", {"task": "合成拾取", "language_instruction": "拿起测试物体",
+                                               "duration_sec": 60})
             assert start["result"]["state"] == "recording"
             assert start["result"]["metadata"]["mode"] == "task"
+            assert start["result"]["metadata"]["duration_limit_sec"] == 60
             captured = start["result"]["metadata"]["task_metadata"]["initial_conditions"]
             assert captured["source"] == "ros_slave_feedback"
             assert set(captured["joint_positions"]) == {"left", "right"}
@@ -212,8 +215,11 @@ def main():
             http(port, "/api/annotate", {"kind": "outcome", "value": "success"})
             assert len(http(port, "/api/status")["result"]["metadata"]["annotations"]) == 6
             assert http(port, "/api/stop", {})["result"]["state"] == "stopped"
-            saved = http(port, "/api/save", {"outcome": "success"})["result"]
+            custom_save = root / "manual_destination"
+            saved = http(port, "/api/save", {"outcome": "success",
+                                              "save_dir": str(custom_save)})["result"]
             assert saved["state"] == "saved"
+            assert Path(saved["path"]).parent == custom_save
             saved_meta = json.loads((Path(saved["path"]) / "episode.json").read_text())
             assert len(saved_meta["annotations"]) == 6
             assert saved_meta["annotations"][1]["kind"] == "skill_complete"

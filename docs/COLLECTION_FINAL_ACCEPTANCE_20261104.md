@@ -1,0 +1,39 @@
+# 数据采集程序最终验收记录（2026-11-04）
+
+## 验收结论
+
+**软件采集、定时停止、指定路径保存、只读从臂状态导出链路通过；真实可训练数据集验收未通过。** 本次复验时三路相机与右侧从臂反馈在线，但左侧 `can_left` 在上电后仍未收到新帧，因此无法完成当天的双臂现场联录。程序正确拒绝了缺少左侧关节反馈的开始请求。左侧接线恢复后，应按下文补做现场联录；不能把历史数据或合成测试算作本次现场通过。
+
+2026-11-03 的真机 40 秒 Episode `/tmp/piper_full_live_split_probe_20261103/episode_000001` 已完成自动停止、保存和六路 RGB-D、双臂 CAN 同录。保存的左右从臂反馈已导出并重新打开为 `LeRobotDataset v3.0`：1 条 Episode、402 帧、10 fps、14 维 `observation.state`，每侧六个关节加夹爪；393 帧有完整原始 CAN 字节旁证。导出目录为 `/tmp/piper_follower_state_with_gripper_lerobot_20261103`。夹爪在这次动作中没有开合，零点和方向未经实物核验；该产物没有 `action`，清单明确标记 `training_eligible=false`。详情见[从臂状态导出验收](FOLLOWER_STATE_LEROBOT_VALIDATION.md)。
+
+## 本次软件检查
+
+| 检查项 | 结果 |
+| --- | --- |
+| ROS/CAN/录制器测试 | `29 passed`，日志 `/tmp/piper_final_system_tests_20261104.log` |
+| 转换、质量门禁与 VLA 测试 | `60 passed, 5 subtests passed`，日志 `/tmp/piper_final_conversion_tests_20261104.log` |
+| `colcon build --packages-select piper piper_msgs --symlink-install` | 2 包构建通过；仅有既存的 setuptools `tests_require` 提示 |
+| 三技能 Web 合成联调 | 开始、标注、停止、保存、丢弃、重启读取通过；手动保存目录和 60 秒时限写入元数据，日志 `/tmp/piper_final_skill_ui_after_fix_20261104.log` |
+| VLM Web 合成联调 | 规划、结果、重启读取与候选导出通过，日志 `/tmp/piper_final_web_ui_20261104.log` |
+| 本地桌面合成联调 | 三路预览约 29.3 fps；关窗后继续录制、保存、丢弃与跨目录重启读取通过，日志 `/tmp/piper_final_desktop_ui_20261104.log` |
+| 历史真机 LeRobot 回读 | 1 条 Episode、402 帧、14 维状态；抽查首、中、末帧，左右夹爪数值可读 |
+
+验收中补齐了三技能 Web 采集界面的每条 Episode 固定时长与保存目录输入，并在服务端限制时长为 1～86400 秒、保存目录为绝对路径。到时自动停止，操作员仍需选择结果并保存。桌面界面此前已有这两个输入。本次改动位于 `tools/episode_recorder/skill_web_console.py`、`skill_web_console.html` 和对应集成测试。
+
+## 七模块状态
+
+| 模块 | 验收状态与未完成项 |
+| --- | --- |
+| 1 硬件接入与时钟同步 | 昨日真机双臂 CAN 与六路 RGB-D 同录通过短测；今日左侧 CAN 无新帧，需恢复并复测。跨设备时间基准仍须随正式任务数据审计。 |
+| 2 技能状态机录制 | 固定三技能、原子 Episode、扰动编号和起始关节快照的合成联调通过；现场技能执行与场景扰动未验收。 |
+| 3 即时轻量标注 | 技能边界、完成帧、结果和恢复触发的合成联调通过；真实任务的标注一致性尚无人工复核。 |
+| 4 恢复触发 | 环形缓存与清单有合成测试；真实高负载恢复片段和训练回流未验收。 |
+| 5 质量审计 | 保存时检查话题与 SQLite，离线门禁拒绝不完整来源；真实可训练合格帧仍为 0。 |
+| 6 LeRobot v3 与 π0.5 | 真机从臂七维每侧状态导出及回读通过；完整动作示教、夹爪物理映射、标定、单技能标注、训练门禁及固定 openpi 读取器兼容均未验收，不能启动真实 SFT。 |
+| 7 运行时轨迹与 Qwen | 轨迹、图像来源、人工审核和候选导出的合成检查通过；真实部署轨迹与 Qwen LoRA 训练集未验收。 |
+
+## 现场补验入口
+
+在左右主从臂正常上电、CAN 接线恢复后，保持 `can_left`、`can_right` 为 1 Mbit/s `LISTEN-ONLY`。只读旁路与相机可按现有启动流程运行；不需要 ROS 控制机械臂。先确认 `/piper_vector/{left,right}/slave_feedback` 的前 3 组来源时间戳非零、`missing/stale=false`，并确认三路彩色预览在线。随后通过采集界面录制一条短 Episode，选择固定时长与绝对保存目录，核对自动停止、六路 RGB-D 与双臂 CAN 话题计数、Header 单调性、关节和夹爪字段，再执行只读 LeRobot 导出与来源审计。
+
+界面开始门禁在左侧缺帧时返回 `400` 和“left 臂没有可用的实时关节反馈”，这是预期的质量保护。恢复后须重新运行上述真机检查；仅把 `mapping_verified` 或 `gripper_mapping_verified` 改为 `true` 不构成实物验收。

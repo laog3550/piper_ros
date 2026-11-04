@@ -58,6 +58,8 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <div class="row"><div><label for="mode">采集类型</label><select id="mode"><option value="task">完整任务</option><option value="skill">单技能片段</option></select></div><div id="skill_field" hidden><label for="skill">固定技能</label><select id="skill"><option value="pick_banana">抓取香蕉</option><option value="place_banana_in_box">香蕉放入盒子</option><option value="close_hinged_lid_bimanual">双臂合上翻盖</option></select></div></div>
 <label for="task">任务名</label><input id="task" maxlength="120" placeholder="例如：香蕉抓取、入盒与双臂翻盖">
 <label for="instruction">语言指令</label><textarea id="instruction" maxlength="2000" placeholder="例如：抓取香蕉放入盒中，再由双臂合上翻盖"></textarea>
+<div class="row"><div><label for="duration_sec">本条 Episode 固定时长（秒）</label><input id="duration_sec" type="number" min="1" max="86400" step="1" value="60"></div><div><label for="save_dir">Episode 保存目录</label><input id="save_dir" type="text" placeholder="绝对路径；每条可修改"></div></div>
+<p class="muted">到时自动停止，之后仍需选择结果并保存；保存时在所填目录下自动创建 Episode 子目录。</p>
 <div id="contract_fields" hidden>
 <h2>技能采集契约</h2>
 <div class="row"><div><label for="arm_mode">执行臂</label><select id="arm_mode"><option value="">请选择</option><option value="LEFT">LEFT</option><option value="RIGHT">RIGHT</option><option value="BIMANUAL">BIMANUAL</option></select></div><div><label for="calibration_version">已验收标定版本</label><input id="calibration_version" maxlength="120" placeholder="填写现场验收的版本号"></div><div><label for="normalization_version">归一化版本</label><input id="normalization_version" maxlength="120" placeholder="填写数据集版本号"></div></div>
@@ -177,9 +179,10 @@ async function refresh() {
     showSensors(data);
     if(!response.ok || !data.ok) throw Error(data.error || '录制服务未连接');
     const result=data.result; state=result.state;
+    if(!$('save_dir').value && data.default_save_dir) $('save_dir').value=data.default_save_dir;
     $('state').textContent=labels[state] || state; $('state').className='badge '+(state==='recording'?'recording':'');
     const meta=result.metadata || {}; currentMeta=meta;
-    $('current').textContent=meta.episode_id ? `Episode ${meta.episode_id} · ${meta.task || ''} · ${skillNames[meta.active_skill] || skillNames[meta.skill] || '完整任务'} · ${meta.error || labels[state]}` : (result.pending?.length ? `有 ${result.pending.length} 个未处理暂存 Episode，请丢弃后重试` : '当前无活动 Episode');
+    $('current').textContent=meta.episode_id ? `Episode ${meta.episode_id} · ${meta.task || ''} · ${skillNames[meta.active_skill] || skillNames[meta.skill] || '完整任务'} · ${meta.error || labels[state]}${state==='recording' && result.remaining_sec!=null ? ` · 剩余 ${Math.ceil(result.remaining_sec)} 秒` : ''}` : (result.pending?.length ? `有 ${result.pending.length} 个未处理暂存 Episode，请丢弃后重试` : '当前无活动 Episode');
     const initial=meta.task_metadata?.initial_conditions?.joint_positions || {};
     $('captured_initial').textContent=Object.entries(initial).map(([arm,item])=>`${arm==='left'?'左臂':'右臂'}录制起点：${item.position_rad.map(value=>value.toFixed(3)).join(', ')} rad`).join('；');
     showAnnotations(meta);
@@ -216,7 +219,7 @@ async function action(name, payload={}) {
 }
 $('mode').onchange=updateContract; $('skill').onchange=updateContract; $('arm_mode').onchange=updateContract;
 $('start').onclick=()=>{
-  const payload={mode:$('mode').value,task:$('task').value,language_instruction:$('instruction').value};
+  const payload={mode:$('mode').value,task:$('task').value,language_instruction:$('instruction').value,duration_sec:Number($('duration_sec').value)};
   payload.perturbation_id=$('initial_perturbation_id').value;
   if(payload.mode==='skill') { payload.skill=$('skill').value;
     payload.arm_mode=$('arm_mode').value; payload.calibration_version=$('calibration_version').value;
@@ -224,7 +227,7 @@ $('start').onclick=()=>{
   action('start',payload);
 };
 $('stop').onclick=()=>action('stop');
-$('save').onclick=()=>action('save',{outcome:$('outcome').value});
+$('save').onclick=()=>action('save',{outcome:$('outcome').value,save_dir:$('save_dir').value.trim()});
 $('discard').onclick=()=>{ if(confirm('确定丢弃当前 Episode？录制数据将被删除。')) action('discard'); };
 async function annotate(kind,value) {
   busy=true; updateButtons(); notice('正在记录标注…');

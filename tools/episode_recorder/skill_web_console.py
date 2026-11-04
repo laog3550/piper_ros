@@ -222,6 +222,12 @@ def start_request(body, config, preview):
     mode = body.get("mode", "task")
     if mode not in ("task", "skill"):
         raise ValueError("采集类型必须为 task 或 skill")
+    duration = body.get("duration_sec")
+    if duration is not None and (isinstance(duration, bool)
+                                 or not isinstance(duration, (int, float))
+                                 or not math.isfinite(duration)
+                                 or not 1 <= duration <= 86400):
+        raise ValueError("固定录制时长须为 1 至 86400 秒")
     missing_cameras = [camera["name"] for camera in preview.snapshot() if not camera["online"]]
     if missing_cameras:
         raise ValueError("相机预览未就绪：" + "、".join(missing_cameras))
@@ -260,7 +266,7 @@ def start_request(body, config, preview):
     if perturbation_id.strip():
         metadata["initial_conditions"]["perturbation_id"] = perturbation_id.strip()
     return {"action": "start", "mode": mode, "task": task.strip(), "skill": skill,
-            "metadata": metadata}
+            "duration_sec": duration, "metadata": metadata}
 
 
 def annotation_request(body, preview):
@@ -313,6 +319,7 @@ def handler_factory(socket_path, preview, config):
                     result["cameras"] = preview.snapshot()
                     result["joints"] = preview.joint_snapshot()
                     result["event"] = event
+                    result["default_save_dir"] = str(Path(config["output_dir"]).expanduser().resolve())
                     return self.respond(200, result)
                 except (OSError, ValueError, json.JSONDecodeError) as exc:
                     return self.respond(503, {"ok": False, "error": str(exc),
@@ -357,9 +364,14 @@ def handler_factory(socket_path, preview, config):
                 elif action == "annotate":
                     request = annotation_request(body, preview)
                 elif action == "save":
-                    request = {"action": action, "outcome": body.get("outcome")}
+                    request = {"action": action, "outcome": body.get("outcome"),
+                               "save_dir": body.get("save_dir")}
                     if request["outcome"] not in ("success", "failure"):
                         raise ValueError("请选择成功或失败标签")
+                    if (request["save_dir"] is not None
+                            and (not isinstance(request["save_dir"], str)
+                                 or not Path(request["save_dir"]).expanduser().is_absolute())):
+                        raise ValueError("保存目录须为绝对路径")
                 else:
                     request = {"action": action}
                 response = recorder_request(socket_path, request)
