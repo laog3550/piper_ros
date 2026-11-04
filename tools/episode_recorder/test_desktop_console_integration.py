@@ -20,6 +20,7 @@ import rclpy
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
+from piper_msgs.msg import PiperArmVector
 
 from desktop_console import Cameras, Console, recorder_request
 
@@ -39,6 +40,8 @@ def publish(node, stop):
     depth.data = (500).to_bytes(2, "little") * (depth.width * depth.height)
     depths = [node.create_publisher(Image, topic, qos_profile_sensor_data) for topic in DEPTH_TOPICS]
     feedback = node.create_publisher(String, "/synthetic/feedback", 10)
+    joint_publishers = {arm: node.create_publisher(PiperArmVector, f"/piper_vector/{arm}/slave_feedback", 10)
+                        for arm in ("left", "right")}
     next_frame = time.monotonic()
     while not stop.is_set():
         image.header.stamp = node.get_clock().now().to_msg()
@@ -48,6 +51,12 @@ def publish(node, stop):
         for publisher in depths:
             publisher.publish(depth)
         feedback.publish(String(data="synthetic; no CAN device"))
+        for arm, publisher in joint_publishers.items():
+            vector = PiperArmVector()
+            vector.source_topic = f"/piper_direct/{arm}/slave_feedback"
+            vector.position = [0.1] * 6 + [0.02]
+            vector.source_stamps = [image.header.stamp] * 4
+            publisher.publish(vector)
         next_frame += 1 / 30
         stop.wait(max(0, next_frame - time.monotonic()))
 
@@ -72,7 +81,8 @@ def main():
         target_dir = Path(target)
         config_path = Path(temp) / "config.json"
         config = {"output_dir": str(Path(temp) / "episodes"),
-                  "topics": [*TOPICS, *DEPTH_TOPICS, "/synthetic/feedback"],
+                  "topics": [*TOPICS, *DEPTH_TOPICS, "/synthetic/feedback",
+                             "/piper_vector/left/slave_feedback", "/piper_vector/right/slave_feedback"],
                   "frame_topics": [*TOPICS, *DEPTH_TOPICS], "min_free_gb": 0, "startup_timeout_sec": 15}
         config_path.write_text(json.dumps(config))
         socket_path = Path(config["output_dir"]) / "recorder.sock"
@@ -92,6 +102,7 @@ def main():
         stage = ["ready"]
         closed_at = [None]
         failure = []
+        preview_p95_ms = [None]
         deadline = time.monotonic() + 35
 
         def step():
@@ -101,22 +112,36 @@ def main():
                     raise AssertionError(f"超时：{stage[0]}，状态 {window.state}，提示 {window.message.text()}")
                 if stage[0] == "ready" and window.state == "idle" and all(fps >= 25 for fps in window.display_fps):
                     assert all(image.pixmap() for image in window.depth_images)
+                    preview_p95_ms[0] = [round(sorted(samples)[int(0.95 * (len(samples) - 1))], 1)
+                                          for samples in window.display_latency_samples]
+                    assert max(preview_p95_ms[0]) < 150, preview_p95_ms[0]
                     window.task.setText("合成拾取")
                     window.instruction.setPlainText("拿起合成物体")
-                    window.duration.setValue(2)
+                    window.duration.setValue(5)
                     window.start.click(); stage[0] = "started"
                 elif stage[0] == "started" and window.state == "recording":
+                    window.mark_start.click(); stage[0] = "task_mark_started"
+                elif stage[0] == "task_mark_started" and window.active_skill == "pick_banana":
+                    window.mark_complete.click(); stage[0] = "task_mark_completed"
+                elif stage[0] == "task_mark_completed" and len(window.annotations) >= 2:
+                    window.mark_exception.click(); stage[0] = "task_exception"
+                elif stage[0] == "task_exception" and len(window.annotations) >= 3:
+                    window.mark_recovery.click(); stage[0] = "task_recovery"
+                elif stage[0] == "task_recovery" and len(window.annotations) >= 4:
                     window.close()
                     assert recorder_request(socket_path, {"action": "status"})["state"] == "recording"
                     closed_at[0] = time.monotonic()
                     stage[0] = "window_closed"
-                elif stage[0] == "window_closed" and time.monotonic() - closed_at[0] >= 3:
+                elif stage[0] == "window_closed" and time.monotonic() - closed_at[0] >= 6:
                     assert recorder_request(socket_path, {"action": "status"})["state"] == "stopped"
                     window = Console(config, cameras); window.show(); stage[0] = "reopened"
                 elif stage[0] == "reopened" and window.state == "stopped":
                     metadata = recorder_request(socket_path, {"action": "status"})["metadata"]
                     assert metadata["stop_reason"] == "duration_limit"
-                    assert metadata["recorded_duration_sec"] >= 2
+                    assert metadata["recorded_duration_sec"] >= 5
+                    assert set(metadata["task_metadata"]["initial_conditions"]["joint_positions"]) == {"left", "right"}
+                    assert [a["kind"] for a in metadata["annotations"]] == [
+                        "skill_start", "skill_complete", "recovery_trigger", "recovery_trigger"]
                     collision = target_dir / "episode_000001"
                     collision.mkdir()
                     try:
@@ -137,13 +162,41 @@ def main():
                     assert episodes[0]["stop_reason"] == "duration_limit"
                     assert Path(episodes[0]["path"]).parent == target_dir
                     assert (Path(episodes[0]["path"]) / "bag" / "metadata.yaml").is_file()
+                    window.mode.setCurrentIndex(1)
+                    window.skill.setCurrentIndex(0)
+                    window.arm_mode.setCurrentIndex(0)
+                    window.calibration.setText("synthetic-camera-v1")
+                    window.normalization.setText("synthetic-norm-v1")
+                    window.perturbation.setText("synthetic-scene-1")
+                    window.task.setText("合成抓取")
+                    window.instruction.setPlainText("抓取合成物体")
+                    window.duration.setValue(3)
+                    window.camera_ref.setCurrentIndex(3)
+                    window.start.click(); stage[0] = "skill_started"
+                elif stage[0] == "skill_started" and window.state == "recording":
+                    window.mark_complete.click(); stage[0] = "skill_completed"
+                elif stage[0] == "skill_completed" and len(window.annotations) >= 1:
+                    window.mark_success.click(); stage[0] = "skill_labeled"
+                elif stage[0] == "skill_labeled" and window.state == "stopped":
+                    meta = recorder_request(socket_path, {"action": "status"})["metadata"]
+                    assert meta["mode"] == "skill" and meta["skill"] == "pick_banana"
+                    assert meta["task_metadata"]["initial_conditions"]["perturbation_id"] == "synthetic-scene-1"
+                    assert meta["task_metadata"]["initial_conditions"]["joint_positions"]["left"]["position_rad"]
+                    assert meta["task_metadata"]["collection_contract_status"] == "training_not_ready_unverified_teleoperation_mapping"
+                    assert any(a["kind"] == "skill_complete" and a.get("source_topic") == TOPICS[2]
+                               for a in meta["annotations"])
+                    window.outcome.setCurrentIndex(1)
+                    window.save.click(); stage[0] = "skill_saving"
+                elif stage[0] == "skill_saving" and window.state == "idle":
                     window.task.setText("丢弃测试")
                     window.instruction.setPlainText("测试")
+                    window.mode.setCurrentIndex(0)
                     window.start.click(); stage[0] = "discard_start"
                 elif stage[0] == "discard_start" and window.state == "recording":
                     window.action("discard"); stage[0] = "discarding"
                 elif stage[0] == "discarding" and window.state == "idle":
-                    print(f"桌面预览帧率：{window.display_fps}；关闭窗口继续录制、保存与丢弃：通过")
+                    print(f"桌面预览帧率：{window.display_fps}；接收至显示延迟 p95：{preview_p95_ms[0]} ms；"
+                          "技能标注、关闭窗口继续录制、保存与丢弃：通过")
                     app.quit()
             except Exception as exc:
                 failure.append(exc)
@@ -173,7 +226,7 @@ def main():
                     time.sleep(0.1)
             else:
                 raise AssertionError("重启录制器后无法查询 Episode")
-            assert len(episodes) == 1 and Path(episodes[0]["path"]).parent == target_dir
+            assert len(episodes) == 2 and all(Path(item["path"]).parent == target_dir for item in episodes)
             print("重启录制器后仍能列出跨磁盘保存的 Episode：通过")
         finally:
             timer.stop(); window.close()

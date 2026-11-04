@@ -26,7 +26,10 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import Image
+from std_msgs.msg import String
+from piper_msgs.msg import PiperArmVector
 from preview_depth import DEPTH_MAX_METERS, camera_topics, depth_to_bgr, overlay_color_edges
+from skill_web_console import SKILLS, ARM_TOPICS, start_request, annotation_request, teleoperation_ready
 
 
 CAMERA_NAMES = ("左腕", "右腕", "顶部")
@@ -92,6 +95,9 @@ class Cameras:
         self.latest = [[None] * 3 for _ in range(2)]
         self.sequence = [[0] * 3 for _ in range(2)]
         self.received_at = [[0.0] * 3 for _ in range(2)]
+        self.joints = {arm: None for arm in ARM_TOPICS}
+        self.event = None
+        self.frame_topics = set(config.get("frame_topics", ()))
         qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
                          reliability=ReliabilityPolicy.BEST_EFFORT,
                          durability=DurabilityPolicy.VOLATILE)
@@ -99,6 +105,10 @@ class Cameras:
             for index, topic in enumerate(topics):
                 self.node.create_subscription(Image, topic,
                                               lambda msg, k=kind, i=index: self.on_image(k, i, msg), qos)
+        for arm, topics in ARM_TOPICS.items():
+            self.node.create_subscription(PiperArmVector, topics["slave_feedback"],
+                                          lambda msg, side=arm: self.on_joint(side, msg), 10)
+        self.node.create_subscription(String, "/collection/events", self.on_event, 10)
 
     def on_image(self, kind, index, message):
         with self.lock:
@@ -106,10 +116,80 @@ class Cameras:
             self.sequence[kind][index] += 1
             self.received_at[kind][index] = time.monotonic()
 
-    def snapshot(self):
+    def frame_snapshot(self):
         with self.lock:
             return [list(zip(self.latest[kind], self.sequence[kind], self.received_at[kind]))
                     for kind in range(2)]
+
+    def snapshot(self):
+        with self.lock:
+            received = list(self.received_at[0])
+        now = time.monotonic()
+        rows = []
+        for i, topic in enumerate(self.topics):
+            online = bool(received[i]) and now - received[i] < 3
+            rows.append({"name": CAMERA_NAMES[i], "topic": topic, "online": online,
+                         "age_sec": round(now - received[i], 2) if received[i] else None,
+                         "error": None if online else ("话题无发布者" if not self.node.count_publishers(topic)
+                                  else "尚未收到图像" if not received[i] else "图像已过期")})
+        return rows
+
+    def latest_reference(self, index):
+        with self.lock:
+            message = self.latest[0][index]
+            received = self.received_at[0][index]
+        if message is None or self.topics[index] not in self.frame_topics or time.monotonic() - received > 0.5:
+            return None
+        stamp = message.header.stamp
+        value = stamp.sec * 1_000_000_000 + stamp.nanosec
+        return (self.topics[index], value) if value > 0 else None
+
+    def on_joint(self, arm, message):
+        stamps = [s.sec * 1_000_000_000 + s.nanosec for s in message.source_stamps[:3]]
+        positions = list(message.position[:6])
+        usable = (len(stamps) == 3 and all(s > 0 for s in stamps)
+                  and max(stamps) - min(stamps) <= 30_000_000 and len(positions) == 6
+                  and all(math.isfinite(v) for v in positions)
+                  and not any(message.missing[:3]) and not any(message.stale[:3])
+                  and message.source_topic == f"/piper_direct/{arm}/slave_feedback")
+        with self.lock:
+            self.joints[arm] = {"received": time.monotonic(), "unix_ns": time.time_ns(),
+                                "stamp_ns": max(stamps) if stamps else 0,
+                                "positions": positions, "usable": usable}
+
+    def joint_snapshot(self):
+        with self.lock:
+            joints = {arm: dict(row) if row else None for arm, row in self.joints.items()}
+        now = time.monotonic()
+        return {arm: {"online": bool(row and row["usable"] and now - row["received"] <= 1.5),
+                      "age_sec": round(now - row["received"], 2) if row else None,
+                      "position_rad": row["positions"] if row and row["usable"] and now - row["received"] <= 1.5 else None,
+                      "error": "未收到反馈" if row is None else "反馈过期或来源无效"}
+                for arm, row in joints.items()}
+
+    def initial_joint_positions(self, required_arms):
+        with self.lock:
+            rows = {arm: dict(row) if row else None for arm, row in self.joints.items()}
+        result = {}
+        for arm in required_arms:
+            row = rows[arm]
+            if row is None or not row["usable"] or time.monotonic() - row["received"] > 1.5:
+                raise ValueError(f"{arm} 臂没有可用的实时关节反馈")
+        for arm, row in rows.items():
+            if row and row["usable"] and time.monotonic() - row["received"] <= 1.5:
+                result[arm] = {"topic": ARM_TOPICS[arm]["slave_feedback"],
+                               "header_stamp_ns": row["stamp_ns"], "received_at_unix_ns": row["unix_ns"],
+                               "joint_names": [f"joint{i}" for i in range(1, 7)],
+                               "position_rad": row["positions"]}
+        return result
+
+    def on_event(self, message):
+        try:
+            event = json.loads(message.data)
+        except json.JSONDecodeError:
+            return
+        with self.lock:
+            self.event = event
 
 
 class Console(QMainWindow):
@@ -127,9 +207,10 @@ class Console(QMainWindow):
         self.depth_jobs = [None] * 3
         self.rendered = [0] * 3
         self.display_fps = [0] * 3
+        self.display_latency_samples = [[] for _ in range(3)]
         self.fps_at = time.monotonic()
         self.setWindowTitle("Piper 数据采集控制台")
-        self.resize(1500, 980)
+        self.resize(1500, 1050)
 
         container = QWidget()
         self.setCentralWidget(container)
@@ -173,6 +254,30 @@ class Console(QMainWindow):
 
         fields = QGridLayout()
         layout.addLayout(fields)
+        fields.addWidget(QLabel("采集类型"), 0, 2)
+        self.mode = QComboBox(); self.mode.addItem("完整任务", "task"); self.mode.addItem("原子技能", "skill")
+        fields.addWidget(self.mode, 0, 3)
+        fields.addWidget(QLabel("固定技能"), 1, 2)
+        self.skill = QComboBox()
+        for value in SKILLS: self.skill.addItem(value, value)
+        fields.addWidget(self.skill, 1, 3)
+        fields.addWidget(QLabel("执行臂"), 2, 2)
+        self.arm_mode = QComboBox()
+        for value in ("LEFT", "RIGHT", "BIMANUAL"): self.arm_mode.addItem(value, value)
+        fields.addWidget(self.arm_mode, 2, 3)
+        fields.addWidget(QLabel("扰动编号"), 3, 2)
+        self.perturbation = QLineEdit(); fields.addWidget(self.perturbation, 3, 3)
+        fields.addWidget(QLabel("标定版本"), 4, 0)
+        self.calibration = QLineEdit(); fields.addWidget(self.calibration, 4, 1)
+        fields.addWidget(QLabel("归一化版本"), 4, 2)
+        self.normalization = QLineEdit(); fields.addWidget(self.normalization, 4, 3)
+        self.contract = QLabel("训练契约：待检查")
+        fields.addWidget(self.contract, 5, 0, 1, 4)
+        self.joint_labels = {}
+        for offset, arm in enumerate(("left", "right"), 6):
+            label = QLabel(f"{arm} 从臂：等待关节反馈")
+            fields.addWidget(label, offset, 0, 1, 4)
+            self.joint_labels[arm] = label
         fields.addWidget(QLabel("任务名"), 0, 0)
         self.task = QLineEdit()
         self.task.setMaxLength(120)
@@ -218,8 +323,23 @@ class Console(QMainWindow):
             controls.addWidget(widget)
         self.message = QLabel("关闭本窗口不会中断录制；Rerun 可独立查看详细数据。")
         layout.addWidget(self.message)
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(("编号", "任务", "语言指令", "结果", "录制时长", "开始时间", "路径"))
+        marks = QHBoxLayout(); layout.addLayout(marks)
+        self.mark_start = QPushButton("开始下一技能")
+        self.mark_complete = QPushButton("标记技能完成")
+        self.mark_success = QPushButton("标记成功")
+        self.mark_failure = QPushButton("标记失败")
+        self.mark_exception = QPushButton("标记异常")
+        self.mark_recovery = QPushButton("标记恢复")
+        self.trigger_reason = QLineEdit(); self.trigger_reason.setPlaceholderText("异常或恢复原因")
+        self.camera_ref = QComboBox(); self.camera_ref.addItem("无画面关联", None)
+        for i, name in enumerate(CAMERA_NAMES): self.camera_ref.addItem(name, i)
+        for widget in (self.mark_start, self.mark_complete, self.mark_success, self.mark_failure,
+                       self.mark_exception, self.mark_recovery, self.trigger_reason, self.camera_ref):
+            marks.addWidget(widget)
+        self.annotation_label = QLabel("尚无标注")
+        layout.addWidget(self.annotation_label)
+        self.table = QTableWidget(0, 9)
+        self.table.setHorizontalHeaderLabels(("编号", "类型", "技能", "任务", "语言指令", "结果", "录制时长", "开始时间", "路径"))
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         layout.addWidget(self.table, 2)
@@ -229,6 +349,19 @@ class Console(QMainWindow):
         self.save.clicked.connect(self.save_recording)
         self.discard.clicked.connect(self.discard_recording)
         self.outcome.currentIndexChanged.connect(self.update_buttons)
+        self.mode.currentIndexChanged.connect(self.update_contract)
+        self.skill.currentIndexChanged.connect(self.update_contract)
+        self.arm_mode.currentIndexChanged.connect(self.update_contract)
+        self.mark_start.clicked.connect(self.mark_next_skill)
+        self.mark_complete.clicked.connect(lambda: self.mark_annotation("skill_complete", self.active_skill))
+        self.mark_success.clicked.connect(lambda: self.mark_annotation("outcome", "success"))
+        self.mark_failure.clicked.connect(lambda: self.mark_annotation("outcome", "failure"))
+        self.mark_exception.clicked.connect(lambda: self.mark_annotation("recovery_trigger", "异常：" + (self.trigger_reason.text().strip() or "人工触发")))
+        self.mark_recovery.clicked.connect(lambda: self.mark_annotation("recovery_trigger", "恢复：" + (self.trigger_reason.text().strip() or "人工触发")))
+        self.config = config
+        self.active_skill = None
+        self.annotations = []
+        self.update_contract()
         self.update_buttons()
 
         self.frames_timer = QTimer(self)
@@ -266,13 +399,38 @@ class Console(QMainWindow):
         self.update_buttons()
 
     def start_recording(self):
-        task, instruction = self.task.text().strip(), self.instruction.toPlainText().strip()
-        if not task or not instruction or len(instruction) > 2000:
-            self.message.setText("请填写任务名和语言指令（指令最多 2000 字）")
-            return
-        self.action("start", mode="task", task=task, skill=None,
-                    metadata={"language_instruction": instruction},
-                    duration_sec=self.duration.value())
+        body = {"task": self.task.text(), "language_instruction": self.instruction.toPlainText(),
+                "mode": self.mode.currentData(), "skill": self.skill.currentData(),
+                "arm_mode": self.arm_mode.currentData(), "perturbation_id": self.perturbation.text(),
+                "calibration_version": self.calibration.text(),
+                "normalization_version": self.normalization.text(), "duration_sec": self.duration.value()}
+        try:
+            request = start_request(body, self.config, self.cameras)
+        except ValueError as exc:
+            self.message.setText(str(exc)); return
+        self.action(request.pop("action"), **request)
+
+    def update_contract(self):
+        skill_mode = self.mode.currentData() == "skill"
+        for widget in (self.skill, self.arm_mode, self.calibration, self.normalization):
+            widget.setEnabled(skill_mode)
+        if self.skill.currentData() == "close_hinged_lid_bimanual" and skill_mode:
+            self.arm_mode.setCurrentIndex(2)
+        ready = teleoperation_ready(self.config, self.arm_mode.currentData())
+        self.contract.setText("训练契约：遥操作映射配置已声明，仍须逐帧审计" if ready else
+                              "训练契约：映射未验证；录制数据不可直接用于训练")
+
+    def mark_next_skill(self):
+        done = [row for row in self.annotations if row.get("kind") == "skill_complete"]
+        if len(done) < len(SKILLS): self.mark_annotation("skill_start", SKILLS[len(done)])
+
+    def mark_annotation(self, kind, value):
+        try:
+            request = annotation_request({"kind": kind, "value": value,
+                                          "camera_index": self.camera_ref.currentData()}, self.cameras)
+        except ValueError as exc:
+            self.message.setText(str(exc)); return
+        self.action(request.pop("action"), **request)
 
     def save_recording(self):
         outcome = (None, "success", "failure")[self.outcome.currentIndex()]
@@ -298,6 +456,12 @@ class Console(QMainWindow):
         self.stop.setEnabled(not busy and self.state == "recording")
         self.save.setEnabled(not busy and self.state == "stopped" and self.outcome.currentIndex() > 0)
         self.discard.setEnabled(not busy and self.state in ("recording", "stopped", "failed", "interrupted"))
+        recording = not busy and self.state == "recording"
+        self.mark_start.setEnabled(recording and self.mode.currentData() == "task"
+                                   and not self.active_skill and len([a for a in self.annotations if a.get("kind") == "skill_complete"]) < len(SKILLS))
+        self.mark_complete.setEnabled(recording and bool(self.active_skill))
+        for widget in (self.mark_success, self.mark_failure, self.mark_exception, self.mark_recovery):
+            widget.setEnabled(recording)
 
     def check_futures(self):
         for key, future in list(self.pending.items()):
@@ -309,6 +473,13 @@ class Console(QMainWindow):
                 if key == "status":
                     self.state = result["state"]
                     meta = result.get("metadata") or {}
+                    self.active_skill = meta.get("active_skill") or (meta.get("skill") if meta.get("mode") == "skill" else None)
+                    self.annotations = meta.get("annotations") or []
+                    if self.annotations:
+                        last = self.annotations[-1]
+                        self.annotation_label.setText(f"标注 {len(self.annotations)} 条 · 最近：{last.get('kind')}={last.get('value')}")
+                    else:
+                        self.annotation_label.setText("尚无标注")
                     detail = f" · {meta.get('task', '')}" if meta else ""
                     if self.state == "recording" and result.get("remaining_sec") is not None:
                         detail += f" · 剩余约 {math.ceil(result['remaining_sec'])} 秒"
@@ -340,7 +511,7 @@ class Console(QMainWindow):
             when = datetime.fromtimestamp(started / 1e9).strftime("%Y-%m-%d %H:%M:%S") if started else ""
             outcome = {"success": "成功", "failure": "失败"}.get(episode.get("outcome"), "未标注")
             duration = episode.get("recorded_duration_sec")
-            values = (episode.get("episode_number"), episode.get("task"),
+            values = (episode.get("episode_number"), episode.get("mode"), episode.get("skill"), episode.get("task"),
                       episode.get("language_instruction"), outcome,
                       f"{duration:.1f} 秒" if duration is not None else "", when, episode.get("path"))
             for column, value in enumerate(values):
@@ -348,7 +519,7 @@ class Console(QMainWindow):
 
     def draw_frames(self):
         now = time.monotonic()
-        snapshot = self.cameras.snapshot()
+        snapshot = self.cameras.frame_snapshot()
         for kind, frames in enumerate(snapshot):
             images = self.images if kind == 0 else self.depth_images
             labels = self.camera_labels if kind == 0 else self.depth_labels
@@ -374,7 +545,11 @@ class Console(QMainWindow):
                         self.depth_draw_at[index] = now
                         self.last_sequence[kind][index] = sequence
                     if now - received_at > 2 and received_at:
-                        labels[index].setText(f"{CAMERA_NAMES[index]}：画面中断")
+                        reason = "话题无发布者" if not self.cameras.node.count_publishers(self.cameras.depth_topics[index]) else "画面已过期"
+                        labels[index].setText(f"{CAMERA_NAMES[index]}深度：{reason} · 最后帧龄 {now-received_at:.1f} s")
+                    elif not received_at:
+                        reason = "话题无发布者" if not self.cameras.node.count_publishers(self.cameras.depth_topics[index]) else "等待第一帧"
+                        labels[index].setText(f"{CAMERA_NAMES[index]}深度：{reason} · {self.cameras.depth_topics[index]}")
                     continue
                 if sequence != self.last_sequence[kind][index] and message is not None:
                     self.last_sequence[kind][index] = sequence
@@ -383,21 +558,35 @@ class Console(QMainWindow):
                         images[index].setPixmap(pixmap.scaled(images[index].size(),
                                                               Qt.KeepAspectRatio, Qt.FastTransformation))
                         self.rendered[index] += 1
+                        samples = self.display_latency_samples[index]
+                        samples.append((now - received_at) * 1000)
+                        if len(samples) > 300: del samples[:-300]
                     except (ValueError, cv2.error) as exc:
                         labels[index].setText(f"{CAMERA_NAMES[index]}：{exc}")
                 if now - received_at > 2 and received_at:
-                    labels[index].setText(f"{CAMERA_NAMES[index]}：画面中断")
+                    reason = "话题无发布者" if not self.cameras.node.count_publishers(self.cameras.topics[index]) else "画面已过期"
+                    labels[index].setText(f"{CAMERA_NAMES[index]}彩色：{reason} · 最后帧龄 {now-received_at:.1f} s")
+                elif not received_at:
+                    reason = "话题无发布者" if not self.cameras.node.count_publishers(self.cameras.topics[index]) else "等待第一帧"
+                    labels[index].setText(f"{CAMERA_NAMES[index]}彩色：{reason} · {self.cameras.topics[index]}")
         if now - self.fps_at >= 1:
             interval = now - self.fps_at
             self.display_fps = [round(count / interval, 1) for count in self.rendered]
             for kind, frames in enumerate(snapshot):
                 for index, (_, _, received_at) in enumerate(frames):
                     if received_at and now - received_at <= 2:
+                        age_ms = round((now - received_at) * 1000)
                         if kind == 0:
                             self.camera_labels[index].setText(
-                                f"彩色：预览 {self.display_fps[index]:.1f} fps · {self.cameras.topics[index]}")
+                                f"彩色：预览 {self.display_fps[index]:.1f} fps · 接收帧龄 {age_ms} ms · {self.cameras.topics[index]}")
                         else:
-                            self.depth_labels[index].setText(f"深度：在线 · {self.cameras.depth_topics[index]}")
+                            self.depth_labels[index].setText(f"深度：接收帧龄 {age_ms} ms · {self.cameras.depth_topics[index]}")
+            for arm, row in self.cameras.joint_snapshot().items():
+                if row["online"]:
+                    values = "、".join(f"{v:.3f}" for v in row["position_rad"])
+                    self.joint_labels[arm].setText(f"{arm} 从臂六关节 rad：{values} · 帧龄 {row['age_sec']:.2f} s")
+                else:
+                    self.joint_labels[arm].setText(f"{arm} 从臂：{row['error']}")
             self.rendered = [0] * 3
             self.fps_at = now
 
