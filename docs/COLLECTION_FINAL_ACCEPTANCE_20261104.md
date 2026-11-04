@@ -63,3 +63,17 @@
 约 65 秒的缓存对照中，CAN 和三路相机在同一时刻出现约 0.4 秒时间戳间隔，系统日志同时记录 `Clock change detected`。缓存版真机 Episode 的 13:13:57 又有一次时钟调整：左腕 RGB Header 一次约 700 ms 倒退，顶部 RGB 与对齐深度各 21 次约 701 ms 倒退；顶部对齐深度还在开始时出现一个大间隔。此时 `systemd-timesyncd` 报告较大的 NTP 抖动，频率校正曾达到 `+500 ppm`。不能把这些同步间隔全部解释为录包丢帧，也不能把有倒退的图像 Header 用于训练对齐。
 
 录制器现在每约 0.2 秒对比 `CLOCK_REALTIME` 与 `CLOCK_MONOTONIC` 的偏移，偏移单步变化达到 50 ms 时记录 `clock_adjustments`；采集界面显示时间同步异常，离线审计拒绝系统时钟跳变或任一路图像 Header 非单调。已保存的缓存版 Episode 虽没有新录制器的 `clock_adjustments` 字段，离线审计仍根据其 Header 统计明确拒绝。时间源稳定前，真实训练数据验收保持未通过。
+
+## 训练数据复验（2026-11-04 晚）
+
+对恢复后的两条真机 Episode 重新执行只读来源审计，并显式设定 RGB、从臂状态与主臂目标的总体 Header 跨度上限为 `30 ms`。复验命令为 `/tmp/piper-collection-audit-venv/bin/python tools/episode_recorder/audit_real_data.py /tmp/piper_final_recovered_saved_20261104 --episode-root /tmp/piper_final_recovered_saved_20261104 --max-source-skew-ms 30 --output /tmp/piper_training_acceptance_audit_20261104.json`。机器可读结果：来源 2 条、合格 Episode 0 条、合格训练帧 0 帧，场景组切分尚不可用。两条均为 `task` 模式，未分割成独立 `pick_banana`、`place_banana_in_box` 技能片段；`task_metadata` 缺少 `arm_mode`、`time_domain`、`action_space`、`action_provenance`、`calibration_version` 和 `normalization_version`。第二条另有左腕 RGB、顶部 RGB 与顶部对齐深度的 Header 倒退。这里的 `outcome=success` 不能代替技能完成帧与真实任务成功复核。
+
+| 训练用途 | 当前结果 | 依据与下一步 |
+| --- | --- | --- |
+| π0.5 原子技能 SFT | **不通过** | 现有 LeRobot v3 导出仅含 14 维从臂 `observation.state`，无已核准的 `action`；场景组、技能边界、成功标注、标定和夹爪实物映射尚无证据。须重新录制原子技能 Episode，完成标注和来源审计，再按场景组切分。 |
+| 固定 OpenPI 读取器 | **不通过** | 固定 commit `215abfb217dbac7d5f1273282331b9b1866c0479` 的本地环境读取缓存版 445 帧数据集时，`load_info` 识别 `codebase_version=v3.0`，但 `load_episodes` 要求 `meta/episodes.jsonl` 并抛出 `FileNotFoundError`；该文件不是当前 v3 导出的组成部分。训练启动门禁维持关闭，须完成固定读取器与 v3 的兼容改造及端到端回读。 |
+| Qwen 规划器 LoRA | **不通过** | 这两条是采集 Episode，没有真实运行时规划、执行和验证轨迹，也没有经人工审核的规划标签。现有候选导出只通过合成联调。 |
+
+夹爪已作为左右各第七维保存，且主目标与从反馈在动作中同步变化；这证明记录链路包含夹爪，尚不能证明数值就是实物指尖间距。此前对首条 Episode 做 50 ms 内配对，左右主目标与从反馈相关系数分别约 `0.959` 和 `0.969`；从反馈仍大量为负值（左 `461/504`、右 `503/554` 个配对样本）。在闭合与张开端点的实际开口、零位和符号经尺量确认前，不得把 `gripper_mapping_verified` 改为 `true`，也不能把这些值直接用于训练。
+
+复验时 `timedatectl timesync-status` 显示 NTP 偏移约 `+21.755 ms`、抖动约 `14.778 ms`，19:00 后日志没有新的 `Clock change detected`。这是复验时刻的时间服务状态，不能倒推第二条 Episode 的时间戳合格，也不能替代下一条完整技能 Episode 的同步审计。训练入口还要求每种技能至少 10 条训练、3 条测试 Episode，且训练与测试的 `perturbation_id` 场景组不重叠；目前上述四种计数均为 0。
