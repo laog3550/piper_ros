@@ -74,12 +74,12 @@
 | 固定 OpenPI 读取器 | **不通过** | 固定 commit `215abfb217dbac7d5f1273282331b9b1866c0479` 的本地环境读取缓存版 445 帧数据集时，`load_info` 识别 `codebase_version=v3.0`，但 `load_episodes` 要求 `meta/episodes.jsonl` 并抛出 `FileNotFoundError`；该文件不是当前 v3 导出的组成部分。训练启动门禁维持关闭，须完成固定读取器与 v3 的兼容改造及端到端回读。 |
 | Qwen 规划器 LoRA | **不通过** | 这两条是采集 Episode，没有真实运行时规划、执行和验证轨迹，也没有经人工审核的规划标签。现有候选导出只通过合成联调。 |
 
-夹爪已作为左右各第七维保存，且主目标与从反馈在动作中同步变化；这证明记录链路包含夹爪，尚不能证明当前设备的零点与行程上限。此前对首条 Episode 做 50 ms 内配对，左右主目标与从反馈相关系数分别约 `0.959` 和 `0.969`；从反馈仍大量为负值（左 `461/504`、右 `503/554` 个配对样本）。在闭合与张开端点、零位和设备行程设置完成只读核对前，不得把 `gripper_mapping_verified` 改为 `true`，也不能把这些值直接用于训练。
+夹爪已作为左右各第七维保存，且主目标与从反馈在动作中同步变化；这证明记录链路包含夹爪，尚不能证明当前设备的闭合零点。此前对首条 Episode 做 50 ms 内配对，左右主目标与从反馈相关系数分别约 `0.959` 和 `0.969`；从反馈仍大量为负值（左 `461/504`、右 `503/554` 个配对样本）。按用户确认采用 `80 mm` 行程上限；在闭合与张开端点、零位和正方向完成只读核对前，不得把 `gripper_mapping_verified` 改为 `true`，也不能把这些值直接用于训练。
 
 复验时 `timedatectl timesync-status` 显示 NTP 偏移约 `+21.755 ms`、抖动约 `14.778 ms`，19:00 后日志没有新的 `Clock change detected`。这是复验时刻的时间服务状态，不能倒推第二条 Episode 的时间戳合格，也不能替代下一条完整技能 Episode 的同步审计。训练入口还要求每种技能至少 10 条训练、3 条测试 Episode，且训练与测试的 `perturbation_id` 场景组不重叠；目前上述四种计数均为 0。
 
 ## 夹爪协议依据与设备差异
 
-根据用户确认，夹爪采用官方 Piper 参数，无须用直尺复测协议单位。已核对本机 `piper_sdk 0.6.2`：V2 `0x2A8` 反馈前四字节为有符号 `int32`、单位 `0.001 mm`，与本仓库按 `1e-6 m` 解码一致。官方协议的夹爪/示教器参数反馈 `0x47E` 可给出设备配置的最大行程；文档示例区分 `70 mm` 小夹爪与 `100 mm` 大夹爪。本机 SDK 软件默认上限为 `0.07 m`，本仓库遥操作常量却为 `0.08 m`。这是软件默认值差异，尚不能据此断言当前设备的实际行程。官方来源：[双臂说明](https://github.com/agilexrobotics/piper_sdk/blob/master/asserts/double_piper.MD)、[SDK 协议更新记录](https://github.com/agilexrobotics/piper_sdk/blob/master/CHANGELOG.MD)、[反馈消息定义](https://github.com/agilexrobotics/piper_sdk/blob/master/piper_sdk/piper_msgs/msg_v2/feedback/arm_feedback_gripper.py)。
+根据用户确认，本项目左右夹爪均按 `0～80 mm` 行程处理，无须用直尺复测协议单位。已核对本机 `piper_sdk 0.6.2`：V2 `0x2A8` 反馈前四字节为有符号 `int32`、单位 `0.001 mm`，与本仓库按 `1e-6 m` 解码一致。本仓库遥操作上限已经是 `0.08 m`，无需修改控制常量。本机 SDK 的软件默认上限为 `0.07 m`，但本项目不以该默认值覆盖用户指定的 `0.08 m`；如以后改用 SDK 限位，需显式配置为本项目上限。官方来源：[双臂说明](https://github.com/agilexrobotics/piper_sdk/blob/master/asserts/double_piper.MD)、[SDK 协议更新记录](https://github.com/agilexrobotics/piper_sdk/blob/master/CHANGELOG.MD)、[反馈消息定义](https://github.com/agilexrobotics/piper_sdk/blob/master/piper_sdk/piper_msgs/msg_v2/feedback/arm_feedback_gripper.py)。
 
-现有录制的负值保留了官方有符号字段，不能直接解释为反向运动；主从反馈相关也不足以确定闭合零点。后续只需在正常直连遥操作中只读记录左右夹爪的闭合、张开端点，以及设备 `0x47E` 行程反馈或同等官方配置记录和画面对应关系。确认实际零点、正方向与上限后再版本化映射；在此之前不修改历史原始值，也不启用 `gripper_mapping_verified`。
+现有录制的负值保留了官方有符号字段，不能直接解释为反向运动；主从反馈相关也不足以确定闭合零点。后续在正常直连遥操作中只读记录左右夹爪的闭合、张开端点与画面对应关系，以核对 `80 mm` 配置下的零点和正方向。此处 `80 mm` 是项目配置上限，不是已观察到的最大反馈值。在此之前不修改历史原始值，也不启用 `gripper_mapping_verified`。
