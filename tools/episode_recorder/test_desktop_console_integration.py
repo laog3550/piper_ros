@@ -185,10 +185,13 @@ def main():
                     window.camera_ref.setCurrentIndex(3)
                     window.start.click(); stage[0] = "skill_started"
                 elif stage[0] == "skill_started" and window.state == "recording":
-                    window.mark_complete.click(); stage[0] = "skill_completed"
-                elif stage[0] == "skill_completed" and len(window.annotations) >= 1:
-                    window.mark_success.click(); stage[0] = "skill_labeled"
-                elif stage[0] == "skill_labeled" and window.state == "stopped":
+                    assert not window.mark_complete.isEnabled()
+                    stage[0] = "skill_wait_stop"
+                elif stage[0] == "skill_wait_stop" and window.state == "stopped":
+                    window.camera_ref.setCurrentIndex(3)
+                    window.review_offset.setText("1.5")
+                    window.mark_complete.click(); stage[0] = "skill_labeled"
+                elif stage[0] == "skill_labeled" and window.state == "stopped" and len(window.annotations) >= 1:
                     meta = recorder_request(socket_path, {"action": "status"})["metadata"]
                     assert meta["mode"] == "skill" and meta["skill"] == "pick_and_place_banana_in_box"
                     assert meta["task_metadata"]["initial_conditions"]["perturbation_id"] == "synthetic-scene-1"

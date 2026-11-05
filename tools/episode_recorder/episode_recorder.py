@@ -131,6 +131,33 @@ def inspect_bag(bag_dir, topics, frame_topics=(), expected_fps=None, required_to
             "frame_stats_by_header_stamp": frame_stats}
 
 
+def recorded_frame_near(bag_dir, topic, target_ns, start_ns, stop_ns):
+    """Resolve a review choice to an actual image Header stored in rosbag2."""
+    nearest = None
+    for path in sorted(bag_dir.glob("*.db3")):
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+            rows = connection.execute(
+                "SELECT messages.timestamp, substr(messages.data, 1, 12) FROM messages "
+                "JOIN topics ON messages.topic_id=topics.id "
+                "WHERE topics.name=? AND messages.timestamp BETWEEN ? AND ?",
+                (topic, start_ns, stop_ns))
+            for received_ns, prefix in rows:
+                if len(prefix) < 12 or prefix[:1] != b"\0" or prefix[1] not in (0, 1):
+                    continue
+                sec, nanosec = struct.unpack_from("<iI" if prefix[1] == 1 else ">iI", prefix, 4)
+                header_ns = sec * 1_000_000_000 + nanosec
+                if nanosec >= 1_000_000_000 or not start_ns <= header_ns <= stop_ns:
+                    continue
+                candidate = (abs(received_ns - target_ns), received_ns, header_ns)
+                if nearest is None or candidate < nearest:
+                    nearest = candidate
+    if nearest is None:
+        raise ValueError("所选相机在本条 Episode 中没有可核验的录制帧")
+    if nearest[0] > 500_000_000:
+        raise ValueError("所选完成时刻附近 0.5 秒内没有录制帧")
+    return nearest[1], nearest[2]
+
+
 class Recorder:
     def __init__(self, config):
         self.root = Path(config["output_dir"]).expanduser().resolve()
@@ -365,14 +392,20 @@ class Recorder:
         raise ValueError(self.metadata["error"])
 
     def annotate(self, request):
-        if self.current is None or self.metadata["state"] != "recording":
-            raise ValueError("只能在录制中标注")
+        state = self.metadata.get("state")
+        if self.current is None or state not in ("recording", "stopped"):
+            raise ValueError("只能在录制中或停止后保存前标注")
         if self.metadata.get("schema_version") != 2:
             raise ValueError("旧版 VLM 技能片段不支持 v2 实时标注")
         kind = request.get("kind")
         value = request.get("value")
         if kind not in ANNOTATION_KINDS:
             raise ValueError("未知标注类型")
+        post_review = state == "stopped"
+        if post_review and (self.metadata.get("mode") != "skill" or kind != "skill_complete"):
+            raise ValueError("停止后仅可复核原子技能完成帧；结果请在保存时选择")
+        if state == "recording" and self.metadata.get("mode") == "skill" and kind in ("skill_complete", "outcome"):
+            raise ValueError("原子技能完成帧和结果请在录制结束后标记")
         active = self.metadata.get("active_skill")
         next_active = active
         if kind == "skill_start":
@@ -400,12 +433,32 @@ class Recorder:
             raise ValueError("恢复原因不能为空")
         topic = request.get("source_topic")
         stamp = request.get("header_stamp_ns")
+        if post_review:
+            topic = request.get("review_source_topic")
+            offset = request.get("review_offset_sec")
+            if topic not in self.frame_topics or not topic.endswith("/image_raw"):
+                raise ValueError("请选择已录制的彩色相机")
+            duration = self.metadata.get("recorded_duration_sec")
+            if (isinstance(offset, bool) or not isinstance(offset, (int, float))
+                    or not math.isfinite(offset) or offset < 0 or duration is None or offset > duration):
+                raise ValueError("完成时刻须在本条 Episode 的录制时长内")
+            ready = self.metadata["ready_at_unix_ns"]
+            received, stamp = recorded_frame_near(
+                self.current / "bag", topic, ready + round(offset * 1_000_000_000),
+                ready, self.metadata["stopped_at_unix_ns"])
         if (topic is None) != (stamp is None):
             raise ValueError("source_topic 与 header_stamp_ns 必须同时提供")
         if topic is not None and (topic not in self.frame_topics or
                                   not isinstance(stamp, int) or isinstance(stamp, bool) or stamp <= 0):
             raise ValueError("完成帧来源必须是配置中的图像话题及有效 Header 时间戳")
-        annotation = {"kind": kind, "value": value, "recorded_at_unix_ns": time.time_ns()}
+        annotation = {"kind": kind, "value": value}
+        if post_review:
+            annotation.update(annotation_origin="post_recording_review",
+                              reviewed_at_unix_ns=time.time_ns(),
+                              selected_offset_sec=offset,
+                              matched_offset_sec=round((received - ready) / 1_000_000_000, 3))
+        else:
+            annotation["recorded_at_unix_ns"] = time.time_ns()
         if kind == "recovery_trigger":
             annotation["recovery_id"] = uuid.uuid4().hex
             annotation["skill"] = active

@@ -324,9 +324,13 @@ def annotation_request(body, preview):
     if index is not None:
         if isinstance(index, bool) or not isinstance(index, int) or index not in range(3):
             raise ValueError("关联画面必须为左腕、右腕或顶部")
-        reference = preview.latest_reference(index)
-        if reference:
-            request.update(source_topic=reference[0], header_stamp_ns=reference[1])
+        if "review_offset_sec" in body:
+            request.update(review_source_topic=preview.topics[index],
+                           review_offset_sec=body["review_offset_sec"])
+        else:
+            reference = preview.latest_reference(index)
+            if reference:
+                request.update(source_topic=reference[0], header_stamp_ns=reference[1])
     return request
 
 

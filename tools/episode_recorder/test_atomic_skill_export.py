@@ -81,6 +81,15 @@ def test_v2_audit_requires_resolved_success_and_complete_camera_frame(tmp_path):
     (save_labeled / "episode.json").write_text(json.dumps(save_meta), encoding="utf-8")
     assert checked_audit(save_labeled, max_age_ms=30)["eligible"]
 
+    reviewed = fixture(tmp_path, "episode_000008")
+    review_meta = annotate(reviewed)
+    review_meta["saved_at_unix_ns"] = review_meta["stopped_at_unix_ns"] + 2
+    review_meta["annotations"][0].pop("recorded_at_unix_ns")
+    review_meta["annotations"][0].update(annotation_origin="post_recording_review",
+                                         reviewed_at_unix_ns=review_meta["stopped_at_unix_ns"] + 1)
+    (reviewed / "episode.json").write_text(json.dumps(review_meta), encoding="utf-8")
+    assert checked_audit(reviewed, max_age_ms=30)["eligible"]
+
     unresolved = fixture(tmp_path, "episode_000002")
     annotate(unresolved, resolved=False)
     row = checked_audit(unresolved, max_age_ms=30)

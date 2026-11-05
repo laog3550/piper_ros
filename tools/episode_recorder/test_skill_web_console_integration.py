@@ -280,14 +280,18 @@ def main():
             assert all(field not in skill_contract for field in
                        ("time_domain", "action_space", "action_provenance"))
             assert skill["metadata"]["active_skill"] == "latch_box_lid_bimanual"
+            rejected(port, "/api/annotate", {"kind": "skill_complete",
+                                             "value": "latch_box_lid_bimanual", "camera_index": 0})
+            http(port, "/api/annotate", {"kind": "recovery_trigger", "value": "恢复：重新扶正盒体"})
+            time.sleep(0.7)
+            assert http(port, "/api/stop", {})["result"]["state"] == "stopped"
             done = http(port, "/api/annotate", {"kind": "skill_complete",
                                                "value": "latch_box_lid_bimanual",
-                                               "camera_index": 0})["result"]
+                                               "camera_index": 0, "review_offset_sec": 0.5})["result"]
             assert done["annotation"]["source_topic"] == TOPICS[0]
+            assert done["annotation"]["annotation_origin"] == "post_recording_review"
             rejected(port, "/api/annotate", {"kind": "skill_complete",
                                              "value": "latch_box_lid_bimanual"})
-            http(port, "/api/annotate", {"kind": "recovery_trigger", "value": "恢复：重新扶正盒体"})
-            assert http(port, "/api/stop", {})["result"]["state"] == "stopped"
             skill_saved = http(port, "/api/save", {"outcome": "failure"})["result"]
             assert skill_saved["state"] == "saved"
             saved_meta = json.loads((Path(skill_saved["path"]) / "episode.json").read_text())

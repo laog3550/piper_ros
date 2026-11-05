@@ -74,11 +74,12 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 </div>
 <div class="row"><button id="start">开始录制</button><button id="stop" class="secondary">停止录制</button></div>
 <div id="annotation_panel">
-<h2>实时标注</h2>
+<h2>技能与复核标注</h2>
 <p id="active_skill" class="muted">当前技能：无</p>
 <p id="next_skill" class="muted"></p>
 <label for="annotation_source">关联画面（可留空）</label><select id="annotation_source"><option value="">只记录事件时间</option><option value="0">左腕彩色</option><option value="1">右腕彩色</option><option value="2">顶部彩色</option></select>
-<p class="muted">关联时间戳来自服务器最近编码的预览帧；画面过期时只记录事件时间。浏览器刷新可能稍晚，完成帧仍须离线核对。</p>
+<label for="review_offset">原子技能完成时刻（录制开始后秒）</label><input id="review_offset" type="number" min="0" step="0.1" placeholder="停止录制后填写，例如 12.5">
+<p class="muted">原子技能停止后选择彩色相机和完成时刻，程序从本条 rosbag 中寻找邻近图像帧。完整任务的技能边界仍需在录制中标记。</p>
 <div class="row"><button id="mark_skill_start" class="secondary">开始下一技能</button><button id="mark_completion">标记当前技能完成</button><button id="mark_success" class="secondary">成功</button><button id="mark_failure" class="danger">失败</button></div>
 <label for="trigger_reason">异常或恢复原因（可提前填写；留空可一键记录）</label><input id="trigger_reason" maxlength="190" placeholder="例如：夹爪打滑；重新抓取后恢复">
 <div class="row"><button id="mark_exception" class="danger">记录异常触发</button><button id="mark_recovery" class="secondary">记录恢复触发</button></div>
@@ -177,9 +178,10 @@ function updateButtons() {
   const recording=state==='recording', active=currentMeta.active_skill || (currentMeta.mode==='skill' ? currentMeta.skill : null);
   const completed=(currentMeta.annotations || []).filter(item=>item.kind==='skill_complete').length;
   $('mark_skill_start').disabled=busy || !recording || currentMeta.mode!=='task' || !!active || completed>=skillOrder.length;
-  $('mark_completion').disabled=busy || !recording || !active || (currentMeta.mode==='skill' && completed>0);
+  $('mark_completion').disabled=busy || !active || (currentMeta.mode==='skill' ? state!=='stopped' || completed>0 : !recording);
   const hasOutcome=(currentMeta.annotations || []).some(item=>item.kind==='outcome');
-  for(const id of ['mark_success','mark_failure']) $(id).disabled=busy || !recording || hasOutcome;
+  for(const id of ['mark_success','mark_failure']) $(id).disabled=busy || !recording || currentMeta.mode==='skill' || hasOutcome;
+  $('review_offset').disabled=busy || state!=='stopped' || currentMeta.mode!=='skill';
   for(const id of ['mark_exception','mark_recovery']) $(id).disabled=busy || !recording;
 }
 function showAnnotations(meta) {
@@ -193,7 +195,7 @@ function showAnnotations(meta) {
     const title={skill_start:'技能开始',skill_complete:'技能完成',outcome:'结果',recovery_trigger:'异常/恢复'}[item.kind] || item.kind;
     const value=skillNames[item.value] || item.value;
     const clock=item.recorded_at_unix_ns ? new Date(item.recorded_at_unix_ns/1e6).toLocaleTimeString() : '';
-    row.textContent=`${clock} · ${title}：${value}${item.header_stamp_ns ? ' · 已关联图像' : ''}`;
+    row.textContent=`${clock} · ${title}：${value}${item.header_stamp_ns ? ' · 已关联图像' : ''}${item.matched_offset_sec!=null ? ` · 匹配录制第 ${item.matched_offset_sec.toFixed(3)} 秒` : ''}`;
     list.append(row);
   }
 }
@@ -261,6 +263,10 @@ async function annotate(kind,value) {
   try {
     const chosen=$('annotation_source').value;
     const payload={kind,value,camera_index:chosen==='' ? null : Number(chosen)};
+    if(kind==='skill_complete' && currentMeta.mode==='skill') {
+      if(chosen==='' || $('review_offset').value==='') throw Error('请选择相机并填写录制开始后的完成时刻');
+      payload.review_offset_sec=Number($('review_offset').value);
+    }
     const data=await readJson(await fetch('/api/annotate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}));
     if(kind==='outcome') $('outcome').value=value;
     if(kind==='recovery_trigger') $('trigger_reason').value='';
