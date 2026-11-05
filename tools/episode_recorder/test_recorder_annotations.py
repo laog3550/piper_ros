@@ -91,6 +91,24 @@ def test_task_completion_requires_current_camera_frame(recorder):
     assert recorder.metadata["active_skill"] == "pick_and_place_banana_in_box"
 
 
+def test_skill_success_needs_recorded_frame_and_verified_save(recorder):
+    recorder.metadata.update(mode="skill", skill="pick_and_place_banana_in_box",
+                             active_skill="pick_and_place_banana_in_box")
+    with pytest.raises(ValueError, match="当前彩色相机帧"):
+        recorder.annotate({"kind": "skill_complete", "value": "pick_and_place_banana_in_box",
+                           "skill_result": "success"})
+    result = recorder.annotate({"kind": "skill_complete", "value": "pick_and_place_banana_in_box",
+                                "skill_result": "success", "source_topic": "/camera_top/color/image_raw",
+                                "header_stamp_ns": 123})
+    assert result["annotation"]["skill_result"] == "success"
+    module = load_recorder_module()
+    with pytest.raises(ValueError, match="已在 rosbag 核验"):
+        module.require_verified_skill_completion(recorder.metadata, "success")
+    result["annotation"]["verified_in_bag"] = True
+    module.require_verified_skill_completion(recorder.metadata, "success")
+    module.require_verified_skill_completion(recorder.metadata, "failure")
+
+
 def test_recovery_trigger_has_stable_link(recorder):
     recorder.annotate({"kind": "skill_start", "value": "pick_and_place_banana_in_box"})
     result = recorder.annotate({"kind": "recovery_trigger", "value": "grasp_slip"})

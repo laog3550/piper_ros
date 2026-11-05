@@ -60,6 +60,20 @@ def add_save_outcome_annotation(metadata, outcome, reviewed_at_unix_ns):
                         "reviewed_at_unix_ns": reviewed_at_unix_ns})
 
 
+def require_verified_skill_completion(metadata, outcome):
+    """Require a recorded completion frame before saving a successful v2 skill."""
+    if (metadata.get("schema_version") != 2 or metadata.get("mode") != "skill"
+            or outcome != "success"):
+        return
+    completes = [item for item in metadata.get("annotations", [])
+                 if item.get("kind") == "skill_complete"]
+    if (len(completes) != 1 or completes[0].get("value") != metadata.get("skill")
+            or completes[0].get("verified_in_bag") is not True
+            or not completes[0].get("source_topic")
+            or type(completes[0].get("header_stamp_ns")) is not int):
+        raise ValueError("成功保存前须有唯一且已在 rosbag 核验的当前技能完成帧；请补标")
+
+
 def required_topics_for_episode(topics, mode, metadata):
     """Require action/state from the executing arm; retain other streams as optional context."""
     arm_mode = metadata.get("arm_mode") if isinstance(metadata, dict) else None
@@ -427,8 +441,13 @@ class Recorder:
         post_review = state == "stopped"
         if post_review and (self.metadata.get("mode") != "skill" or kind != "skill_complete"):
             raise ValueError("停止后仅可复核原子技能完成帧；结果请在保存时选择")
-        if state == "recording" and self.metadata.get("mode") == "skill" and kind in ("skill_complete", "outcome"):
-            raise ValueError("原子技能完成帧和结果请在录制结束后标记")
+        if state == "recording" and self.metadata.get("mode") == "skill" and kind == "outcome":
+            raise ValueError("原子技能结果请在录制结束后选择")
+        if state == "recording" and self.metadata.get("mode") == "skill" and kind == "skill_complete":
+            if request.get("skill_result") != "success":
+                raise ValueError("原子技能请点击“标记当前技能成功”以记录完成帧")
+            if request.get("source_topic") is None or request.get("header_stamp_ns") is None:
+                raise ValueError("技能成功标记必须关联当前彩色相机帧")
         if state == "recording" and self.metadata.get("mode") == "task" and kind == "skill_complete":
             if request.get("skill_result") != "success":
                 raise ValueError("完整任务请点击“标记当前技能成功”以记录完成帧")
@@ -484,11 +503,12 @@ class Recorder:
                                   not isinstance(stamp, int) or isinstance(stamp, bool) or stamp <= 0):
             raise ValueError("完成帧来源必须是配置中的图像话题及有效 Header 时间戳")
         annotation = {"kind": kind, "value": value}
-        if kind == "skill_complete" and not post_review and self.metadata.get("mode") == "task":
+        if kind == "skill_complete" and not post_review:
             annotation["skill_result"] = "success"
         if post_review:
             annotation.update(annotation_origin="post_recording_review",
                               reviewed_at_unix_ns=time.time_ns(),
+                              verified_in_bag=True,
                               selected_offset_sec=offset,
                               matched_offset_sec=round((received - ready) / 1_000_000_000, 3))
         else:
@@ -547,8 +567,8 @@ class Recorder:
                 self.current / "bag", self.topics, self.frame_topics, self.expected_fps,
                 self.metadata["required_topics"])
             self.metadata["state"] = "stopped"
-            if self.metadata.get("mode") == "task":
-                for item in self.metadata.get("annotations", []):
+            if self.metadata.get("schema_version") == 2:
+                for item in list(self.metadata.get("annotations", [])):
                     if item.get("kind") != "skill_complete" or item.get("skill_result") != "success":
                         continue
                     try:
@@ -559,6 +579,14 @@ class Recorder:
                             raise ValueError("点击成功时的相机帧未写入本条 rosbag")
                         item["verified_in_bag"] = True
                     except (ValueError, KeyError, sqlite3.Error) as error:
+                        if self.metadata.get("mode") == "skill":
+                            failed = dict(item)
+                            failed["frame_verification_error"] = str(error)
+                            self.metadata.setdefault("unverified_completion_attempts", []).append(failed)
+                            self.metadata["annotations"].remove(item)
+                            self.metadata["auto_completion_error"] = (
+                                "录制中标记的完成帧未写入 rosbag；请停止后按完成时刻补标")
+                            continue
                         item["frame_resolution_required"] = True
                         item["frame_verification_error"] = str(error)
                         item.pop("source_topic", None)
@@ -566,6 +594,7 @@ class Recorder:
             if (reason == "duration_limit" and self.metadata.get("schema_version") == 2
                     and self.metadata.get("mode") == "skill"
                     and self.metadata.get("skill") in SKILLS
+                    and not self.metadata.get("unverified_completion_attempts")
                     and not any(item.get("kind") == "skill_complete"
                                 for item in self.metadata.get("annotations", []))):
                 color_topics = [topic for topic in self.frame_topics
@@ -583,6 +612,7 @@ class Recorder:
                         "kind": "skill_complete", "value": self.metadata["skill"],
                         "annotation_origin": "duration_limit_last_frame",
                         "reviewed_at_unix_ns": time.time_ns(),
+                        "verified_in_bag": True,
                         "source_topic": color_topics[0], "header_stamp_ns": stamp,
                         "matched_offset_sec": round((received - ready) / 1_000_000_000, 3)})
                 except (ValueError, sqlite3.Error) as error:
@@ -615,6 +645,7 @@ class Recorder:
             if outcome is not None and outcome != annotation["outcome"]:
                 raise ValueError("结果标签与人工标注不一致")
             outcome = annotation["outcome"]
+        require_verified_skill_completion(self.metadata, outcome)
         if save_dir is not None and (not isinstance(save_dir, str) or not save_dir.strip()
                                      or not Path(save_dir).expanduser().is_absolute()):
             raise ValueError("save_dir 必须为非空的绝对目录路径")
