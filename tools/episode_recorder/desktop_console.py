@@ -385,8 +385,8 @@ class Console(QMainWindow):
         self.normalization.textChanged.connect(self.update_contract)
         self.mark_start.clicked.connect(self.mark_next_skill)
         self.mark_complete.clicked.connect(lambda: self.mark_annotation("skill_complete", self.active_skill))
-        self.mark_success.clicked.connect(lambda: self.mark_annotation("skill_complete", self.active_skill))
-        self.mark_failure.clicked.connect(lambda: self.mark_annotation("outcome", "failure"))
+        self.mark_success.clicked.connect(self.mark_skill_success)
+        self.mark_failure.clicked.connect(self.mark_skill_failure)
         self.mark_exception.clicked.connect(lambda: self.mark_annotation("recovery_trigger", "异常：" + (self.trigger_reason.text().strip() or "人工触发")))
         self.mark_recovery.clicked.connect(lambda: self.mark_annotation("recovery_trigger", "恢复：" + (self.trigger_reason.text().strip() or "人工触发")))
         self.config = config
@@ -480,6 +480,20 @@ class Console(QMainWindow):
         done = [row for row in self.annotations if row.get("kind") == "skill_complete"]
         if len(done) < len(SKILLS): self.mark_annotation("skill_start", SKILLS[len(done)])
 
+    def mark_skill_success(self):
+        if self.state == "stopped" and self.active_mode == "skill":
+            self.outcome.setCurrentIndex(1)
+            self.message.setText("已选择本条原子技能成功；请检查完成帧标注后保存 Episode")
+        else:
+            self.mark_annotation("skill_complete", self.active_skill)
+
+    def mark_skill_failure(self):
+        if self.state == "stopped" and self.active_mode == "skill":
+            self.outcome.setCurrentIndex(2)
+            self.message.setText("已选择本条原子技能失败；可保存 Episode")
+        else:
+            self.mark_annotation("outcome", "failure")
+
     def mark_annotation(self, kind, value):
         try:
             body = {"kind": kind, "value": value, "camera_index": self.camera_ref.currentData()}
@@ -539,8 +553,8 @@ class Console(QMainWindow):
         self.mark_complete.setEnabled(skill_review and not completed)
         self.review_offset.setEnabled(skill_review)
         self.camera_ref.setEnabled(recording or skill_review)
-        self.mark_success.setEnabled(recording and mode == "task" and bool(self.active_skill))
-        self.mark_failure.setEnabled(recording and mode == "task")
+        self.mark_success.setEnabled((recording and mode == "task" and bool(self.active_skill)) or skill_review)
+        self.mark_failure.setEnabled((recording and mode == "task") or skill_review)
         for widget in (self.mark_exception, self.mark_recovery):
             widget.setEnabled(recording)
 

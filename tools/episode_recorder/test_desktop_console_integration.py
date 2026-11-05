@@ -203,7 +203,8 @@ def main():
                                for a in meta["annotations"])
                     assert any(a.get("annotation_origin") == "duration_limit_last_frame"
                                for a in meta["annotations"])
-                    window.outcome.setCurrentIndex(1)
+                    window.mark_success.click()
+                    assert window.outcome.currentText() == "成功"
                     window.save.click(); stage[0] = "skill_saving"
                 elif stage[0] == "skill_saving" and window.state == "idle":
                     assert window.task.text() == "合成抓取"

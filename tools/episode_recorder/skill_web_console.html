@@ -180,8 +180,9 @@ function updateButtons() {
   $('mark_skill_start').disabled=busy || !recording || currentMeta.mode!=='task' || !!active || completed>=skillOrder.length;
   $('mark_completion').disabled=busy || currentMeta.mode!=='skill' || state!=='stopped' || completed>0;
   const hasOutcome=(currentMeta.annotations || []).some(item=>item.kind==='outcome');
-  $('mark_success').disabled=busy || !recording || currentMeta.mode!=='task' || !active;
-  $('mark_failure').disabled=busy || !recording || currentMeta.mode!=='task' || hasOutcome;
+  const skillReview=state==='stopped' && currentMeta.mode==='skill';
+  $('mark_success').disabled=busy || !((recording && currentMeta.mode==='task' && active) || skillReview);
+  $('mark_failure').disabled=busy || !((recording && currentMeta.mode==='task' && !hasOutcome) || skillReview);
   $('review_offset').disabled=busy || state!=='stopped' || currentMeta.mode!=='skill';
   for(const id of ['mark_exception','mark_recovery']) $(id).disabled=busy || !recording;
 }
@@ -283,8 +284,14 @@ $('mark_skill_start').onclick=()=>{
   if(completed<skillOrder.length) annotate('skill_start',skillOrder[completed]);
 };
 $('mark_completion').onclick=()=>annotate('skill_complete',currentMeta.active_skill || currentMeta.skill);
-$('mark_success').onclick=()=>annotate('skill_complete',currentMeta.active_skill,'success');
-$('mark_failure').onclick=()=>annotate('outcome','failure');
+$('mark_success').onclick=()=>{
+  if(state==='stopped' && currentMeta.mode==='skill') { $('outcome').value='success'; notice('已选择本条原子技能成功；检查完成帧后保存 Episode'); updateButtons(); }
+  else annotate('skill_complete',currentMeta.active_skill,'success');
+};
+$('mark_failure').onclick=()=>{
+  if(state==='stopped' && currentMeta.mode==='skill') { $('outcome').value='failure'; notice('已选择本条原子技能失败；可保存 Episode'); updateButtons(); }
+  else annotate('outcome','failure');
+};
 $('mark_exception').onclick=()=>annotate('recovery_trigger',`异常：${$('trigger_reason').value.trim() || '人工触发'}`);
 $('mark_recovery').onclick=()=>annotate('recovery_trigger',`恢复：${$('trigger_reason').value.trim() || '人工触发'}`);
 $('outcome').onchange=updateButtons;
