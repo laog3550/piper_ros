@@ -20,3 +20,11 @@
 ```bash
 ros2 launch piper start_readonly_can_collection.launch.py left_gripper_mapping_verified:=true
 ```
+
+## 重录复审
+
+左侧参数启用后，操作员重录并保存了 `/home/mips/pi05_datas/banana_task_episodes/pick_banana_into_box_left/episode_000002/`。该 Episode 在 `20.070 s` 自动停止，三路 RGB 的 Header 无倒退或估算缺帧；左侧四类主目标 CAN ID 各有 `2616` 帧，时间戳无倒退，中位间隔 `5.00 ms`。四类帧仍会在停顿期同步暂停，最长间隔约 `212 ms`。
+
+左侧从臂反馈向量 `1062/1062` 条 `valid=true`；主臂目标在录制时间范围内 `963` 条，其中 `761` 条 `valid=true`、`199` 条标记 `stale`、`4` 条标记 `time_inconsistent`。这表明映射参数已经生效，剩余无效值主要来自无新目标帧时的重复发布。按 10 Hz、源年龄不超过 `100 ms`、RGB/目标/反馈 Header 总体偏差不超过 `30 ms` 的只读试算，`156` 个候选时刻中约 `120` 个可对齐，最长连续段 `52` 帧；本结果不是正式 LeRobot 导出。
+
+本条 `annotations=[]`。操作员确认录制中未点击技能完成与成功标记；保存时的 `outcome=success` 不能代替带相机 Header 引用的完成帧。`task_metadata` 仍使用原始采集版本，未声明经验收的标定、训练归一化或示教动作来源。只读审计结果为 `eligible=false`、合格训练帧 `0`，不得用于 π0.5 微调。复审文件保存于 `/home/mips/pi05_datas/validation/episode_000002_audit_20261105.json`。
