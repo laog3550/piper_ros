@@ -287,12 +287,15 @@ def main():
             rejected(port, "/api/annotate", {"kind": "skill_complete",
                                              "value": "latch_box_lid_bimanual"})
             http(port, "/api/annotate", {"kind": "recovery_trigger", "value": "恢复：重新扶正盒体"})
-            http(port, "/api/annotate", {"kind": "outcome", "value": "failure"})
             assert http(port, "/api/stop", {})["result"]["state"] == "stopped"
             skill_saved = http(port, "/api/save", {"outcome": "failure"})["result"]
             assert skill_saved["state"] == "saved"
-            saved_contract = json.loads((Path(skill_saved["path"]) / "episode.json").read_text())["task_metadata"]
+            saved_meta = json.loads((Path(skill_saved["path"]) / "episode.json").read_text())
+            saved_contract = saved_meta["task_metadata"]
             assert saved_contract == skill_contract
+            outcomes = [item for item in saved_meta["annotations"] if item["kind"] == "outcome"]
+            assert len(outcomes) == 1 and outcomes[0]["value"] == "failure"
+            assert outcomes[0]["annotation_origin"] == "save_selection"
             assert len(http(port, "/api/episodes")["result"]["episodes"]) == 2
             assert http(port, "/api/start", {"task": "丢弃测试", "language_instruction": "测试"})["result"]["state"] == "recording"
             assert http(port, "/api/discard", {})["result"]["state"] == "discarded"

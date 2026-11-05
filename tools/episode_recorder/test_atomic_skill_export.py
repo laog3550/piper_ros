@@ -70,6 +70,17 @@ def test_v2_audit_requires_resolved_success_and_complete_camera_frame(tmp_path):
     assert row["quality"]["max_selected_camera_skew_ns"] == 0
     assert row["quality"]["completion_frame"]["header_stamp_ns"] > 0
 
+    save_labeled = fixture(tmp_path, "episode_000007")
+    save_meta = annotate(save_labeled)
+    save_meta["annotations"] = [item for item in save_meta["annotations"]
+                                if item["kind"] == "skill_complete"]
+    save_meta["saved_at_unix_ns"] = save_meta["stopped_at_unix_ns"] + 2
+    save_meta["annotations"].append({"kind": "outcome", "value": "success",
+                                     "annotation_origin": "save_selection",
+                                     "reviewed_at_unix_ns": save_meta["stopped_at_unix_ns"] + 1})
+    (save_labeled / "episode.json").write_text(json.dumps(save_meta), encoding="utf-8")
+    assert checked_audit(save_labeled, max_age_ms=30)["eligible"]
+
     unresolved = fixture(tmp_path, "episode_000002")
     annotate(unresolved, resolved=False)
     row = checked_audit(unresolved, max_age_ms=30)

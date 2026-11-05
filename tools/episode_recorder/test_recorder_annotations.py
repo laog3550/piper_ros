@@ -121,3 +121,17 @@ def test_single_arm_does_not_require_inactive_arm_messages():
     assert "/camera_top/color/image_raw" in required
     assert module.required_topics_for_episode(topics, "task", {"arm_mode": "LEFT"}) == topics
     assert module.required_topics_for_episode(topics, "skill", {"arm_mode": "BIMANUAL"}) == topics
+
+
+def test_save_selection_adds_result_with_honest_timestamp():
+    module = load_recorder_module()
+    metadata = {"schema_version": 2, "mode": "skill", "annotations": []}
+    module.add_save_outcome_annotation(metadata, "success", 123)
+    assert metadata["annotations"] == [{"kind": "outcome", "value": "success",
+                                        "annotation_origin": "save_selection",
+                                        "reviewed_at_unix_ns": 123}]
+    module.add_save_outcome_annotation(metadata, "success", 124)
+    assert len(metadata["annotations"]) == 1
+    task = {"schema_version": 2, "mode": "task", "annotations": []}
+    module.add_save_outcome_annotation(task, "success", 123)
+    assert task["annotations"] == []

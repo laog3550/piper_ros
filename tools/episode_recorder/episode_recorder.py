@@ -2,6 +2,7 @@
 """只读 Episode 录制服务与 CLI。运行：python3 episode_recorder.py serve --config config.json；另见 --help。"""
 
 import argparse
+import copy
 import fcntl
 import json
 import math
@@ -43,6 +44,20 @@ def atomic_json(path, data):
 def load_json(path):
     with open(path, encoding="utf-8") as stream:
         return json.load(stream)
+
+
+def add_save_outcome_annotation(metadata, outcome, reviewed_at_unix_ns):
+    """Record a human save-time result without pretending it was marked during recording."""
+    if metadata.get("schema_version") != 2 or metadata.get("mode") != "skill":
+        return
+    if outcome not in ("success", "failure"):
+        return
+    annotations = metadata.setdefault("annotations", [])
+    if any(item.get("kind") == "outcome" for item in annotations):
+        return
+    annotations.append({"kind": "outcome", "value": outcome,
+                        "annotation_origin": "save_selection",
+                        "reviewed_at_unix_ns": reviewed_at_unix_ns})
 
 
 def required_topics_for_episode(topics, mode, metadata):
@@ -490,11 +505,11 @@ class Recorder:
             required = sum(path.stat().st_size for path in self.current.rglob("*") if path.is_file())
             if shutil.disk_usage(destination_root).free < required + self.min_free_bytes:
                 raise ValueError("目标磁盘剩余空间不足以保存 Episode")
-        previous = dict(self.metadata)
-        previous["events"] = list(self.metadata.get("events", []))
+        previous = copy.deepcopy(self.metadata)
         self.metadata["state"] = "saved"
         self.metadata["episode_number"] = number
         self.metadata["outcome"] = outcome
+        add_save_outcome_annotation(self.metadata, outcome, time.time_ns())
         if annotation is not None:
             annotation["annotated_at_unix_ns"] = time.time_ns()
             self.metadata["vlm_annotation"] = annotation

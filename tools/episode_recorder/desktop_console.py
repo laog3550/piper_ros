@@ -35,6 +35,12 @@ from skill_web_console import (SKILLS, ARM_TOPICS, start_request, annotation_req
 
 CAMERA_NAMES = ("左腕", "右腕", "顶部")
 SKILL_LABELS = ("抓起香蕉并放入盒子中（单臂）", "将盒子的盖子翻过来（双臂）", "扣上盒子的盖子（双臂）")
+TASK_TEXT = {
+    "task": ("香蕉入盒与盒盖操作", "先用单臂抓起香蕉并放入盒中，再双臂翻过盒盖并扣上盒盖"),
+    SKILLS[0]: ("香蕉入盒", "用{arm}臂抓起香蕉并放入盒中"),
+    SKILLS[1]: ("翻转盒盖", "用双臂将盒子的盖子翻过来"),
+    SKILLS[2]: ("扣上盒盖", "用双臂扣上盒子的盖子"),
+}
 STATE_NAMES = {"idle": "空闲", "starting": "启动中", "recording": "录制中",
                "stopped": "已停止，待保存", "failed": "失败，待丢弃",
                "interrupted": "意外中断，待丢弃"}
@@ -291,13 +297,15 @@ class Console(QMainWindow):
             label = QLabel(f"{arm} 从臂：等待关节反馈")
             fields.addWidget(label, offset, 0, 1, 4)
             self.joint_labels[arm] = label
-        fields.addWidget(QLabel("任务名"), 0, 0)
+        fields.addWidget(QLabel("本条任务名"), 0, 0)
         self.task = QLineEdit()
         self.task.setMaxLength(120)
+        self.task.setToolTip("原子技能填写本条技能；完整任务填写总体任务。同一技能会保留上次填写内容")
         fields.addWidget(self.task, 0, 1)
-        fields.addWidget(QLabel("语言指令"), 1, 0)
+        fields.addWidget(QLabel("本条语言指令"), 1, 0)
         self.instruction = QTextEdit()
-        self.instruction.setMaximumHeight(74)
+        self.instruction.setFixedHeight(42)
+        self.instruction.setToolTip("原子技能只描述本条动作；切换技能时恢复各自的文本")
         fields.addWidget(self.instruction, 1, 1)
         fields.addWidget(QLabel("Episode 保存目录"), 2, 0)
         save_location = QHBoxLayout()
@@ -349,6 +357,9 @@ class Console(QMainWindow):
         for widget in (self.mark_start, self.mark_complete, self.mark_success, self.mark_failure,
                        self.mark_exception, self.mark_recovery, self.trigger_reason, self.camera_ref):
             marks.addWidget(widget)
+        mark_help = QLabel("保存时选择成功或失败会自动记录结果标注；“标记技能完成”记录完成帧，仍须单独核验。")
+        mark_help.setWordWrap(True)
+        layout.addWidget(mark_help)
         self.annotation_label = QLabel("尚无标注")
         layout.addWidget(self.annotation_label)
         self.table = QTableWidget(0, 9)
@@ -376,6 +387,8 @@ class Console(QMainWindow):
         self.config = config
         self.active_skill = None
         self.annotations = []
+        self._text_context = None
+        self._text_cache = {}
         self.update_contract()
         self.update_buttons()
 
@@ -435,6 +448,20 @@ class Console(QMainWindow):
             self.arm_mode.setCurrentIndex(2)
         elif self.arm_mode.currentData() == "BIMANUAL":
             self.arm_mode.setCurrentIndex(0)
+        context = ("task",) if not skill_mode else ("skill", self.skill.currentData(),
+                                                   self.arm_mode.currentData())
+        if context != self._text_context:
+            if self._text_context is not None:
+                self._text_cache[self._text_context] = (self.task.text(), self.instruction.toPlainText())
+            template = TASK_TEXT["task" if not skill_mode else self.skill.currentData()]
+            arm = "左" if self.arm_mode.currentData() == "LEFT" else "右"
+            recommended = (template[0], template[1].format(arm=arm))
+            saved = self._text_cache.get(context, recommended)
+            self.task.setText(saved[0])
+            self.instruction.setPlainText(saved[1])
+            self.task.setPlaceholderText(recommended[0])
+            self.instruction.setPlaceholderText(recommended[1])
+            self._text_context = context
         provisional = provisional_collection_versions()
         pending = any(field.text() == provisional.get(key) for key, field in (
             ("calibration_version", self.calibration), ("normalization_version", self.normalization))
@@ -524,7 +551,7 @@ class Console(QMainWindow):
                     self.message.setText(f"已保存至 {result['path']}" if result.get("state") == "saved"
                                          else "操作完成")
                     if result.get("state") == "saved":
-                        self.task.clear(); self.instruction.clear(); self.outcome.setCurrentIndex(0)
+                        self.outcome.setCurrentIndex(0)
                     self.refresh(); self.refresh_list()
             except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
                 if key == "status":

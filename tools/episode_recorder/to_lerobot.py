@@ -339,6 +339,13 @@ def sft_label(meta):
               or not meta["started_at_unix_ns"] <= timestamp <= meta["stopped_at_unix_ns"]):
             reasons.append("完成帧 Header 不在 Episode 区间内")
     for item in (*outcomes, *completes):
+        if item.get("kind") == "outcome" and item.get("annotation_origin") == "save_selection":
+            reviewed = item.get("reviewed_at_unix_ns")
+            if (type(reviewed) is not int or type(meta.get("stopped_at_unix_ns")) is not int
+                    or type(meta.get("saved_at_unix_ns")) is not int
+                    or not meta["stopped_at_unix_ns"] <= reviewed <= meta["saved_at_unix_ns"]):
+                reasons.append("保存时结果标注缺少可核验的复核时间")
+            continue
         recorded = item.get("recorded_at_unix_ns")
         if (type(recorded) is not int or type(meta.get("started_at_unix_ns")) is not int
                 or type(meta.get("stopped_at_unix_ns")) is not int

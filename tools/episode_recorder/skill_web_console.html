@@ -25,7 +25,7 @@ h2 { font-size:1.05rem; margin:0 0 14px; }
 .muted { color:#aab8c8; }
 label { display:block; margin:12px 0 6px; }
 input,textarea,select { width:100%; box-sizing:border-box; border:1px solid #607187; border-radius:7px; background:#111922; color:white; padding:10px; font:inherit; }
-textarea { min-height:75px; resize:vertical; }
+textarea { min-height:42px; height:42px; resize:vertical; }
 button { background:#3979dc; border:0; color:white; border-radius:7px; padding:10px 16px; cursor:pointer; font:inherit; margin:8px 8px 0 0; }
 button.secondary { background:#41546b; }
 button.danger { background:#a23644; }
@@ -57,8 +57,9 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <p id="quality_warning" class="error" role="status"></p>
 <div id="captured_initial" class="muted"></div>
 <div class="row"><div><label for="mode">采集类型</label><select id="mode"><option value="task">完整任务</option><option value="skill">单技能片段</option></select></div><div id="skill_field" hidden><label for="skill">固定技能</label><select id="skill"><option value="pick_and_place_banana_in_box">抓起香蕉并放入盒子中（单臂）</option><option value="flip_box_lid_bimanual">将盒子的盖子翻过来（双臂）</option><option value="latch_box_lid_bimanual">扣上盒子的盖子（双臂）</option></select></div></div>
-<label for="task">任务名</label><input id="task" maxlength="120" placeholder="例如：香蕉入盒、翻盖与扣盖">
-<label for="instruction">语言指令</label><textarea id="instruction" maxlength="2000" placeholder="例如：抓起香蕉放入盒中，双臂翻过盒盖，再扣上盒盖"></textarea>
+<p class="muted">原子技能填写本条动作的任务名与指令；完整任务填写总体任务。文本会在保存后保留，并按技能分别记忆。</p>
+<label for="task">本条任务名</label><input id="task" maxlength="120">
+<label for="instruction">本条语言指令</label><textarea id="instruction" rows="2" maxlength="2000"></textarea>
 <div class="row"><div><label for="duration_sec">本条 Episode 固定时长（秒）</label><input id="duration_sec" type="number" min="1" max="86400" step="1" value="60"></div><div><label for="save_dir">Episode 保存目录</label><input id="save_dir" type="text" placeholder="绝对路径；每条可修改"></div></div>
 <p class="muted">到时自动停止，之后仍需选择结果并保存；保存时在所填目录下自动创建 Episode 子目录。</p>
 <div id="contract_fields" hidden>
@@ -84,7 +85,7 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <p class="muted">近期标注</p><ul id="annotation_log" class="annotation-log"></ul>
 </div>
 <div class="row"><div><label for="outcome">结果标签</label><select id="outcome"><option value="">请选择</option><option value="success">成功</option><option value="failure">失败</option></select></div><button id="save">保存 Episode</button><button id="discard" class="danger">丢弃 Episode</button></div>
-<p class="muted">结果标签只记录任务成败；夹爪映射未经核对时，七维示教向量无效，不可用于训练。</p>
+<p class="muted">保存时选择成功或失败会自动记录该技能的结果标注；完成帧仍需单独标记并核验。结果标注本身不证明动作数据可用于训练。</p>
 <p id="notice" class="notice" role="status"></p>
 </section>
 <section><h2>已保存 Episode</h2><div class="tablewrap"><table><thead><tr><th>编号</th><th>任务</th><th>语言指令</th><th>结果</th><th>开始时间</th><th>路径</th></tr></thead><tbody id="episodes"></tbody></table></div></section>
@@ -113,6 +114,27 @@ for(const [arm,name] of [['left','左臂'],['right','右臂']]) {
 }
 let busy = false, state = 'unknown', currentMeta = {};
 let teleoperationReady = {}, provisionalVersions = {};
+let textContext = null;
+const textCache = {};
+const textDefaults = {
+  task:['香蕉入盒与盒盖操作','先用单臂抓起香蕉并放入盒中，再双臂翻过盒盖并扣上盒盖'],
+  pick_and_place_banana_in_box:['香蕉入盒','用{arm}臂抓起香蕉并放入盒中'],
+  flip_box_lid_bimanual:['翻转盒盖','用双臂将盒子的盖子翻过来'],
+  latch_box_lid_bimanual:['扣上盒盖','用双臂扣上盒子的盖子']
+};
+function updateTaskText() {
+  const skillMode=$('mode').value==='skill';
+  const key=skillMode ? `skill:${$('skill').value}:${$('arm_mode').value}` : 'task';
+  if(key===textContext) return;
+  if(textContext!==null) textCache[textContext]=[$('task').value,$('instruction').value];
+  const template=textDefaults[skillMode ? $('skill').value : 'task'];
+  const arm=$('arm_mode').value==='RIGHT' ? '右' : '左';
+  const recommended=[template[0],template[1].replace('{arm}',arm)];
+  const values=textCache[key] || recommended;
+  $('task').value=values[0]; $('instruction').value=values[1];
+  $('task').placeholder=recommended[0]; $('instruction').placeholder=recommended[1];
+  textContext=key;
+}
 function notice(text, error=false) { $('notice').textContent=text; $('notice').className=error?'notice error':'notice'; }
 function updateContract() {
   const skillMode=$('mode').value==='skill', bimanual=['flip_box_lid_bimanual','latch_box_lid_bimanual'].includes($('skill').value);
@@ -121,6 +143,7 @@ function updateContract() {
   for(const arm of ['LEFT','RIGHT']) $('arm_mode').querySelector(`option[value="${arm}"]`).disabled=bimanual;
   if(bimanual) $('arm_mode').value='BIMANUAL';
   else if($('arm_mode').value==='BIMANUAL') $('arm_mode').value='';
+  updateTaskText();
   const pending=Object.entries(provisionalVersions).some(([key,value])=>$(key)?.value===value);
   const ready=teleoperationReady[$('arm_mode').value]===true && !pending;
   $('contract_status').textContent=ready ? '采集元数据可声明主从示教；训练仍需逐帧数据审计。' : '仅可录原始技能：内外参、归一化或映射尚未验收。';
@@ -216,7 +239,7 @@ async function action(name, payload={}) {
     await readJson(await fetch(`/api/${name}`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}));
     notice(({start:'已开始录制',stop:'已停止录制',save:'已保存 Episode',discard:'已丢弃 Episode'})[name]);
     if(name==='start' || name==='discard') $('outcome').value='';
-    if(name==='save') { $('task').value=''; $('instruction').value=''; $('outcome').value=''; }
+    if(name==='save') $('outcome').value='';
     await refresh(); if(name==='save' || name==='discard') await loadEpisodes();
   } catch(error) { notice(error.message,true); await refresh(); }
   finally { busy=false; updateButtons(); }

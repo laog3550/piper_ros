@@ -157,12 +157,16 @@ def main():
                     assert recorder_request(socket_path, {"action": "status"})["state"] == "stopped"
                     collision.rmdir()
                     window.save_dir.setText(str(target_dir))
+                    window.task.setText("下条复用任务")
+                    window.instruction.setPlainText("下条复用指令")
                     window.outcome.setCurrentIndex(1)
                     window.save.click(); stage[0] = "saving"
                 elif stage[0] == "saving" and window.state == "idle":
                     episodes = recorder_request(socket_path, {"action": "list"})["episodes"]
                     assert len(episodes) == 1 and episodes[0]["outcome"] == "success"
                     assert episodes[0]["language_instruction"] == "拿起合成物体"
+                    assert window.task.text() == "下条复用任务"
+                    assert window.instruction.toPlainText() == "下条复用指令"
                     assert episodes[0]["stop_reason"] == "duration_limit"
                     assert Path(episodes[0]["path"]).parent == target_dir
                     assert (Path(episodes[0]["path"]) / "bag" / "metadata.yaml").is_file()
@@ -195,6 +199,8 @@ def main():
                     window.outcome.setCurrentIndex(1)
                     window.save.click(); stage[0] = "skill_saving"
                 elif stage[0] == "skill_saving" and window.state == "idle":
+                    assert window.task.text() == "合成抓取"
+                    assert window.instruction.toPlainText() == "抓取合成物体"
                     window.task.setText("丢弃测试")
                     window.instruction.setPlainText("测试")
                     window.mode.setCurrentIndex(0)
