@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "version_id": "piper_raw_joint6_gripper_m_20261105_v1",
+  "status": "raw_collection_schema_only",
+  "purpose": "原子技能原始数据的字段、顺序和单位约定；不是训练集归一化统计",
+  "time_domain": "unix_ns",
+  "vector": {
+    "names": ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper"],
+    "units": ["rad", "rad", "rad", "rad", "rad", "rad", "m"],
+    "arm_order_for_bimanual": ["left", "right"],
+    "master_target_can_ids": [341, 342, 343, 345],
+    "slave_feedback_can_ids": [677, 678, 679, 680],
+    "gripper_raw_scale_m_per_count": 0.000001,
+    "gripper_raw_is_signed": true,
+    "raw_values_are_not_clipped": true
+  },
+  "training_normalization_statistics": null,
+  "missing_for_training": [
+    "训练集确定后的 state/action 分位数统计",
+    "夹爪零点校正与数据集范围的一致性核验",
+    "与训练 checkpoint 绑定的归一化资产"
+  ]
+}

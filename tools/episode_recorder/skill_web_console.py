@@ -3,6 +3,7 @@
 
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -24,10 +25,37 @@ from piper_msgs.msg import PiperArmVector
 
 PAGE = Path(__file__).with_name("skill_web_console.html").read_bytes()
 CAMERA_NAMES = ("左腕", "右腕", "顶部")
-SKILLS = ("pick_banana", "place_banana_in_box", "close_hinged_lid_bimanual")
+SKILLS = ("pick_and_place_banana_in_box", "flip_box_lid_bimanual", "latch_box_lid_bimanual")
 ARM_TOPICS = {arm: {"master_target": f"/piper_vector/{arm}/master_target",
                     "slave_feedback": f"/piper_vector/{arm}/slave_feedback"}
               for arm in ("left", "right")}
+COLLECTION_VERSION_FILES = {
+    "calibration_version": "collection_camera_info_snapshot.20261105.json",
+    "normalization_version": "collection_data_convention.20261105.json",
+}
+
+
+def provisional_collection_versions():
+    """Return traceable raw-collection identifiers, never training approval."""
+    root = Path(__file__).parents[2] / "config"
+    result = {}
+    for field, filename in COLLECTION_VERSION_FILES.items():
+        path = root / filename
+        if not path.is_file():
+            continue
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if (isinstance(record.get("version_id"), str)
+                and record.get("status") in ("raw_collection_intrinsics_only", "raw_collection_schema_only")):
+            result[field] = record["version_id"]
+    return result
+
+
+def collection_version_evidence():
+    root = Path(__file__).parents[2] / "config"
+    versions = provisional_collection_versions()
+    return {field: {"path": f"config/{filename}",
+                    "sha256": hashlib.sha256((root / filename).read_bytes()).hexdigest()}
+            for field, filename in COLLECTION_VERSION_FILES.items() if field in versions}
 
 
 def teleoperation_ready(config, arm_mode):
@@ -242,9 +270,9 @@ def start_request(body, config, preview):
         raise ValueError("请选择固定技能")
     if mode == "skill":
         arm_mode = body.get("arm_mode")
-        if skill == "close_hinged_lid_bimanual":
+        if skill in SKILLS[1:]:
             if arm_mode != "BIMANUAL":
-                raise ValueError("双臂翻盖技能须选择 BIMANUAL")
+                raise ValueError("翻盖与扣盖技能须选择 BIMANUAL")
         elif arm_mode not in ("LEFT", "RIGHT"):
             raise ValueError("单臂技能须选择 LEFT 或 RIGHT")
         metadata["arm_mode"] = arm_mode
@@ -252,14 +280,22 @@ def start_request(body, config, preview):
             value = body.get(field)
             if (not isinstance(value, str) or not value.strip() or len(value.strip()) > 120
                     or value.strip().upper().startswith("UNVERIFIED")):
-                raise ValueError(f"{field} 须填写已验收的非空版本号，不能使用 UNVERIFIED 占位值")
+                raise ValueError(f"{field} 须填写有来源的非空版本号，不能使用 UNVERIFIED 占位值")
             metadata[field] = value.strip()
-        if teleoperation_ready(config, arm_mode):
+        provisional = provisional_collection_versions()
+        metadata["collection_version_evidence"] = {
+            field: record for field, record in collection_version_evidence().items()
+            if metadata.get(field) == provisional.get(field)}
+        if teleoperation_ready(config, arm_mode) and not any(
+                metadata.get(field) == version for field, version in provisional.items()):
             metadata.update(time_domain="unix_ns", action_space="absolute_joint_position_7",
                             action_provenance="human_demonstration")
             metadata["collection_contract_status"] = "metadata_ready_pending_data_audit"
         else:
-            metadata["collection_contract_status"] = "training_not_ready_unverified_teleoperation_mapping"
+            metadata["collection_contract_status"] = (
+                "training_not_ready_provisional_collection_versions" if any(
+                    metadata.get(field) == version for field, version in provisional.items())
+                else "training_not_ready_unverified_teleoperation_mapping")
     required_arms = ("left", "right") if mode == "task" or arm_mode == "BIMANUAL" else (arm_mode.lower(),)
     metadata["initial_conditions"] = {"source": "ros_slave_feedback",
                                       "joint_positions": preview.initial_joint_positions(required_arms)}
@@ -320,6 +356,7 @@ def handler_factory(socket_path, preview, config):
                     result["joints"] = preview.joint_snapshot()
                     result["event"] = event
                     result["default_save_dir"] = str(Path(config["output_dir"]).expanduser().resolve())
+                    result["provisional_collection_versions"] = provisional_collection_versions()
                     return self.respond(200, result)
                 except (OSError, ValueError, json.JSONDecodeError) as exc:
                     return self.respond(503, {"ok": False, "error": str(exc),
@@ -331,7 +368,8 @@ def handler_factory(socket_path, preview, config):
                     return self.respond(503, {"ok": False, "error": str(exc)})
             if path == "/api/contract":
                 return self.respond(200, {"ok": True, "teleoperation_ready": {
-                    mode: teleoperation_ready(config, mode) for mode in ("LEFT", "RIGHT", "BIMANUAL")}})
+                    mode: teleoperation_ready(config, mode) for mode in ("LEFT", "RIGHT", "BIMANUAL")},
+                    "provisional_collection_versions": provisional_collection_versions()})
             if path.startswith("/camera/") and path.endswith(".jpg"):
                 try:
                     index = int(path[8:-4])

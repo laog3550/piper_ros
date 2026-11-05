@@ -23,6 +23,7 @@ from std_msgs.msg import String
 from piper_msgs.msg import PiperArmVector
 
 from desktop_console import Cameras, Console, recorder_request
+from skill_web_console import provisional_collection_versions
 
 HERE = Path(__file__).parent
 TOPICS = [f"/camera_{name}/color/image_raw" for name in ("wrist_left", "wrist_right", "top")]
@@ -99,6 +100,9 @@ def main():
                                      "serve", "--config", str(config_path)])
         window = Console(config, cameras)
         window.show()
+        raw_versions = provisional_collection_versions()
+        assert window.calibration.text() == raw_versions["calibration_version"]
+        assert window.normalization.text() == raw_versions["normalization_version"]
         stage = ["ready"]
         closed_at = [None]
         failure = []
@@ -121,7 +125,7 @@ def main():
                     window.start.click(); stage[0] = "started"
                 elif stage[0] == "started" and window.state == "recording":
                     window.mark_start.click(); stage[0] = "task_mark_started"
-                elif stage[0] == "task_mark_started" and window.active_skill == "pick_banana":
+                elif stage[0] == "task_mark_started" and window.active_skill == "pick_and_place_banana_in_box":
                     window.mark_complete.click(); stage[0] = "task_mark_completed"
                 elif stage[0] == "task_mark_completed" and len(window.annotations) >= 2:
                     window.mark_exception.click(); stage[0] = "task_exception"
@@ -163,7 +167,10 @@ def main():
                     assert Path(episodes[0]["path"]).parent == target_dir
                     assert (Path(episodes[0]["path"]) / "bag" / "metadata.yaml").is_file()
                     window.mode.setCurrentIndex(1)
+                    window.skill.setCurrentIndex(1)
+                    assert window.arm_mode.currentData() == "BIMANUAL" and not window.arm_mode.isEnabled()
                     window.skill.setCurrentIndex(0)
+                    assert window.arm_mode.currentData() == "LEFT" and window.arm_mode.isEnabled()
                     window.arm_mode.setCurrentIndex(0)
                     window.calibration.setText("synthetic-camera-v1")
                     window.normalization.setText("synthetic-norm-v1")
@@ -179,7 +186,7 @@ def main():
                     window.mark_success.click(); stage[0] = "skill_labeled"
                 elif stage[0] == "skill_labeled" and window.state == "stopped":
                     meta = recorder_request(socket_path, {"action": "status"})["metadata"]
-                    assert meta["mode"] == "skill" and meta["skill"] == "pick_banana"
+                    assert meta["mode"] == "skill" and meta["skill"] == "pick_and_place_banana_in_box"
                     assert meta["task_metadata"]["initial_conditions"]["perturbation_id"] == "synthetic-scene-1"
                     assert meta["task_metadata"]["initial_conditions"]["joint_positions"]["left"]["position_rad"]
                     assert meta["task_metadata"]["collection_contract_status"] == "training_not_ready_unverified_teleoperation_mapping"

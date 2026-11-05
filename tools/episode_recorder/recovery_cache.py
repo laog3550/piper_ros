@@ -23,7 +23,7 @@ from std_msgs.msg import String
 
 RECOVERY_ID = re.compile(r"[0-9a-f]{32}\Z")
 EVENT_TOPIC = "/collection/events"
-SKILLS = ("pick_banana", "place_banana_in_box", "close_hinged_lid_bimanual")
+SKILLS = ("pick_and_place_banana_in_box", "flip_box_lid_bimanual", "latch_box_lid_bimanual")
 SAMPLE_OVERHEAD_BYTES = 256
 
 

@@ -122,7 +122,7 @@ python3 -m unittest discover -s tools/vla_contract -p 'test_shadow_run.py' -v
 
 `tools/vla_contract/piper_pi05_adapter.py` 明确规定单臂输入为 `top_rgb`、对应侧的 `wrist_rgb`、`joint1`～`joint6` 绝对角 `rad`、夹爪开口 `m` 和非空任务文本；训练目标为每步相同单位的 7 维绝对位置。`tools/vla_contract/piper_pi05_openpi.py` 在固定的上游 openpi commit 上构建独立配置 `pi05_piper_absolute_7`：16 步、模型内部 32 维、Piper 专属归一化资产 `local/piper_train`，不采用 DROID 速度动作、DROID 归一化统计，也不虚构 Piper 的第七个关节。左臂与右臂的腕部图像分别进入对应槽位，另一腕部槽位掩码关闭。训练前由 openpi 从已核验的训练集计算 `state` 与 `actions` 的分位数统计；推理时只从同一 Piper checkpoint 加载其统计。`PiperOutputs` 截取内部前 7 维并检查形状、有限性和夹爪非负，输出仍须经离线任务验收及安全监督，不得直连控制话题。
 
-训练入口要求 `to_lerobot.py` 生成的单臂 LeRobot v3 `conversion_manifest.json`、逐 Episode 来源摘要与 `pick`/`place` 标签，并要求独立核验文件包含 `status=verified_for_piper_pi05_training`、转换清单及来源审计报告的 SHA-256、`action_provenance=human_demonstration`、`gripper_mapping_verified=true`、`calibration_verified=true`、一致的 `calibration_version`、`normalization_version`、`arm_mode` 与 `action_space`。来源审计报告须把每个训练 Episode 标为 `eligible=true`，转换器所记的来源 SHA-256 也必须与当前来源文件相符。每种技能的训练/测试集至少分别有 10/3 个完整 Episode，单个 Episode 至少 16 帧；这是启动微调的最低门槛，不代表技能质量充分。测试集须按 Episode 隔离，不能用训练帧替代。训练成功后保存 openpi checkpoint、逐文件 SHA-256、日志摘要和 `training_record.json`，记录状态为 `trained_unvalidated`；只有独立留出集评估记录绑定该训练记录并标记 `piper_offline_validated`，`load_validated_policy()` 才允许加载。该标记本身不等于真机安全许可。
+训练入口要求 `to_lerobot.py` 生成的单臂 LeRobot v3 `conversion_manifest.json`、逐 Episode 来源摘要与 `pick_and_place_banana_in_box` 标签，并要求独立核验文件包含 `status=verified_for_piper_pi05_training`、转换清单及来源审计报告的 SHA-256、`action_provenance=human_demonstration`、`gripper_mapping_verified=true`、`calibration_verified=true`、一致的 `calibration_version`、`normalization_version`、`arm_mode` 与 `action_space`。来源审计报告须把每个训练 Episode 标为 `eligible=true`，转换器所记的来源 SHA-256 也必须与当前来源文件相符。该单臂技能的训练/测试集至少分别有 10/3 个完整 Episode，单个 Episode 至少 16 帧；这是启动微调的最低门槛，不代表技能质量充分。测试集须按 Episode 隔离，不能用训练帧替代。训练成功后保存 openpi checkpoint、逐文件 SHA-256、日志摘要和 `training_record.json`，记录状态为 `trained_unvalidated`；只有独立留出集评估记录绑定该训练记录并标记 `piper_offline_validated`，`load_validated_policy()` 才允许加载。该标记本身不等于真机安全许可。
 
 复现适配与门禁检查：
 
@@ -142,7 +142,7 @@ python3 -m unittest discover -s tools/vla_contract -p 'test_piper_pi05_adapter.p
 
 ## 三个固定原子技能的 SFT 数据门禁
 
-`tools/vla_contract/atomic_skill_sft.py` 只接受专属、完整的原子技能 LeRobot 数据集。技能固定为 `pick_banana`、`place_banana_in_box` 和 `close_hinged_lid_bimanual`。前两者分别训练单臂数据，合盖需要左右两臂状态与动作各 7 维，共 14 维，且每个 Episode 显式标注 `hold_box` 与 `close_lid` 的左右角色；角色分配在同一数据集内不得混用。三个技能应分别录成单技能 Episode，不把一整段 `banana_into_box` 任务仅靠文本改名后用于训练。采集入口允许逐 Episode 填写不同的非空中文任务文本；门禁逐帧核对 LeRobot `task_index` 对应的文本与原始 `episode.json`、转换清单及独立审计一致。固定技能 ID 不依赖某一句固定提示词。此训练技能划分不修改 v1 在线 `skill_goal` 的 `pick/place` 枚举。
+`tools/vla_contract/atomic_skill_sft.py` 只接受专属、完整的原子技能 LeRobot 数据集。技能固定为 `pick_and_place_banana_in_box`（单臂抓起香蕉并放入盒子中）、`flip_box_lid_bimanual`（双臂翻过盒盖）和 `latch_box_lid_bimanual`（双臂扣上盒盖）。首项状态与动作各为 7 维；后两项均需左右两臂各 7 维，共 14 维。翻盖标注 `hold_box` 与 `flip_lid` 左右角色，扣盖标注 `hold_box` 与 `latch_lid`；同一技能数据集内不得混用角色分配。三个技能应分别录成单技能 Episode，不把一整段 `banana_into_box` 任务仅靠文本改名后用于训练。采集入口允许逐 Episode 填写不同的非空中文任务文本；门禁逐帧核对 LeRobot `task_index` 对应的文本与原始 `episode.json`、转换清单及独立审计一致。固定技能 ID 不依赖某一句固定提示词。此训练技能划分不修改 v1 在线 `skill_goal` 的 `pick/place` 枚举。
 
 门禁读取 `--success-sft` 转换器的 `conversion_manifest.json`、原始 v2 `episode.json` 与 bag 摘要、`source_timestamps.jsonl`、LeRobot v3 `meta/info.json`、`meta/tasks.parquet` 和实际 `data/**/*.parquet`。它兼容 `tasks.parquet` 中显式的 `task` 列及 LeRobot 0.4.4 将任务文本存为 Pandas 索引的布局。它检查：`observation.state` 与 `action` 均为有限的 7/14 维绝对位置（关节 `rad`、夹爪 `m`），RGB 列存在且无顶层空值；训练/测试 Episode 分离，至少每技能 10/3 个、每个至少 16 帧，且同一 `perturbation_id` 场景组不跨划分；来源任务文本与逐帧任务索引一致；来源时间与 Parquet 时间对应；左右动作及状态 Header 不同于同一帧超过显式同步门限；图像/状态不超过源年龄门限；CAN 四帧来源完整。同步门限最多 30 ms、源年龄最多 250 ms。独立审计须使用 `piper_real_data_audit_v2`，逐 Episode 标为 `eligible=true`。成功、原子边界、夹爪映射、标定、动作来源及双臂角色仍由独立人工核验标注确认，并绑定来源与转换清单 SHA-256。清单和标注只能证明字段及摘要一致，现场物理含义仍需人工验收。
 
@@ -155,7 +155,7 @@ python3 -m unittest discover -s tools/vla_contract -p 'test_piper_pi05_adapter.p
   "source_audit_sha256": "<64 位 SHA-256>",
   "episodes": {
     "episode-id": {
-      "skill_id": "close_hinged_lid_bimanual",
+      "skill_id": "latch_box_lid_bimanual",
       "success": true,
       "verified": true,
       "atomic_episode": true,
@@ -168,7 +168,7 @@ python3 -m unittest discover -s tools/vla_contract -p 'test_piper_pi05_adapter.p
       "gripper_mapping_verified": true,
       "gripper_mapping_version": "<已验收夹爪映射版本>",
       "left_right_sync_verified": true,
-      "roles": {"left": "hold_box", "right": "close_lid"}
+      "roles": {"left": "hold_box", "right": "latch_lid"}
     }
   }
 }
@@ -179,13 +179,13 @@ python3 -m unittest discover -s tools/vla_contract -p 'test_piper_pi05_adapter.p
 ```bash
 /path/to/openpi/.venv/bin/python tools/vla_contract/atomic_skill_sft.py \
   --dataset /path/to/one_skill_lerobot --annotations /path/to/labels.json \
-  --audit-report /path/to/independent_audit.json --skill pick_banana \
+  --audit-report /path/to/independent_audit.json --skill pick_and_place_banana_in_box \
   --max-sync-ns 30000000 --max-source-age-ns 250000000 \
   --plan /path/to/new_training_plan.json
 
 /path/to/openpi/.venv/bin/python tools/vla_contract/atomic_skill_sft.py \
   --dataset /path/to/one_skill_lerobot --annotations /path/to/labels.json \
-  --audit-report /path/to/independent_audit.json --skill pick_banana \
+  --audit-report /path/to/independent_audit.json --skill pick_and_place_banana_in_box \
   --max-sync-ns 30000000 --max-source-age-ns 250000000 \
   --openpi-root /path/to/openpi --base-checkpoint /path/to/pi05_droid --launch
 ```

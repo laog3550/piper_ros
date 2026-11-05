@@ -10,12 +10,14 @@ from pathlib import Path
 from piper_pi05_openpi import OPENPI_COMMIT, check_openpi, digest, episode_source_digest, verify_base_checkpoint
 
 SKILLS = {
-    "pick_banana": {"modes": ("LEFT", "RIGHT"), "roles": None, "prompt": "抓取香蕉"},
-    "place_banana_in_box": {"modes": ("LEFT", "RIGHT"), "roles": None,
-                            "prompt": "将香蕉放入纸盒"},
-    "close_hinged_lid_bimanual": {"modes": ("BIMANUAL",),
-                                   "roles": ("hold_box", "close_lid"),
-                                   "prompt": "双臂合上铰接盒盖"},
+    "pick_and_place_banana_in_box": {"modes": ("LEFT", "RIGHT"), "roles": None,
+                                     "prompt": "抓起香蕉并放入盒子中"},
+    "flip_box_lid_bimanual": {"modes": ("BIMANUAL",),
+                               "roles": ("hold_box", "flip_lid"),
+                               "prompt": "将盒子的盖子翻过来"},
+    "latch_box_lid_bimanual": {"modes": ("BIMANUAL",),
+                                "roles": ("hold_box", "latch_lid"),
+                                "prompt": "扣上盒子的盖子"},
 }
 HORIZON = 16
 STATE_UNIT = "rad (joint1..6), m (gripper)"

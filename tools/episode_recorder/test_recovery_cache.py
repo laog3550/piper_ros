@@ -101,7 +101,7 @@ def test_synthetic_recovery_bag_roundtrip(tmp_path):
         assert cache.active_episode == "synthetic_episode"
         pump(1.0)
         trigger = {"event": "annotation", "kind": "recovery_trigger",
-                   "recovery_id": recovery_id, "skill": "pick_banana",
+                   "recovery_id": recovery_id, "skill": "pick_and_place_banana_in_box",
                    "episode_id": "synthetic_episode", "value": "异常：测试滑脱",
                    "recorded_at_unix_ns": time.time_ns()}
         event(trigger)
@@ -115,7 +115,7 @@ def test_synthetic_recovery_bag_roundtrip(tmp_path):
         manifest = json.loads((cache.root / f"recovery_{recovery_id}" / "manifest.json").read_text())
         assert manifest["status"] == "complete", manifest["failure_reasons"]
         assert manifest["episode_id"] == "synthetic_episode"
-        assert manifest["skill"] == "pick_banana"
+        assert manifest["skill"] == "pick_and_place_banana_in_box"
         assert manifest["recovery_id"] == recovery_id
         assert manifest["training_approved"] is False
         assert manifest["actual_pre_roll_sec"] >= 0.45
@@ -176,7 +176,7 @@ def test_trigger_boundary_never_writes_one_sample_twice(tmp_path):
     image.data = bytes((1, 2, 3))
     image.header.stamp.sec = 1
     trigger = {"event": "annotation", "kind": "recovery_trigger",
-               "recovery_id": "d" * 32, "skill": "pick_banana",
+               "recovery_id": "d" * 32, "skill": "pick_and_place_banana_in_box",
                "episode_id": "boundary_episode", "value": "异常：边界测试"}
     message_thread = threading.Thread(target=cache.on_message, args=(IMAGE_TOPIC, image))
     trigger_thread = threading.Thread(target=cache.trigger, args=(trigger,))
@@ -220,7 +220,7 @@ def test_disk_threshold_drop_is_failed(tmp_path):
 
     cache._disk_free = fake_free
     trigger = {"event": "annotation", "kind": "recovery_trigger",
-               "recovery_id": "e" * 32, "skill": "pick_banana",
+               "recovery_id": "e" * 32, "skill": "pick_and_place_banana_in_box",
                "episode_id": "disk_episode", "value": "异常：磁盘测试"}
     try:
         assert cache.trigger(trigger)

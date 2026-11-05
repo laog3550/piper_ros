@@ -21,7 +21,7 @@ class AtomicSkillGateTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
 
-    def fixture(self, skill="pick_banana", varied_tasks=False, same_group=False):
+    def fixture(self, skill="pick_and_place_banana_in_box", varied_tasks=False, same_group=False):
         mode = SKILLS[skill]["modes"][0]
         arms = ("left", "right") if mode == "BIMANUAL" else ("left",)
         dim = len(arms) * 7
@@ -62,7 +62,7 @@ class AtomicSkillGateTest(unittest.TestCase):
                                   "calibration_verified": True, "units_verified": True,
                                   "gripper_mapping_verified": True, "gripper_mapping_version": "grip-v1"}
             if mode == "BIMANUAL":
-                labels[episode_id]["roles"] = {"left": "hold_box", "right": "close_lid"}
+                labels[episode_id]["roles"] = dict(zip(("left", "right"), SKILLS[skill]["roles"]))
                 labels[episode_id]["left_right_sync_verified"] = True
             root = dataset / split
             (root / "meta").mkdir(parents=True)
@@ -136,20 +136,20 @@ class AtomicSkillGateTest(unittest.TestCase):
 
     def test_v2_source_with_distinct_task_texts_reaches_gate(self):
         files = self.fixture(varied_tasks=True)
-        result = self.check(files, "pick_banana")
-        self.assertEqual(result["model"]["task_texts"], ["抓取香蕉（test）", "抓取香蕉（train）"])
+        result = self.check(files, "pick_and_place_banana_in_box")
+        self.assertEqual(result["model"]["task_texts"], ["抓起香蕉并放入盒子中（test）", "抓起香蕉并放入盒子中（train）"])
         self.assertIsNone(result["model"]["prompt"])
-        source = self.root / "sources" / "pick_banana-test" / "episode.json"
+        source = self.root / "sources" / "pick_and_place_banana_in_box-test" / "episode.json"
         meta = json.loads(source.read_text())
-        meta["annotations"][1]["value"] = "place_banana_in_box"
+        meta["annotations"][1]["value"] = "flip_box_lid_bimanual"
         source.write_text(json.dumps(meta))
         with self.assertRaisesRegex(ValueError, "摘要不匹配"):
-            self.check(files, "pick_banana")
+            self.check(files, "pick_and_place_banana_in_box")
 
     def test_reject_perturbation_group_leak(self):
         files = self.fixture(same_group=True)
         with self.assertRaisesRegex(ValueError, "场景组跨越"):
-            self.check(files, "pick_banana")
+            self.check(files, "pick_and_place_banana_in_box")
 
     def test_reject_audit_split_disagreement(self):
         dataset, annotations_path, audit_path = self.fixture()
@@ -160,37 +160,37 @@ class AtomicSkillGateTest(unittest.TestCase):
         annotations["source_audit_sha256"] = digest(audit_path)
         annotations_path.write_text(json.dumps(annotations))
         with self.assertRaisesRegex(ValueError, "审计来源"):
-            self.check((dataset, annotations_path, audit_path), "pick_banana")
+            self.check((dataset, annotations_path, audit_path), "pick_and_place_banana_in_box")
 
     def test_reject_false_success_and_corrupt_action(self):
         files = self.fixture()
         annotations = json.loads(files[1].read_text())
-        annotations["episodes"]["pick_banana-test"]["success"] = False
+        annotations["episodes"]["pick_and_place_banana_in_box-test"]["success"] = False
         files[1].write_text(json.dumps(annotations))
         with self.assertRaisesRegex(ValueError, "成功"):
-            self.check(files, "pick_banana")
-        annotations["episodes"]["pick_banana-test"]["success"] = True
+            self.check(files, "pick_and_place_banana_in_box")
+        annotations["episodes"]["pick_and_place_banana_in_box-test"]["success"] = True
         files[1].write_text(json.dumps(annotations))
         path = files[0] / "test" / "data" / "part.parquet"
         data = pq.read_table(path).to_pydict()
         data["action"][0] = [0.0] * 6
         pq.write_table(pa.table(data), path)
         with self.assertRaisesRegex(ValueError, "action"):
-            self.check(files, "pick_banana")
+            self.check(files, "pick_and_place_banana_in_box")
 
     def test_reject_bimanual_desync_and_zero_episode(self):
-        files = self.fixture("close_hinged_lid_bimanual")
+        files = self.fixture("latch_box_lid_bimanual")
         rows = [json.loads(line) for line in (files[0] / "source_timestamps.jsonl").read_text().splitlines()]
         rows[0]["header_timestamp_ns"]["/demonstration/action_right"] += 50_000_000
         (files[0] / "source_timestamps.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
         with self.assertRaisesRegex(ValueError, "不同步"):
-            self.check(files, "close_hinged_lid_bimanual")
+            self.check(files, "latch_box_lid_bimanual")
         manifest_path = files[0] / "conversion_manifest.json"
         manifest = json.loads(manifest_path.read_text())
         manifest["episodes"] = []
         manifest_path.write_text(json.dumps(manifest))
         with self.assertRaisesRegex(ValueError, "0 个合格"):
-            self.check(files, "close_hinged_lid_bimanual")
+            self.check(files, "latch_box_lid_bimanual")
 
     def test_reject_state_camera_skew_within_age_window(self):
         files = self.fixture()
@@ -199,25 +199,25 @@ class AtomicSkillGateTest(unittest.TestCase):
         rows[0]["header_timestamp_ns"]["/joint_left"] -= 12_000_000
         path.write_text("".join(json.dumps(row) + "\n" for row in rows))
         with self.assertRaisesRegex(ValueError, "总体不同步"):
-            self.check(files, "pick_banana")
+            self.check(files, "pick_and_place_banana_in_box")
 
     def test_reject_unverified_calibration_and_wrong_task(self):
-        files = self.fixture("place_banana_in_box")
+        files = self.fixture("flip_box_lid_bimanual")
         labels = json.loads(files[1].read_text())
-        labels["episodes"]["place_banana_in_box-train"]["calibration_verified"] = False
+        labels["episodes"]["flip_box_lid_bimanual-train"]["calibration_verified"] = False
         files[1].write_text(json.dumps(labels))
         with self.assertRaisesRegex(ValueError, "夹爪核验"):
-            self.check(files, "place_banana_in_box")
-        labels["episodes"]["place_banana_in_box-train"]["calibration_verified"] = True
+            self.check(files, "flip_box_lid_bimanual")
+        labels["episodes"]["flip_box_lid_bimanual-train"]["calibration_verified"] = True
         files[1].write_text(json.dumps(labels))
         task_file = files[0] / "train" / "meta" / "tasks.parquet"
         pq.write_table(pa.table({"task_index": [0], "task": ["香蕉入盒整段任务"]}), task_file)
         with self.assertRaisesRegex(ValueError, "任务文本"):
-            self.check(files, "place_banana_in_box")
+            self.check(files, "flip_box_lid_bimanual")
 
     def test_launch_remains_closed_after_data_gate(self):
         argv = ["atomic_skill_sft.py", "--dataset", "dataset", "--annotations", "labels.json",
-                "--audit-report", "audit.json", "--skill", "pick_banana", "--max-sync-ns", "10000000",
+                "--audit-report", "audit.json", "--skill", "pick_and_place_banana_in_box", "--max-sync-ns", "10000000",
                 "--max-source-age-ns", "20000000", "--openpi-root", "openpi",
                 "--base-checkpoint", "checkpoint", "--launch"]
         output = io.StringIO()

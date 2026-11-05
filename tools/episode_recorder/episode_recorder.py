@@ -26,7 +26,7 @@ from vlm_annotations import (required_text, validate_annotation, validate_plan,
                              validate_plan_link, validate_skill_context)
 
 
-SKILLS = ("pick_banana", "place_banana_in_box", "close_hinged_lid_bimanual")
+SKILLS = ("pick_and_place_banana_in_box", "flip_box_lid_bimanual", "latch_box_lid_bimanual")
 ANNOTATION_KINDS = ("skill_start", "skill_complete", "outcome", "recovery_trigger")
 CLOCK_STEP_THRESHOLD_NS = 50_000_000
 
@@ -352,7 +352,7 @@ class Recorder:
             completed = [item["value"] for item in self.metadata["annotations"]
                          if item["kind"] == "skill_complete"]
             if len(completed) >= len(SKILLS) or value != SKILLS[len(completed)]:
-                raise ValueError("技能顺序必须为抓取、放置、双臂翻盖")
+                raise ValueError("技能顺序必须为单臂香蕉入盒、双臂翻盖、双臂扣盖")
             next_active = value
         elif kind == "skill_complete":
             if active is None or value != active:

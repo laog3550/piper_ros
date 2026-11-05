@@ -1,4 +1,4 @@
-# 香蕉入盒与双臂翻盖采集系统改造方案
+# 香蕉入盒、双臂翻盖与扣盖采集系统改造方案
 
 ## 当前基线
 
@@ -6,9 +6,11 @@
 
 ## 采集单元与技能边界
 
-完整任务保留一条 `mode=task` Episode，顺序为 `pick_banana`、`place_banana_in_box`、`close_hinged_lid_bimanual`。另分别采集三个 `mode=skill` Episode，避免只从成功长序列里截取训练片段。翻盖按一个双臂协同技能录制：一臂稳定盒体，另一臂沿真实铰链转动盖子，记录两臂连续的真实动作与反馈；不要把单臂运动复制成另一臂标签。
+完整任务保留一条 `mode=task` Episode，固定顺序为：`pick_and_place_banana_in_box`（单臂抓起香蕉并放入盒子中）、`flip_box_lid_bimanual`（双臂将盒子的盖子翻过来）、`latch_box_lid_bimanual`（双臂扣上盒子的盖子）。另分别采集三个 `mode=skill` Episode，避免只从成功长序列里截取训练片段。两个盒盖技能均录制两臂连续的真实动作与反馈；一臂稳定盒体，另一臂分别完成翻盖或扣盖，不把单臂运动复制成另一臂标签。
 
-起始位姿由采集控制台在开始录制时从 `/piper_vector/{left,right}/slave_feedback` 自动读取六个关节角度及原始时间戳，记录在 `task_metadata.initial_conditions.joint_positions`；不要求人员填写香蕉、盒体、翻盖角度或机械臂起始位姿。任务模式要求双臂实时反馈，单技能模式要求执行臂实时反馈，双臂翻盖要求双臂反馈。采集器只记录，不自动移动机械臂。单技能采集仍需填写 `perturbation_id`，以便按场景组划分训练/测试，避免重复动作泄漏。
+旧版 `pick_banana`、`place_banana_in_box`、`close_hinged_lid_bimanual` 是不同的技能边界；历史 Episode 和验收记录保留原始 ID，不自动改名或冒充新三技能训练样本。
+
+起始位姿由采集控制台在开始录制时从 `/piper_vector/{left,right}/slave_feedback` 自动读取六个关节角度及原始时间戳，记录在 `task_metadata.initial_conditions.joint_positions`；不要求人员填写香蕉、盒体、盒盖角度或机械臂起始位姿。任务模式要求双臂实时反馈，单臂技能要求所选臂实时反馈，两个盒盖技能要求双臂反馈。采集器只记录，不自动移动机械臂。单技能采集仍需填写 `perturbation_id`，以便按场景组划分训练/测试，避免重复动作泄漏。
 
 成功 SFT 导出要求每段原子技能 Episode 明确记录非空字符串 `task_metadata.initial_conditions.perturbation_id`。同一编号在所有技能中视为同一场景组，完整划入 train 或 test；缺少编号的 Episode 拒绝导出，合格数据不足两个不同场景组时不能建立训练/测试切分。旧版未标注转换保持按 `episode_id` 切分。
 
@@ -17,10 +19,10 @@
 新 Episode 的 `episode.json` 使用 `schema_version=2`，保留 v1 字段，新增 `active_skill` 与 `annotations`。录制中经 socket `annotate` 写入：
 
 ```json
-{"action":"annotate","kind":"skill_complete","value":"close_hinged_lid_bimanual","source_topic":"/camera_top/color/image_raw","header_stamp_ns":1234567890000000000}
+{"action":"annotate","kind":"skill_complete","value":"latch_box_lid_bimanual","source_topic":"/camera_top/color/image_raw","header_stamp_ns":1234567890000000000}
 ```
 
-`kind` 为 `skill_start`、`skill_complete`、`outcome`、`recovery_trigger`；每条标注由录制器补 `recorded_at_unix_ns` 并同步写入元数据和 `/collection/events`。恢复触发还生成唯一 `recovery_id` 并记录当前 `skill`。`skill_complete` 对应当前技能；`task` Episode 强制抓取、放置、翻盖顺序。相机来源只接受配置中的 `frame_topics`。如果点击时无法取得真实图像 Header，允许保存待对齐标注并置 `frame_resolution_required=true`；质量审计必须将其挡在成功 SFT 导出之外。录制器接收时间不能冒充完成帧。旧 v1 Episode 仍可读取，但不自动补造 v2 标签。
+`kind` 为 `skill_start`、`skill_complete`、`outcome`、`recovery_trigger`；每条标注由录制器补 `recorded_at_unix_ns` 并同步写入元数据和 `/collection/events`。恢复触发还生成唯一 `recovery_id` 并记录当前 `skill`。`skill_complete` 对应当前技能；`task` Episode 强制香蕉入盒、翻盖、扣盖顺序。相机来源只接受配置中的 `frame_topics`。如果点击时无法取得真实图像 Header，允许保存待对齐标注并置 `frame_resolution_required=true`；质量审计必须将其挡在成功 SFT 导出之外。录制器接收时间不能冒充完成帧。旧 v1 Episode 仍可读取，但不自动补造 v2 标签。
 
 恢复缓存设计预算：三路 640×480 RGB-D 原始帧、30 fps 约 138 MB/s；前录 3 秒约 415 MB，前 3 秒加后录 2 秒约 691 MB，双份拷贝可能超过 1 GB。独立的 `recovery_cache.py` 已实现默认关闭的有界回溯缓存，同时限制 `pre_roll_sec` 与 `max_buffer_bytes`，并在 manifest 中记录原 Episode、技能、`recovery_id`、实际窗口、淘汰/丢帧、磁盘余量及完整/失败状态。合成负载仍出现缺帧，现场稳定性未验收；没有把恢复 bag 自动并入 π0.5 训练集，只有人工审核且通过同等质量门禁后才能回流。
 
@@ -48,7 +50,7 @@
 
 已合入录制器 v2 标注、Web 实时标注、模块 1 只读检查表、原子技能质量审计与 LeRobot v3 导出、Qwen 规划运行时轨迹钩子、π0.5 原子技能训练准入。集成分支的 Web 合成 ROS 测试通过；LeRobot 转换测试 24 项、VLA 与录制器离线回归 78 项、π0.5 准入测试 7 项、恢复缓存测试 5 项通过。v2 合成 Episode 已走通审计、成功技能转换、外部人工标签与 SFT 数据门禁。这些测试使用合成输入验证软件契约。
 
-Web 单技能采集现在要求显式选择执行臂：抓取与入盒为 `LEFT` 或 `RIGHT`，双臂翻盖为 `BIMANUAL`；并填写非空、非 `UNVERIFIED` 占位的 `calibration_version` 与 `normalization_version`。只有录制配置 `teleoperation` 明确声明 `source=master_slave_teleoperation`、`mapping_verified=true`、`gripper_mapping_verified=true`，且对应臂的主目标和从反馈话题映射与已录话题一致时，Web 才写入 `time_domain=unix_ns`、`action_space=absolute_joint_position_7`、`action_provenance=human_demonstration`。示例配置的验证开关均为 `false`；须在主从端真实遥操作、时间域和夹爪物理映射完成现场核对后才可修改。未验证时界面显示训练未就绪，Episode 元数据也不伪造这三项。即使元数据齐全，仍须通过逐帧来源审计和转换器检查；旧 `task` 请求不要求新增字段。
+Web 单技能采集现在要求显式选择执行臂：香蕉入盒为 `LEFT` 或 `RIGHT`，翻盖与扣盖均为 `BIMANUAL`；并填写非空、非 `UNVERIFIED` 占位的 `calibration_version` 与 `normalization_version`。只有录制配置 `teleoperation` 明确声明 `source=master_slave_teleoperation`、`mapping_verified=true`、`gripper_mapping_verified=true`，且对应臂的主目标和从反馈话题映射与已录话题一致时，Web 才写入 `time_domain=unix_ns`、`action_space=absolute_joint_position_7`、`action_provenance=human_demonstration`。示例配置的验证开关均为 `false`；须在主从端真实遥操作、时间域和夹爪物理映射完成现场核对后才可修改。未验证时界面显示训练未就绪，Episode 元数据也不伪造这三项。即使元数据齐全，仍须通过逐帧来源审计和转换器检查；旧 `task` 请求不要求新增字段。
 
 采集控制台实时显示左右从臂六个关节角度；开始录制时自动冻结反馈值、来源话题和时间戳。页面同时显示相机话题的发布者与图像错误，便于区分未启动相机节点、尚未收到图像及编码失败。相机驱动仍由 `ros2 launch piper start_cameras.launch.py` 独立启动；控制台不会替代相机驱动。
 

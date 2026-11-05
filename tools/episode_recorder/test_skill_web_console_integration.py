@@ -19,7 +19,8 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from piper_msgs.msg import PiperArmVector
 from rclpy.qos import qos_profile_sensor_data
-from skill_web_console import ARM_TOPICS, Preview, recorder_request, start_request, teleoperation_ready
+from skill_web_console import (ARM_TOPICS, Preview, recorder_request, start_request,
+                               teleoperation_ready, provisional_collection_versions)
 
 HERE = Path(__file__).parent
 TOPICS = [f"/camera_{name}/color/image_raw" for name in ("wrist_left", "wrist_right", "top")]
@@ -134,7 +135,7 @@ def main():
     assert teleoperation_ready(declared, "LEFT")
     assert not teleoperation_ready(declared, "RIGHT")
     verified_request = start_request({
-        "mode": "skill", "skill": "pick_banana", "task": "合成抓取", "language_instruction": "抓取香蕉",
+        "mode": "skill", "skill": "pick_and_place_banana_in_box", "task": "合成抓取", "language_instruction": "抓取香蕉",
         "perturbation_id": "scene_001",
         "arm_mode": "LEFT", "calibration_version": "cal-v1", "normalization_version": "norm-v1"}, declared, FakePreview())
     assert {key: verified_request["metadata"][key] for key in
@@ -144,6 +145,15 @@ def main():
                  "action_space": "absolute_joint_position_7",
                  "action_provenance": "human_demonstration",
                  "calibration_version": "cal-v1", "normalization_version": "norm-v1"}
+    raw_versions = provisional_collection_versions()
+    assert set(raw_versions) == {"calibration_version", "normalization_version"}
+    raw_request = start_request({
+        "mode": "skill", "skill": "pick_and_place_banana_in_box", "task": "原始香蕉入盒",
+        "language_instruction": "抓起香蕉并放入盒中", "perturbation_id": "scene_001",
+        "arm_mode": "LEFT", **raw_versions}, declared, FakePreview())
+    assert raw_request["metadata"]["collection_contract_status"] == "training_not_ready_provisional_collection_versions"
+    assert "action_provenance" not in raw_request["metadata"]
+    assert set(raw_request["metadata"]["collection_version_evidence"]) == set(raw_versions)
     with tempfile.TemporaryDirectory(prefix="piper-web-test-") as temp:
         root = Path(temp)
         config = root / "config.json"
@@ -195,27 +205,30 @@ def main():
             web = subprocess.Popen(web_command, env=env)
             wait_for(lambda: http(port, "/api/status")["result"]["state"] == "recording")
             wait_for(lambda: all(item["online"] for item in http(port, "/api/status")["cameras"]))
-            rejected(port, "/api/annotate", {"kind": "skill_start", "value": "pick_banana",
+            rejected(port, "/api/annotate", {"kind": "skill_start", "value": "pick_and_place_banana_in_box",
                                              "camera_index": 9})
-            started = http(port, "/api/annotate", {"kind": "skill_start", "value": "pick_banana",
+            started = http(port, "/api/annotate", {"kind": "skill_start", "value": "pick_and_place_banana_in_box",
                                                   "camera_index": 2})["result"]
-            assert started["active_skill"] == "pick_banana"
+            assert started["active_skill"] == "pick_and_place_banana_in_box"
             assert started["annotation"]["source_topic"] == TOPICS[2]
             assert started["annotation"]["header_stamp_ns"] > 0
-            completed = http(port, "/api/annotate", {"kind": "skill_complete", "value": "pick_banana",
+            completed = http(port, "/api/annotate", {"kind": "skill_complete", "value": "pick_and_place_banana_in_box",
                                                     "camera_index": 2})["result"]
             assert completed["active_skill"] is None
             assert completed["annotation"]["source_topic"] == TOPICS[2]
             http(port, "/api/annotate", {"kind": "recovery_trigger", "value": "异常：夹爪打滑"})
-            http(port, "/api/annotate", {"kind": "skill_start", "value": "place_banana_in_box"})
+            http(port, "/api/annotate", {"kind": "skill_start", "value": "flip_box_lid_bimanual"})
             unresolved = http(port, "/api/annotate", {"kind": "skill_complete",
-                                                     "value": "place_banana_in_box",
+                                                     "value": "flip_box_lid_bimanual",
                                                      "source_topic": TOPICS[2],
                                                      "header_stamp_ns": 123})["result"]
             assert unresolved["annotation"]["frame_resolution_required"] is True
             assert "source_topic" not in unresolved["annotation"]
+            http(port, "/api/annotate", {"kind": "skill_start", "value": "latch_box_lid_bimanual"})
+            http(port, "/api/annotate", {"kind": "skill_complete", "value": "latch_box_lid_bimanual",
+                                          "camera_index": 2})
             http(port, "/api/annotate", {"kind": "outcome", "value": "success"})
-            assert len(http(port, "/api/status")["result"]["metadata"]["annotations"]) == 6
+            assert len(http(port, "/api/status")["result"]["metadata"]["annotations"]) == 8
             assert http(port, "/api/stop", {})["result"]["state"] == "stopped"
             custom_save = root / "manual_destination"
             saved = http(port, "/api/save", {"outcome": "success",
@@ -223,30 +236,35 @@ def main():
             assert saved["state"] == "saved"
             assert Path(saved["path"]).parent == custom_save
             saved_meta = json.loads((Path(saved["path"]) / "episode.json").read_text())
-            assert len(saved_meta["annotations"]) == 6
+            assert len(saved_meta["annotations"]) == 8
             assert saved_meta["annotations"][1]["kind"] == "skill_complete"
             entries = http(port, "/api/episodes")["result"]["episodes"]
             assert len(entries) == 1 and entries[0]["outcome"] == "success"
             assert entries[0]["language_instruction"] == "拿起测试物体"
             rejected(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
                                           "language_instruction": "双臂合上翻盖",
-                                          "skill": "close_hinged_lid_bimanual"})
+                                          "skill": "latch_box_lid_bimanual"})
             assert http(port, "/api/contract")["teleoperation_ready"] == {
                 "LEFT": False, "RIGHT": False, "BIMANUAL": False}
             rejected(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
                                           "language_instruction": "双臂合上翻盖",
-                                          "skill": "close_hinged_lid_bimanual",
+                                          "skill": "latch_box_lid_bimanual",
+                                          "perturbation_id": "scene_003", "arm_mode": "LEFT",
+                                          "calibration_version": "cal-v1", "normalization_version": "norm-v1"})
+            rejected(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
+                                          "language_instruction": "双臂翻过盒盖",
+                                          "skill": "flip_box_lid_bimanual",
                                           "perturbation_id": "scene_003", "arm_mode": "LEFT",
                                           "calibration_version": "cal-v1", "normalization_version": "norm-v1"})
             rejected(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
                                           "language_instruction": "双臂合上翻盖",
-                                          "skill": "close_hinged_lid_bimanual",
+                                          "skill": "latch_box_lid_bimanual",
                                           "perturbation_id": "scene_003", "arm_mode": "BIMANUAL",
                                           "calibration_version": "UNVERIFIED_PLACEHOLDER",
                                           "normalization_version": "norm-v1"})
             skill = http(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
                                                "language_instruction": "双臂合上翻盖",
-                                               "skill": "close_hinged_lid_bimanual",
+                                               "skill": "latch_box_lid_bimanual",
                                                "perturbation_id": "scene_003", "arm_mode": "BIMANUAL",
                                                "calibration_version": "cal-v1",
                                                "normalization_version": "norm-v1"})["result"]
@@ -261,13 +279,13 @@ def main():
             assert skill_contract["collection_contract_status"] == "training_not_ready_unverified_teleoperation_mapping"
             assert all(field not in skill_contract for field in
                        ("time_domain", "action_space", "action_provenance"))
-            assert skill["metadata"]["active_skill"] == "close_hinged_lid_bimanual"
+            assert skill["metadata"]["active_skill"] == "latch_box_lid_bimanual"
             done = http(port, "/api/annotate", {"kind": "skill_complete",
-                                               "value": "close_hinged_lid_bimanual",
+                                               "value": "latch_box_lid_bimanual",
                                                "camera_index": 0})["result"]
             assert done["annotation"]["source_topic"] == TOPICS[0]
             rejected(port, "/api/annotate", {"kind": "skill_complete",
-                                             "value": "close_hinged_lid_bimanual"})
+                                             "value": "latch_box_lid_bimanual"})
             http(port, "/api/annotate", {"kind": "recovery_trigger", "value": "恢复：重新扶正盒体"})
             http(port, "/api/annotate", {"kind": "outcome", "value": "failure"})
             assert http(port, "/api/stop", {})["result"]["state"] == "stopped"

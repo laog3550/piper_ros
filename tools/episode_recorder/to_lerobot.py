@@ -27,7 +27,7 @@ CAN_ACTIONS = {arm: f"/piper_vector/{arm}/master_target" for arm in ("left", "ri
 CAN_IDS = {"master_target": [0x155, 0x156, 0x157, 0x159],
            "slave_feedback": [0x2A5, 0x2A6, 0x2A7, 0x2A8]}
 VECTOR_TYPE = "piper_msgs/msg/PiperArmVector"
-SKILLS = ("pick_banana", "place_banana_in_box", "close_hinged_lid_bimanual")
+SKILLS = ("pick_and_place_banana_in_box", "flip_box_lid_bimanual", "latch_box_lid_bimanual")
 VECTOR_MSG = """std_msgs/Header header
 string source_topic
 string[7] joint_names
@@ -305,8 +305,8 @@ def sft_label(meta):
     group_id = initial.get("perturbation_id") if isinstance(initial, dict) else None
     if not isinstance(group_id, str) or not group_id.strip():
         reasons.append("缺少 task_metadata.initial_conditions.perturbation_id 场景组标识")
-    if (skill == "close_hinged_lid_bimanual" and arm_mode != "BIMANUAL"
-            or skill in SKILLS[:2] and arm_mode not in ("LEFT", "RIGHT")):
+    if (skill in SKILLS[1:] and arm_mode != "BIMANUAL"
+            or skill == SKILLS[0] and arm_mode not in ("LEFT", "RIGHT")):
         reasons.append("skill 与 arm_mode 不匹配")
     task_text = meta.get("task")
     if not isinstance(task_text, str) or not task_text.strip():

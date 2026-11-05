@@ -68,11 +68,11 @@ class PiperAdapterTest(unittest.TestCase):
                 (root / split / "meta" / "info.json").write_text("{}", encoding="utf-8")
             episodes = []
             labels = {}
-            for skill in ("pick", "place"):
+            for skill in ("banana_in_box",):
                 for index in range(13):
                     identifier = f"{skill}-{index}"
                     labels[identifier] = skill
-                    atomic_skill = {"pick": "pick_banana", "place": "place_banana_in_box"}[skill]
+                    atomic_skill = "pick_and_place_banana_in_box"
                     split = "train" if index < 10 else "test"
                     group_id = f"scene-{skill}-{index}"
                     task_text = f"{skill} 第 {index} 次示教"
@@ -122,7 +122,7 @@ class PiperAdapterTest(unittest.TestCase):
                      "normalization_version": "piper-v1", "episode_skills": labels}
             proof_path = root / "evidence.json"
             proof_path.write_text(json.dumps(proof), encoding="utf-8")
-            self.assertEqual(check_dataset(root, proof_path, audit_path)["counts"]["train_pick"], 10)
+            self.assertEqual(check_dataset(root, proof_path, audit_path)["counts"]["train_banana_in_box"], 10)
             audit = json.loads(audit_path.read_text(encoding="utf-8"))
             audit["sources"][0]["suggested_split"] = "test"
             audit_path.write_text(json.dumps(audit), encoding="utf-8")

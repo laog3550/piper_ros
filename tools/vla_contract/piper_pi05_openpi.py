@@ -17,7 +17,7 @@ from piper_pi05_adapter import ACTION_HORIZON, PiperInputs, PiperOutputs
 OPENPI_COMMIT = "215abfb217dbac7d5f1273282331b9b1866c0479"
 CONFIG_NAME = "pi05_piper_absolute_7"
 ASSET_ID = "local/piper_train"
-SINGLE_ARM_SKILLS = {"pick_banana": "pick", "place_banana_in_box": "place"}
+SINGLE_ARM_SKILLS = {"pick_and_place_banana_in_box": "banana_in_box"}
 TRAIN_LAUNCH_BLOCKER = "固定 openpi commit 的 LeRobot v2.1 读取器尚未完成 v3.0 兼容验收"
 OPENPI_V3_COMPATIBLE = False
 
@@ -109,9 +109,9 @@ def check_dataset(dataset, evidence, audit_report):
             or ids - set(audited)):
         raise ValueError("独立来源审计未核准所有训练 Episode")
     labels = proof.get("episode_skills")
-    if not isinstance(labels, dict) or set(labels) != ids or set(labels.values()) - {"pick", "place"}:
-        raise ValueError("核验证据必须逐 Episode 标注 pick/place")
-    counts = {(split, skill): 0 for split in ("train", "test") for skill in ("pick", "place")}
+    if not isinstance(labels, dict) or set(labels) != ids or set(labels.values()) - set(SINGLE_ARM_SKILLS.values()):
+        raise ValueError("核验证据必须逐 Episode 标注 banana_in_box")
+    counts = {(split, skill): 0 for split in ("train", "test") for skill in SINGLE_ARM_SKILLS.values()}
     groups = {"train": set(), "test": set()}
     for row in episodes:
         split = row.get("split")
@@ -161,8 +161,8 @@ def check_dataset(dataset, evidence, audit_report):
         versions = {row[field] for row in episodes}
         if len(versions) != 1 or proof.get(field) != next(iter(versions)):
             raise ValueError(f"{field} 在 Episode 和核验证据中不一致")
-    if any(counts["train", skill] < 10 or counts["test", skill] < 3 for skill in ("pick", "place")):
-        raise ValueError(f"每种技能至少需要 10 个训练 Episode 和 3 个测试 Episode：{counts}")
+    if any(counts["train", skill] < 10 or counts["test", skill] < 3 for skill in SINGLE_ARM_SKILLS.values()):
+        raise ValueError(f"单臂香蕉入盒至少需要 10 个训练 Episode 和 3 个测试 Episode：{counts}")
     for split in ("train", "test"):
         if not (dataset / split / "meta" / "info.json").is_file():
             raise ValueError(f"{split} LeRobot v3 数据集不存在")

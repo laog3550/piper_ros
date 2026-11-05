@@ -29,10 +29,12 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from piper_msgs.msg import PiperArmVector
 from preview_depth import DEPTH_MAX_METERS, camera_topics, depth_to_bgr, overlay_color_edges
-from skill_web_console import SKILLS, ARM_TOPICS, start_request, annotation_request, teleoperation_ready
+from skill_web_console import (SKILLS, ARM_TOPICS, start_request, annotation_request,
+                               teleoperation_ready, provisional_collection_versions)
 
 
 CAMERA_NAMES = ("左腕", "右腕", "顶部")
+SKILL_LABELS = ("抓起香蕉并放入盒子中（单臂）", "将盒子的盖子翻过来（双臂）", "扣上盒子的盖子（双臂）")
 STATE_NAMES = {"idle": "空闲", "starting": "启动中", "recording": "录制中",
                "stopped": "已停止，待保存", "failed": "失败，待丢弃",
                "interrupted": "意外中断，待丢弃"}
@@ -265,7 +267,7 @@ class Console(QMainWindow):
         fields.addWidget(self.mode, 0, 3)
         fields.addWidget(QLabel("固定技能"), 1, 2)
         self.skill = QComboBox()
-        for value in SKILLS: self.skill.addItem(value, value)
+        for value, label in zip(SKILLS, SKILL_LABELS): self.skill.addItem(label, value)
         fields.addWidget(self.skill, 1, 3)
         fields.addWidget(QLabel("执行臂"), 2, 2)
         self.arm_mode = QComboBox()
@@ -273,10 +275,15 @@ class Console(QMainWindow):
         fields.addWidget(self.arm_mode, 2, 3)
         fields.addWidget(QLabel("扰动编号"), 3, 2)
         self.perturbation = QLineEdit(); fields.addWidget(self.perturbation, 3, 3)
-        fields.addWidget(QLabel("标定版本"), 4, 0)
+        fields.addWidget(QLabel("相机内参快照版本"), 4, 0)
         self.calibration = QLineEdit(); fields.addWidget(self.calibration, 4, 1)
-        fields.addWidget(QLabel("归一化版本"), 4, 2)
+        fields.addWidget(QLabel("数据约定版本"), 4, 2)
         self.normalization = QLineEdit(); fields.addWidget(self.normalization, 4, 3)
+        defaults = provisional_collection_versions()
+        self.calibration.setText(defaults.get("calibration_version", ""))
+        self.normalization.setText(defaults.get("normalization_version", ""))
+        self.calibration.setToolTip("仅记录在线 CameraInfo 内参；手眼与跨相机外参尚未验收")
+        self.normalization.setToolTip("记录原始数据顺序与单位；训练集归一化统计尚未生成")
         self.contract = QLabel("训练契约：待检查")
         fields.addWidget(self.contract, 5, 0, 1, 4)
         self.joint_labels = {}
@@ -358,6 +365,8 @@ class Console(QMainWindow):
         self.mode.currentIndexChanged.connect(self.update_contract)
         self.skill.currentIndexChanged.connect(self.update_contract)
         self.arm_mode.currentIndexChanged.connect(self.update_contract)
+        self.calibration.textChanged.connect(self.update_contract)
+        self.normalization.textChanged.connect(self.update_contract)
         self.mark_start.clicked.connect(self.mark_next_skill)
         self.mark_complete.clicked.connect(lambda: self.mark_annotation("skill_complete", self.active_skill))
         self.mark_success.clicked.connect(lambda: self.mark_annotation("outcome", "success"))
@@ -418,13 +427,21 @@ class Console(QMainWindow):
 
     def update_contract(self):
         skill_mode = self.mode.currentData() == "skill"
-        for widget in (self.skill, self.arm_mode, self.calibration, self.normalization):
-            widget.setEnabled(skill_mode)
-        if self.skill.currentData() == "close_hinged_lid_bimanual" and skill_mode:
+        bimanual = self.skill.currentData() in SKILLS[1:]
+        for widget in (self.skill, self.calibration, self.normalization):
+            widget.setEnabled(skill_mode and self.state == "idle")
+        self.arm_mode.setEnabled(skill_mode and not bimanual and self.state == "idle")
+        if bimanual and skill_mode:
             self.arm_mode.setCurrentIndex(2)
-        ready = teleoperation_ready(self.config, self.arm_mode.currentData())
+        elif self.arm_mode.currentData() == "BIMANUAL":
+            self.arm_mode.setCurrentIndex(0)
+        provisional = provisional_collection_versions()
+        pending = any(field.text() == provisional.get(key) for key, field in (
+            ("calibration_version", self.calibration), ("normalization_version", self.normalization))
+                      if provisional.get(key))
+        ready = teleoperation_ready(self.config, self.arm_mode.currentData()) and not pending
         self.contract.setText("训练契约：遥操作映射配置已声明，仍须逐帧审计" if ready else
-                              "训练契约：映射未验证；录制数据不可直接用于训练")
+                              "训练契约：仅可录原始技能；内外参、归一化或映射未验收")
 
     def mark_next_skill(self):
         done = [row for row in self.annotations if row.get("kind") == "skill_complete"]
@@ -461,8 +478,10 @@ class Console(QMainWindow):
         editable = not busy and self.state == "idle"
         for widget in (self.mode, self.task, self.instruction, self.duration, self.perturbation):
             widget.setEnabled(editable)
-        for widget in (self.skill, self.arm_mode, self.calibration, self.normalization):
+        for widget in (self.skill, self.calibration, self.normalization):
             widget.setEnabled(editable and self.mode.currentData() == "skill")
+        self.arm_mode.setEnabled(editable and self.mode.currentData() == "skill"
+                                 and self.skill.currentData() not in SKILLS[1:])
         self.start.setEnabled(not busy and self.state == "idle")
         self.stop.setEnabled(not busy and self.state == "recording")
         self.save.setEnabled(not busy and self.state == "stopped" and self.outcome.currentIndex() > 0)

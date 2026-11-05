@@ -17,11 +17,11 @@ from piper_pi05_openpi import digest
 from test_to_lerobot import fixture, vector_fixture
 
 
-def annotate(episode, skill="pick_banana", task="抓取香蕉", outcome="success",
+def annotate(episode, skill="pick_and_place_banana_in_box", task="抓起香蕉并放入盒子中", outcome="success",
              completion_index=-1, resolved=True, group_id="auto"):
     path = episode / "episode.json"
     meta = json.loads(path.read_text(encoding="utf-8"))
-    arms = ["left", "right"] if skill == "close_hinged_lid_bimanual" else ["left"]
+    arms = ["left", "right"] if skill in ("flip_box_lid_bimanual", "latch_box_lid_bimanual") else ["left"]
     input_format = "can-vector" if len(arms) == 2 else "joint-state"
     checked, _ = exporter.read_episode(episode, arms, 10, 200_000_000, 2_000_000,
                                        input_format=input_format,
@@ -66,7 +66,7 @@ def test_v2_audit_requires_resolved_success_and_complete_camera_frame(tmp_path):
     row = checked_audit(good, max_age_ms=30)
     assert row["eligible"] and row["eligible_frame_count"] == 2
     assert row["annotation_coverage"] == 1.0
-    assert row["skill_id"] == "pick_banana"
+    assert row["skill_id"] == "pick_and_place_banana_in_box"
     assert row["quality"]["max_selected_camera_skew_ns"] == 0
     assert row["quality"]["completion_frame"]["header_stamp_ns"] > 0
 
@@ -159,10 +159,10 @@ def test_bimanual_audit_rejects_invalid_action_state(tmp_path):
     stamp = 1_800_000_100_100_000_000
     recorded = meta["stopped_at_unix_ns"] - 10_000_000
     meta["task_metadata"]["initial_conditions"] = {"perturbation_id": episode.name}
-    meta.update(schema_version=2, mode="skill", skill="close_hinged_lid_bimanual",
+    meta.update(schema_version=2, mode="skill", skill="latch_box_lid_bimanual",
                 task="双臂合上盒盖", outcome="success",
                 frame_topics=[exporter.CAMERAS["top_rgb"]],
-                annotations=[{"kind": "skill_complete", "value": "close_hinged_lid_bimanual",
+                annotations=[{"kind": "skill_complete", "value": "latch_box_lid_bimanual",
                               "source_topic": exporter.CAMERAS["top_rgb"], "header_stamp_ns": stamp,
                               "recorded_at_unix_ns": recorded},
                              {"kind": "outcome", "value": "success",
@@ -174,7 +174,7 @@ def test_bimanual_audit_rejects_invalid_action_state(tmp_path):
 
 def test_completion_can_resolve_declared_depth_header(tmp_path):
     episode = vector_fixture(tmp_path, "episode_000001")
-    meta = annotate(episode, skill="close_hinged_lid_bimanual", task="双臂合上盒盖")
+    meta = annotate(episode, skill="latch_box_lid_bimanual", task="双臂合上盒盖")
     depth = "/camera_top/D455/aligned_depth_to_color/image_raw"
     meta["frame_topics"] = [exporter.CAMERAS["top_rgb"], depth]
     meta["annotations"][0]["source_topic"] = depth
@@ -253,10 +253,10 @@ def test_success_sft_real_lerobot_roundtrip_and_failure_exclusion(tmp_path):
     annotate(fixture(source, "episode_000001"), task="抓取第一根香蕉")
     annotate(fixture(source, "episode_000002"), task="抓取第二根香蕉")
     annotate(fixture(source, "episode_000003"), task="失败抓取", outcome="failure")
-    annotate(fixture(source, "episode_000004"), skill="place_banana_in_box", task="香蕉入盒")
+    annotate(vector_fixture(source, "episode_000004"), skill="flip_box_lid_bimanual", task="将盒子的盖子翻过来")
     annotate(fixture(source, "episode_000005"), task="缺场景组", group_id=None)
     output = tmp_path / "dataset"
-    exporter.convert(args(source, output, skills=["pick_banana"]))
+    exporter.convert(args(source, output, skills=["pick_and_place_banana_in_box"]))
     manifest = json.loads((output / "conversion_manifest.json").read_text(encoding="utf-8"))
     assert manifest["purpose"] == "success_sft"
     assert len(manifest["episodes"]) == 2
@@ -264,7 +264,7 @@ def test_success_sft_real_lerobot_roundtrip_and_failure_exclusion(tmp_path):
     assert any("perturbation_id" in " ".join(item["reasons"])
                for item in manifest["excluded_episodes"])
     assert {item["split"] for item in manifest["episodes"]} == {"train", "test"}
-    assert {item["skill_id"] for item in manifest["episodes"]} == {"pick_banana"}
+    assert {item["skill_id"] for item in manifest["episodes"]} == {"pick_and_place_banana_in_box"}
     tasks = set()
     for split in ("train", "test"):
         dataset = LeRobotDataset(f"local/piper_atomic_{split}", root=output / split)
@@ -295,13 +295,13 @@ def test_v2_export_reaches_atomic_gate_with_external_labels(tmp_path):
     assert audited["eligible_episode_count"] == 2
 
     output = tmp_path / "dataset"
-    exporter.convert(args(source, output, skills=["pick_banana"]))
+    exporter.convert(args(source, output, skills=["pick_and_place_banana_in_box"]))
     manifest_path = output / "conversion_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     labels = {}
     for row in manifest["episodes"]:
         labels[row["episode_id"]] = {
-            "skill_id": "pick_banana", "success": True, "verified": True,
+            "skill_id": "pick_and_place_banana_in_box", "success": True, "verified": True,
             "atomic_episode": True, "action_provenance": "human_demonstration",
             "source_sha256": row["source_sha256"],
             "calibration_version": row["calibration_version"],
@@ -315,7 +315,7 @@ def test_v2_export_reaches_atomic_gate_with_external_labels(tmp_path):
         "conversion_manifest_sha256": digest(manifest_path),
         "source_audit_sha256": digest(report), "episodes": labels,
     }), encoding="utf-8")
-    result = inspect(output, annotations, report, "pick_banana", 30_000_000, 30_000_000,
+    result = inspect(output, annotations, report, "pick_and_place_banana_in_box", 30_000_000, 30_000_000,
                      min_train=1, min_test=1)
     assert result["status"] == "data_gate_passed_launch_blocked"
     assert result["counts"] == {"train": 1, "test": 1}
@@ -323,7 +323,11 @@ def test_v2_export_reaches_atomic_gate_with_external_labels(tmp_path):
     assert result["launch_blockers"]
 
 
-def test_bimanual_success_sft_real_roundtrip(tmp_path):
+@pytest.mark.parametrize("skill,task", [
+    ("flip_box_lid_bimanual", "将盒子的盖子翻过来"),
+    ("latch_box_lid_bimanual", "扣上盒子的盖子"),
+])
+def test_bimanual_success_sft_real_roundtrip(tmp_path, skill, task):
     from importlib.metadata import version
     if version("lerobot") != "0.4.4":
         pytest.skip("需要 lerobot==0.4.4")
@@ -334,13 +338,13 @@ def test_bimanual_success_sft_real_roundtrip(tmp_path):
     source.mkdir()
     for number in (1, 2):
         annotate(vector_fixture(source, f"episode_{number:06d}"),
-                 skill="close_hinged_lid_bimanual", task=f"双臂合上盒盖{number}")
+                 skill=skill, task=f"{task}{number}")
     output = tmp_path / "dataset"
     exporter.convert(args(source, output, arm_mode="BIMANUAL", input_format="can-vector",
-                        skills=["close_hinged_lid_bimanual"]))
+                        skills=[skill]))
     manifest = json.loads((output / "conversion_manifest.json").read_text(encoding="utf-8"))
     assert len(manifest["episodes"]) == 2
-    assert all(item["skill_id"] == "close_hinged_lid_bimanual" for item in manifest["episodes"])
+    assert all(item["skill_id"] == skill for item in manifest["episodes"])
     assert {item["split"] for item in manifest["episodes"]} == {"train", "test"}
     for split in ("train", "test"):
         dataset = LeRobotDataset(f"local/piper_atomic_{split}", root=output / split)

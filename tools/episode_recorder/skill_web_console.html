@@ -47,7 +47,7 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <section><h2>三路相机</h2><p class="muted">画面由独立的 ROS 相机节点提供；无发布者时请先启动三路相机。三路 RGB 预览未就绪时，开始录制请求会被拒绝，避免结束后才发现关键图像缺失。</p><div id="cameras" class="grid"></div></section>
 <section><h2>机械臂实时关节角度</h2><p class="muted">主从臂由同侧 CAN 总线和固件直连遥操作；ROS 不参与运动控制。采集需另外运行只读旁路 <code>piper_direct_can</code> 与 <code>piper_arm_vector</code>，本页读取左右从臂实测反馈，单位 rad。开始录制时自动保存当前六个关节角度与原始时间戳；没有有效反馈时开始请求会被拒绝。</p><div id="joints" class="row"></div></section>
 <section><h2>采集数据的训练用途</h2><div class="tablewrap"><table><thead><tr><th>目标</th><th>本界面记录的数据</th><th>进入训练前还需要</th></tr></thead><tbody>
-<tr><td>π0.5（Pi）动作策略</td><td>单臂抓取或入盒的主臂目标、从臂反馈、顶部与对应腕部 RGB、任务文字、技能边界和人工结果。原始数据保存在 Episode 的 rosbag2 中。</td><td>有效夹爪映射与标定、Unix Header 时间对齐、成功片段审计、按扰动组切分、LeRobot 导出及独立训练核验。双臂翻盖可采集，但当前单臂 π0.5 训练入口不接收。</td></tr>
+<tr><td>π0.5（Pi）动作策略</td><td>单臂香蕉入盒，以及双臂翻盖、扣盖的主臂目标、从臂反馈、顶部与对应腕部 RGB、任务文字、技能边界和人工结果。原始数据保存在 Episode 的 rosbag2 中。</td><td>有效夹爪映射与标定、Unix Header 时间对齐、成功片段审计、按扰动组切分、LeRobot 导出及独立训练核验。当前 OpenPI 单臂入口仅面向香蕉入盒；双臂技能须走独立双臂训练门禁。</td></tr>
 <tr><td>Qwen 规划与结果判断</td><td>任务文字、技能顺序、结果与异常标注可作人工复核线索。</td><td>本界面不生成 Qwen 规划监督样本；须在 VLM 采集界面记录计划与技能上下文，提取并核验 RGB 帧及目标、状态变化，才可进入 Qwen 候选池。</td></tr>
 <tr><td>质量审计</td><td>深度图、相机信息、原始 CAN、恢复片段等按录制配置保存。</td><td>这些数据用于核对同步、标定和失败原因，不会因录制成功就自动成为任一模型的训练样本。</td></tr>
 </tbody></table></div></section>
@@ -56,16 +56,16 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <div id="current" class="muted">正在读取状态…</div>
 <p id="quality_warning" class="error" role="status"></p>
 <div id="captured_initial" class="muted"></div>
-<div class="row"><div><label for="mode">采集类型</label><select id="mode"><option value="task">完整任务</option><option value="skill">单技能片段</option></select></div><div id="skill_field" hidden><label for="skill">固定技能</label><select id="skill"><option value="pick_banana">抓取香蕉</option><option value="place_banana_in_box">香蕉放入盒子</option><option value="close_hinged_lid_bimanual">双臂合上翻盖</option></select></div></div>
-<label for="task">任务名</label><input id="task" maxlength="120" placeholder="例如：香蕉抓取、入盒与双臂翻盖">
-<label for="instruction">语言指令</label><textarea id="instruction" maxlength="2000" placeholder="例如：抓取香蕉放入盒中，再由双臂合上翻盖"></textarea>
+<div class="row"><div><label for="mode">采集类型</label><select id="mode"><option value="task">完整任务</option><option value="skill">单技能片段</option></select></div><div id="skill_field" hidden><label for="skill">固定技能</label><select id="skill"><option value="pick_and_place_banana_in_box">抓起香蕉并放入盒子中（单臂）</option><option value="flip_box_lid_bimanual">将盒子的盖子翻过来（双臂）</option><option value="latch_box_lid_bimanual">扣上盒子的盖子（双臂）</option></select></div></div>
+<label for="task">任务名</label><input id="task" maxlength="120" placeholder="例如：香蕉入盒、翻盖与扣盖">
+<label for="instruction">语言指令</label><textarea id="instruction" maxlength="2000" placeholder="例如：抓起香蕉放入盒中，双臂翻过盒盖，再扣上盒盖"></textarea>
 <div class="row"><div><label for="duration_sec">本条 Episode 固定时长（秒）</label><input id="duration_sec" type="number" min="1" max="86400" step="1" value="60"></div><div><label for="save_dir">Episode 保存目录</label><input id="save_dir" type="text" placeholder="绝对路径；每条可修改"></div></div>
 <p class="muted">到时自动停止，之后仍需选择结果并保存；保存时在所填目录下自动创建 Episode 子目录。</p>
 <div id="contract_fields" hidden>
 <h2>技能采集契约</h2>
-<div class="row"><div><label for="arm_mode">执行臂</label><select id="arm_mode"><option value="">请选择</option><option value="LEFT">LEFT</option><option value="RIGHT">RIGHT</option><option value="BIMANUAL">BIMANUAL</option></select></div><div><label for="calibration_version">已验收标定版本</label><input id="calibration_version" maxlength="120" placeholder="填写现场验收的版本号"></div><div><label for="normalization_version">归一化版本</label><input id="normalization_version" maxlength="120" placeholder="填写数据集版本号"></div></div>
+<div class="row"><div><label for="arm_mode">执行臂</label><select id="arm_mode"><option value="">请选择</option><option value="LEFT">LEFT</option><option value="RIGHT">RIGHT</option><option value="BIMANUAL">BIMANUAL</option></select></div><div><label for="calibration_version">相机内参快照版本</label><input id="calibration_version" maxlength="120" placeholder="自动读取当前采集快照"></div><div><label for="normalization_version">数据约定版本</label><input id="normalization_version" maxlength="120" placeholder="自动读取原始数据约定"></div></div>
 <p id="contract_status" class="notice">训练未就绪：正在检查主从遥操作映射。</p>
-<p class="muted">只有配置已核对主臂目标、从臂反馈及夹爪映射时，才声明人类示教动作来源。元数据就绪仍须通过原始数据审计。</p>
+<p class="muted">预填版本只证明 CameraInfo 内参和原始数据顺序、单位有记录；手眼外参、训练归一化统计和映射仍需验收。使用这些版本录制的 Episode 不会被标为训练就绪。</p>
 </div>
 <div id="initial_fields">
 <p class="muted">机械臂初始关节角度会自动读取并写入 Episode。单技能采集需填写扰动编号，以便按场景划分训练与测试。</p>
@@ -91,8 +91,8 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <script>
 const $ = id => document.getElementById(id);
 const labels = {idle:'空闲',starting:'启动中',recording:'录制中',stopped:'已停止，待保存',failed:'失败，待丢弃',interrupted:'意外中断，待丢弃',saved:'已保存',discarded:'已丢弃'};
-const skillNames = {pick_banana:'抓取香蕉',place_banana_in_box:'香蕉放入盒子',close_hinged_lid_bimanual:'双臂合上翻盖'};
-const skillOrder = Object.keys(skillNames);
+const skillNames = {pick_and_place_banana_in_box:'抓起香蕉并放入盒子中（单臂）',flip_box_lid_bimanual:'将盒子的盖子翻过来（双臂）',latch_box_lid_bimanual:'扣上盒子的盖子（双臂）'};
+const skillOrder = ['pick_and_place_banana_in_box','flip_box_lid_bimanual','latch_box_lid_bimanual'];
 const cameraNodes = [];
 for (let i=0;i<3;i++) {
   const card = document.createElement('div'); card.className='camera';
@@ -112,21 +112,22 @@ for(const [arm,name] of [['left','左臂'],['right','右臂']]) {
   jointNodes[arm]={status,values,topic};
 }
 let busy = false, state = 'unknown', currentMeta = {};
-let teleoperationReady = {};
+let teleoperationReady = {}, provisionalVersions = {};
 function notice(text, error=false) { $('notice').textContent=text; $('notice').className=error?'notice error':'notice'; }
 function updateContract() {
-  const skillMode=$('mode').value==='skill', bimanual=$('skill').value==='close_hinged_lid_bimanual';
+  const skillMode=$('mode').value==='skill', bimanual=['flip_box_lid_bimanual','latch_box_lid_bimanual'].includes($('skill').value);
   $('skill_field').hidden=!skillMode; $('contract_fields').hidden=!skillMode;
   $('arm_mode').querySelector('option[value="BIMANUAL"]').disabled=!bimanual;
   for(const arm of ['LEFT','RIGHT']) $('arm_mode').querySelector(`option[value="${arm}"]`).disabled=bimanual;
   if(bimanual) $('arm_mode').value='BIMANUAL';
   else if($('arm_mode').value==='BIMANUAL') $('arm_mode').value='';
-  const ready=teleoperationReady[$('arm_mode').value]===true;
-  $('contract_status').textContent=ready ? '采集元数据可声明主从示教；训练仍需逐帧数据审计。' : '训练未就绪：当前执行臂没有已验证的主从遥操作与夹爪映射。';
+  const pending=Object.entries(provisionalVersions).some(([key,value])=>$(key)?.value===value);
+  const ready=teleoperationReady[$('arm_mode').value]===true && !pending;
+  $('contract_status').textContent=ready ? '采集元数据可声明主从示教；训练仍需逐帧数据审计。' : '仅可录原始技能：内外参、归一化或映射尚未验收。';
 }
 async function loadContract() {
-  try { const data=await readJson(await fetch('/api/contract',{cache:'no-store'})); teleoperationReady=data.teleoperation_ready; }
-  catch(error) { teleoperationReady={}; }
+  try { const data=await readJson(await fetch('/api/contract',{cache:'no-store'})); teleoperationReady=data.teleoperation_ready; provisionalVersions=data.provisional_collection_versions || {}; for(const [key,value] of Object.entries(provisionalVersions)) if($(key) && !$(key).value) $(key).value=value; }
+  catch(error) { teleoperationReady={}; provisionalVersions={}; }
   updateContract();
 }
 async function readJson(response) { const data=await response.json(); if(!response.ok || !data.ok) throw Error(data.error || '操作失败'); return data; }
@@ -220,7 +221,7 @@ async function action(name, payload={}) {
   } catch(error) { notice(error.message,true); await refresh(); }
   finally { busy=false; updateButtons(); }
 }
-$('mode').onchange=updateContract; $('skill').onchange=updateContract; $('arm_mode').onchange=updateContract;
+$('mode').onchange=updateContract; $('skill').onchange=updateContract; $('arm_mode').onchange=updateContract; $('calibration_version').oninput=updateContract; $('normalization_version').oninput=updateContract;
 $('start').onclick=()=>{
   const payload={mode:$('mode').value,task:$('task').value,language_instruction:$('instruction').value,duration_sec:Number($('duration_sec').value)};
   payload.perturbation_id=$('initial_perturbation_id').value;

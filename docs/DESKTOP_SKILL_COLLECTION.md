@@ -43,7 +43,13 @@ python3 tools/episode_recorder/desktop_console.py --config /tmp/piper_episode_co
 
 控制台直接订阅配置中的三路 ROS `Image` 彩色帧和可选的对应深度帧，订阅队列深度为 1，只处理最新帧；不经过 JPEG、HTTP 或浏览器轮询。配置深度时，三路彩色图下方显示深度，旁边显示预览帧率、最近帧龄及离线原因。深度预览使用固定量程：左右腕 `0–0.5 m`、顶部 `0–1 m`，灰色表示超过预览量程，黑色表示无效像素；灰色大片不等于传感器数据丢失。左右从臂各显示六关节实时弧度值；开始 Episode 时自动把合格反馈写入 `task_metadata.initial_conditions.joint_positions`。
 
-「完整任务」允许按固定顺序记录三个技能的开始、完成、结果与异常/恢复事件；「原子技能」要求选择固定技能、执行臂、标定版本、归一化版本和扰动编号。可选左腕、右腕或顶部图像为标注提供原始 `Header` 时间戳。标注与 Episode 均写入现有录制服务格式。界面只显示映射配置声明状态；标定、夹爪映射、时间同步和逐帧来源审计未通过时，不会把数据宣称为训练就绪。
+「完整任务」按固定顺序记录三个技能：单臂抓起香蕉并放入盒子中、双臂翻过盒盖、双臂扣上盒盖。「原子技能」逐条选择其中一个技能及执行臂，并填写标定版本、归一化版本和扰动编号。界面记录技能开始、完成、结果与异常/恢复事件，可选左腕、右腕或顶部图像为标注提供原始 `Header` 时间戳。标注与 Episode 均写入现有录制服务格式。界面只显示映射配置声明状态；标定、夹爪映射、时间同步和逐帧来源审计未通过时，不会把数据宣称为训练就绪。
+
+## 当前原始采集版本
+
+本地界面从 [`config/collection_camera_info_snapshot.20261105.json`](../config/collection_camera_info_snapshot.20261105.json) 预填 `calibration_version=camera_info_snapshot_20261105_v1`。该文件是 2026-11-05 从三路在线 `CameraInfo` 读取的内参快照，含相机序列号、源话题、Header 时间、分辨率及 `D/K/R/P`；不含经现场验收的手眼与跨相机外参。因此它只是原始采集来源版本，不是训练标定通过证据。
+
+界面从 [`config/collection_data_convention.20261105.json`](../config/collection_data_convention.20261105.json) 预填 `normalization_version=piper_raw_joint6_gripper_m_20261105_v1`。它冻结六关节 `rad`、夹爪原始有符号 `m`、左右臂拼接次序及 CAN ID；尚未计算训练集 `state/action` 分位数统计。两份文件的 SHA-256 随 Episode 写入 `task_metadata.collection_version_evidence`。用这些版本可录制原子技能原始数据，但 `collection_contract_status` 明确为 `training_not_ready_provisional_collection_versions`，不会写入已验证的示教动作来源声明；训练转换与来源审计仍应拒绝。
 
 ## 合成闭环验收
 
