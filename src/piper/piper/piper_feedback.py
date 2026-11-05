@@ -506,18 +506,18 @@ def limit_step(targets_deg, previous_deg, max_step_deg):
     return stepped, limited
 
 
-# 夹爪不是关节：它的可指令量是"开口"，单位是**米**，范围 0~0.08 m。
+# 夹爪不是关节：它的可指令量是"开口"，单位是**米**，范围 0~0.10 m。
 # joint_states 的第 7 项就是米（节点把驱动的 1e-6 m 计数除以 1e6），主从两侧同
 # 单位，所以遥操作只需限幅、不需要换算。驱动侧真正关心的两个量是开口和夹持力：
 # 开口在节点的 joint_callback 里乘 1e6 交给 GripperCtrl，夹持力取自 effort[6]。
 GRIPPER_OPEN_MIN_M = 0.0
-GRIPPER_OPEN_MAX_M = 0.08
+GRIPPER_OPEN_MAX_M = 0.10
 # 手捏主臂夹爪时反馈带着 0.1 mm 量级的抖动；小于这个幅度的变化不传递，否则从臂
 # 夹爪会一直追着噪声跑（听起来是"嗡嗡"响）。
 DEFAULT_GRIPPER_DEADBAND_M = 0.0005
 # 从臂夹爪的夹持力，单位 N·m；节点的 joint_callback 会把它钳到 [0.5, 3]。
 DEFAULT_GRIPPER_EFFORT_NM = 1.0
-# 从臂开口按主臂开口的 1.5 倍跟随，最大钳制在从臂可指令上限 80 mm。
+# 从臂开口按主臂开口的 1.5 倍跟随，最大钳制在从臂可指令上限 100 mm。
 DEFAULT_GRIPPER_SCALE = 1.5
 
 # 快速复位手势：一次手势是 master 做出一段短促移动后重新停下；两次

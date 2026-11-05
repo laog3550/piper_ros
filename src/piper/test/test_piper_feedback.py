@@ -96,7 +96,8 @@ def test_alpha_beta_rejects_invalid_parameters():
 
 
 def test_gripper_opening_is_clamped_to_the_commandable_range():
-    """夹爪的可指令范围是 0~80mm：越界的 master 读数不会被原样转发。"""
+    """夹爪的可指令范围是 0~100mm：越界的 master 读数不会被原样转发。"""
+    assert GRIPPER_OPEN_MAX_M == pytest.approx(0.10)
     assert clamp_gripper(-0.01) == GRIPPER_OPEN_MIN_M
     assert clamp_gripper(0.5) == GRIPPER_OPEN_MAX_M
     assert clamp_gripper(0.032) == pytest.approx(0.032)
@@ -107,11 +108,11 @@ def test_gripper_opening_is_clamped_to_the_commandable_range():
 
 def test_gripper_scale_converts_master_travel_to_follower_travel():
     """行程倍数先乘后钳：主臂走满行程正好对应从臂走满行程。"""
-    # 本机构：主臂全程 80/1.3 ≈ 61.5mm 映射到从臂 80mm
+    # 本机构：主臂全程 100/1.5 ≈ 66.7mm 映射到从臂 100mm
     assert scale_gripper(GRIPPER_OPEN_MAX_M / DEFAULT_GRIPPER_SCALE) == \
         pytest.approx(GRIPPER_OPEN_MAX_M)
     # 超出主臂行程的部分被钳在从臂上限，不会溢出
-    assert scale_gripper(0.08) == GRIPPER_OPEN_MAX_M
+    assert scale_gripper(0.10) == GRIPPER_OPEN_MAX_M
     assert scale_gripper(-0.02) == GRIPPER_OPEN_MIN_M
     # 两台夹爪相同时用 1.0，就是纯镜像
     assert scale_gripper(0.035, 1.0) == pytest.approx(0.035)
