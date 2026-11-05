@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """验证深度预览的散点抑制和范围显示。运行：python3 tools/episode_recorder/test_preview_depth.py。"""
 
+import json
+from pathlib import Path
+
 import numpy as np
 from sensor_msgs.msg import Image
 
-from preview_depth import DEPTH_MAX_METERS, FAR_COLOR_BGR, depth_to_bgr, filter_depth, overlay_color_edges
+from preview_depth import DEPTH_MAX_METERS, FAR_COLOR_BGR, camera_topics, depth_to_bgr, filter_depth, overlay_color_edges
 
 
 def image(values):
@@ -48,4 +51,16 @@ flat = depth_to_bgr(image(np.full((40, 40), 500, dtype=np.uint16)))
 outlined = overlay_color_edges(flat.copy(), color, (40, 40))
 assert np.any(np.all(outlined == (235, 235, 235), axis=2))
 assert not np.array_equal(flat, outlined)
+rgb_config = json.loads((Path(__file__).resolve().parents[2] / "config/episode_recorder.rgb_only.example.json").read_text())
+assert len(rgb_config["frame_topics"]) == 3
+assert all("/depth/" not in topic and "/aligned_depth_to_color/" not in topic
+           for topic in rgb_config["topics"])
+assert len(camera_topics(rgb_config, require_depth=False)) == 3
+assert all(depth is None for _, depth in camera_topics(rgb_config, require_depth=False))
+try:
+    camera_topics(rgb_config)
+except ValueError:
+    pass
+else:
+    raise AssertionError("RGB-D 模式应拒绝缺少深度话题的配置")
 print("腕部与顶部色标、双边滤波、小空洞填充和轮廓显示：通过")

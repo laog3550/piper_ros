@@ -1,0 +1,42 @@
+{
+  "output_dir": "/tmp/piper_rgb_episodes",
+  "topics": [
+    "/piper_direct/left/master_target",
+    "/piper_direct/left/slave_feedback",
+    "/piper_direct/right/master_target",
+    "/piper_direct/right/slave_feedback",
+    "/piper_vector/left/master_target",
+    "/piper_vector/left/slave_feedback",
+    "/piper_vector/right/master_target",
+    "/piper_vector/right/slave_feedback",
+    "/camera_wrist_left/color/image_raw",
+    "/camera_wrist_left/color/camera_info",
+    "/camera_wrist_right/color/image_raw",
+    "/camera_wrist_right/color/camera_info",
+    "/camera_top/D455/color/image_raw",
+    "/camera_top/D455/color/camera_info"
+  ],
+  "frame_topics": [
+    "/camera_wrist_left/color/image_raw",
+    "/camera_wrist_right/color/image_raw",
+    "/camera_top/D455/color/image_raw"
+  ],
+  "teleoperation": {
+    "source": "master_slave_teleoperation",
+    "mapping_verified": false,
+    "gripper_mapping_verified": false,
+    "arms": {
+      "left": {
+        "master_target": "/piper_vector/left/master_target",
+        "slave_feedback": "/piper_vector/left/slave_feedback"
+      },
+      "right": {
+        "master_target": "/piper_vector/right/master_target",
+        "slave_feedback": "/piper_vector/right/slave_feedback"
+      }
+    }
+  },
+  "min_free_gb": 20,
+  "rosbag_cache_bytes": 268435456,
+  "startup_timeout_sec": 15
+}

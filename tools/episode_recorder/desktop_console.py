@@ -88,7 +88,7 @@ def render_depth(message, color_message, index):
 class Cameras:
     def __init__(self, config):
         self.node = rclpy.create_node("piper_collection_desktop_preview")
-        pairs = camera_topics(config)
+        pairs = camera_topics(config, require_depth=False)
         self.topics = [color for color, _ in pairs]
         self.depth_topics = [depth for _, depth in pairs]
         self.lock = threading.Lock()
@@ -103,6 +103,8 @@ class Cameras:
                          durability=DurabilityPolicy.VOLATILE)
         for kind, topics in enumerate((self.topics, self.depth_topics)):
             for index, topic in enumerate(topics):
+                if topic is None:
+                    continue
                 self.node.create_subscription(Image, topic,
                                               lambda msg, k=kind, i=index: self.on_image(k, i, msg), qos)
         for arm, topics in ARM_TOPICS.items():
@@ -238,8 +240,12 @@ class Console(QMainWindow):
             depth_image.setFixedHeight(175)
             depth_image.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             depth_image.setStyleSheet("background: #10151d; color: white")
-            depth_info = QLabel(self.cameras.depth_topics[index])
+            depth_info = QLabel(self.cameras.depth_topics[index] or "")
             depth_info.setWordWrap(True)
+            if self.cameras.depth_topics[index] is None:
+                depth_title.hide()
+                depth_image.hide()
+                depth_info.hide()
             camera_grid.addWidget(title, 0, index)
             camera_grid.addWidget(image, 1, index)
             camera_grid.addWidget(info, 2, index)
@@ -529,6 +535,8 @@ class Console(QMainWindow):
             images = self.images if kind == 0 else self.depth_images
             labels = self.camera_labels if kind == 0 else self.depth_labels
             for index, (message, sequence, received_at) in enumerate(frames):
+                if kind == 1 and self.cameras.depth_topics[index] is None:
+                    continue
                 if kind == 1:
                     job = self.depth_jobs[index]
                     if job is not None and job.done():
@@ -579,6 +587,8 @@ class Console(QMainWindow):
             self.display_fps = [round(count / interval, 1) for count in self.rendered]
             for kind, frames in enumerate(snapshot):
                 for index, (_, _, received_at) in enumerate(frames):
+                    if kind == 1 and self.cameras.depth_topics[index] is None:
+                        continue
                     if received_at and now - received_at <= 2:
                         age_ms = round((now - received_at) * 1000)
                         if kind == 0:

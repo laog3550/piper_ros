@@ -140,7 +140,7 @@ def main():
     if args.seconds <= 0 or args.web_poll_seconds <= 0:
         parser.error("测量时长和网页轮询间隔必须大于 0")
     config = json.loads(args.config.read_text(encoding="utf-8"))
-    streams = {role: RosStream(color) for role, (color, _depth) in zip(ROLES, camera_topics(config))}
+    streams = {role: RosStream(color) for role, (color, _depth) in zip(ROLES, camera_topics(config, require_depth=False))}
     web = WebProbe(args.web_url, args.web_poll_seconds, args.web_console) if args.web_url else None
     web_thread = threading.Thread(target=web.run, daemon=True) if web else None
     started_wall_ns = time.time_ns()

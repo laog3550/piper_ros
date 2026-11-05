@@ -10,16 +10,16 @@ FAR_COLOR_BGR = (52, 52, 52)
 MAX_HOLE_PIXELS_AT_640 = 250
 
 
-def camera_topics(config):
+def camera_topics(config, *, require_depth=True):
     pairs = []
     for marker in CAMERA_MARKERS:
         topics = [topic for topic in config["topics"] if f"/{marker}/" in topic]
         color = [topic for topic in topics if topic.endswith("/color/image_raw")]
         depth = [topic for topic in topics if topic.endswith("/depth/image_raw")
                  or topic.endswith("/aligned_depth_to_color/image_raw")]
-        if len(color) != 1 or len(depth) != 1:
-            raise ValueError(f"{marker} 必须恰有一路彩色和一路深度图话题")
-        pairs.append((color[0], depth[0]))
+        if len(color) != 1 or len(depth) > 1 or (require_depth and len(depth) != 1):
+            raise ValueError(f"{marker} 必须恰有一路彩色图话题，深度图话题至多一路")
+        pairs.append((color[0], depth[0] if depth else None))
     return pairs
 
 
