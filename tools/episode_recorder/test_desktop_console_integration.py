@@ -124,16 +124,17 @@ def main():
                     window.duration.setValue(5)
                     window.start.click(); stage[0] = "started"
                 elif stage[0] == "started" and window.state == "recording":
-                    window.mark_start.click(); stage[0] = "task_mark_started"
+                    assert window.active_skill == "pick_and_place_banana_in_box"
+                    stage[0] = "task_mark_started"
                 elif stage[0] == "task_mark_started" and window.active_skill == "pick_and_place_banana_in_box":
                     window.mark_success.click(); stage[0] = "task_mark_completed"
-                elif stage[0] == "task_mark_completed" and len(window.annotations) >= 2:
+                elif stage[0] == "task_mark_completed" and len(window.annotations) >= 3:
                     assert window.annotations[1]["skill_result"] == "success"
                     assert window.annotations[1].get("header_stamp_ns", 0) > 0
                     window.mark_exception.click(); stage[0] = "task_exception"
-                elif stage[0] == "task_exception" and len(window.annotations) >= 3:
+                elif stage[0] == "task_exception" and len(window.annotations) >= 4:
                     window.mark_recovery.click(); stage[0] = "task_recovery"
-                elif stage[0] == "task_recovery" and len(window.annotations) >= 4:
+                elif stage[0] == "task_recovery" and len(window.annotations) >= 5:
                     window.close()
                     assert recorder_request(socket_path, {"action": "status"})["state"] == "recording"
                     closed_at[0] = time.monotonic()
@@ -147,7 +148,8 @@ def main():
                     assert metadata["recorded_duration_sec"] >= 5
                     assert set(metadata["task_metadata"]["initial_conditions"]["joint_positions"]) == {"left", "right"}
                     assert [a["kind"] for a in metadata["annotations"]] == [
-                        "skill_start", "skill_complete", "recovery_trigger", "recovery_trigger"]
+                        "skill_start", "skill_complete", "skill_start",
+                        "recovery_trigger", "recovery_trigger"]
                     assert metadata["annotations"][1]["verified_in_bag"] is True
                     collision = target_dir / "episode_000001"
                     collision.mkdir()

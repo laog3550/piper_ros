@@ -395,6 +395,12 @@ class Recorder:
                 self.metadata["ready_at_unix_ns"] = ready
                 self._last_clock_offset_ns = ready - time.monotonic_ns()
                 self.metadata["clock_adjustments"] = []
+                if self.metadata.get("schema_version") == 2 and mode == "task":
+                    self.metadata["active_skill"] = SKILLS[0]
+                    self.metadata["annotations"].append({
+                        "kind": "skill_start", "value": SKILLS[0],
+                        "annotation_origin": "automatic_task_start",
+                        "recorded_at_unix_ns": ready})
                 if duration is not None:
                     duration_ns = round(duration * 1_000_000_000)
                     self.ready_monotonic_ns = time.monotonic_ns()
@@ -445,7 +451,11 @@ class Recorder:
                 item["kind"] == "skill_complete" for item in self.metadata["annotations"]
             ):
                 raise ValueError("原子技能完成帧不能重复标注")
-            next_active = None if self.metadata["mode"] == "task" else active
+            if self.metadata["mode"] == "task":
+                following = SKILLS.index(active) + 1
+                next_active = SKILLS[following] if following < len(SKILLS) else None
+            else:
+                next_active = active
         elif kind == "outcome":
             if value not in ("success", "failure"):
                 raise ValueError("outcome 必须为 success 或 failure")
@@ -492,6 +502,11 @@ class Recorder:
             annotation["frame_resolution_required"] = kind == "skill_complete"
         self.metadata["active_skill"] = next_active
         self.metadata["annotations"].append(annotation)
+        if kind == "skill_complete" and self.metadata["mode"] == "task" and next_active is not None:
+            self.metadata["annotations"].append({
+                "kind": "skill_start", "value": next_active,
+                "annotation_origin": "automatic_handoff",
+                "recorded_at_unix_ns": annotation["recorded_at_unix_ns"]})
         self._write_current()
         self.event_publisher.publish(String(data=json.dumps({"episode_id": self.metadata["episode_id"],
             "event": "annotation", **annotation}, ensure_ascii=False)))

@@ -80,7 +80,7 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <label for="annotation_source">关联画面</label><select id="annotation_source"><option value="">只记录事件时间</option><option value="0">左腕彩色</option><option value="1">右腕彩色</option><option value="2" selected>顶部彩色</option></select>
 <label for="review_offset">原子技能完成时刻（录制开始后秒）</label><input id="review_offset" type="number" min="0" step="0.1" placeholder="停止录制后填写，例如 12.5">
 <p class="muted">完整任务点击“标记当前技能成功”即用当前相机帧标记完成；时长到期自动停止。原子技能到期自动使用录制末帧，提前停止时可填写时刻并补标。</p>
-<div class="row"><button id="mark_skill_start" class="secondary">开始下一技能</button><button id="mark_completion">提前停止后补标完成帧</button><button id="mark_success" class="secondary">标记当前技能成功</button><button id="mark_failure" class="danger">标记本条失败</button></div>
+<div class="row"><button id="mark_skill_start" class="secondary" hidden>开始下一技能</button><button id="mark_completion">提前停止后补标完成帧</button><button id="mark_success" class="secondary">标记当前技能成功</button><button id="mark_failure" class="danger">标记本条失败</button></div>
 <label for="trigger_reason">异常或恢复原因（可提前填写；留空可一键记录）</label><input id="trigger_reason" maxlength="190" placeholder="例如：夹爪打滑；重新抓取后恢复">
 <div class="row"><button id="mark_exception" class="danger">记录异常触发</button><button id="mark_recovery" class="secondary">记录恢复触发</button></div>
 <p class="muted">近期标注</p><ul id="annotation_log" class="annotation-log"></ul>
@@ -221,6 +221,8 @@ async function refresh() {
     if(state==='recording' || state==='stopped') {
       const outcomes=(meta.annotations || []).filter(item=>item.kind==='outcome');
       if(outcomes.length && !$('outcome').value) $('outcome').value=outcomes.at(-1).value;
+      if(meta.mode==='task' && !$('outcome').value && !outcomes.some(item=>item.value==='failure')
+          && (meta.annotations || []).filter(item=>item.kind==='skill_complete' && item.skill_result==='success').length===skillOrder.length) $('outcome').value='success';
     }
     updateButtons();
   } catch(error) { state='unknown'; currentMeta={}; $('state').textContent='录制服务未连接'; $('state').className='badge'; $('current').textContent=error.message; $('quality_warning').textContent=''; updateButtons(); }

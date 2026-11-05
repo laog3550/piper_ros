@@ -346,6 +346,7 @@ class Console(QMainWindow):
         layout.addWidget(self.message)
         marks = QHBoxLayout(); layout.addLayout(marks)
         self.mark_start = QPushButton("开始下一技能")
+        self.mark_start.hide()
         self.mark_complete = QPushButton("提前停止后补标完成帧")
         self.mark_success = QPushButton("标记当前技能成功")
         self.mark_failure = QPushButton("标记本条失败")
@@ -571,6 +572,17 @@ class Console(QMainWindow):
                     self.active_mode = meta.get("mode")
                     self.active_skill = meta.get("active_skill") or (meta.get("skill") if meta.get("mode") == "skill" else None)
                     self.annotations = meta.get("annotations") or []
+                    recorded_outcomes = [item.get("value") for item in self.annotations
+                                         if item.get("kind") == "outcome"]
+                    if self.outcome.currentIndex() == 0 and recorded_outcomes:
+                        self.outcome.setCurrentIndex({"success": 1, "failure": 2}.get(recorded_outcomes[-1], 0))
+                    if (meta.get("mode") == "task" and self.outcome.currentIndex() == 0
+                            and len([item for item in self.annotations
+                                     if item.get("kind") == "skill_complete"
+                                     and item.get("skill_result") == "success"]) == len(SKILLS)
+                            and not any(item.get("kind") == "outcome" and item.get("value") == "failure"
+                                        for item in self.annotations)):
+                        self.outcome.setCurrentIndex(1)
                     if self.annotations:
                         last = self.annotations[-1]
                         matched = last.get("matched_offset_sec")

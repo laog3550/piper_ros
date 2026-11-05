@@ -207,24 +207,22 @@ def main():
             wait_for(lambda: all(item["online"] for item in http(port, "/api/status")["cameras"]))
             rejected(port, "/api/annotate", {"kind": "skill_start", "value": "pick_and_place_banana_in_box",
                                              "camera_index": 9})
-            started = http(port, "/api/annotate", {"kind": "skill_start", "value": "pick_and_place_banana_in_box",
-                                                  "camera_index": 2})["result"]
+            started = http(port, "/api/status")["result"]["metadata"]
             assert started["active_skill"] == "pick_and_place_banana_in_box"
-            assert started["annotation"]["source_topic"] == TOPICS[2]
-            assert started["annotation"]["header_stamp_ns"] > 0
+            assert started["annotations"][0]["annotation_origin"] == "automatic_task_start"
             completed = http(port, "/api/annotate", {"kind": "skill_complete", "value": "pick_and_place_banana_in_box",
                                                     "camera_index": 2, "skill_result": "success"})["result"]
-            assert completed["active_skill"] is None
+            assert completed["active_skill"] == "flip_box_lid_bimanual"
             assert completed["annotation"]["source_topic"] == TOPICS[2]
             assert completed["annotation"]["skill_result"] == "success"
             http(port, "/api/annotate", {"kind": "recovery_trigger", "value": "异常：夹爪打滑"})
-            http(port, "/api/annotate", {"kind": "skill_start", "value": "flip_box_lid_bimanual"})
+            assert http(port, "/api/status")["result"]["metadata"]["active_skill"] == "flip_box_lid_bimanual"
             rejected(port, "/api/annotate", {"kind": "skill_complete",
                                              "value": "flip_box_lid_bimanual", "camera_index": 2})
             http(port, "/api/annotate", {"kind": "skill_complete",
                                            "value": "flip_box_lid_bimanual", "camera_index": 2,
                                            "skill_result": "success"})
-            http(port, "/api/annotate", {"kind": "skill_start", "value": "latch_box_lid_bimanual"})
+            assert http(port, "/api/status")["result"]["metadata"]["active_skill"] == "latch_box_lid_bimanual"
             http(port, "/api/annotate", {"kind": "skill_complete", "value": "latch_box_lid_bimanual",
                                           "camera_index": 2, "skill_result": "success"})
             assert len(http(port, "/api/status")["result"]["metadata"]["annotations"]) == 7
