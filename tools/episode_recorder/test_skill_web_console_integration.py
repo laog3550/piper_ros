@@ -20,7 +20,8 @@ from std_msgs.msg import String
 from piper_msgs.msg import PiperArmVector
 from rclpy.qos import qos_profile_sensor_data
 from skill_web_console import (ARM_TOPICS, Preview, recorder_request, start_request,
-                               teleoperation_ready, provisional_collection_versions)
+                               teleoperation_ready, provisional_collection_versions,
+                               collection_contract_diagnostics)
 
 HERE = Path(__file__).parent
 TOPICS = [f"/camera_{name}/color/image_raw" for name in ("wrist_left", "wrist_right", "top")]
@@ -145,6 +146,10 @@ def main():
                  "action_space": "absolute_joint_position_7",
                  "action_provenance": "human_demonstration",
                  "calibration_version": "cal-v1", "normalization_version": "norm-v1"}
+    assert verified_request["metadata"]["collection_contract_checks"]["calibration"]["status"] == (
+        "operator_supplied_pending_audit")
+    assert verified_request["metadata"]["collection_contract_checks"]["normalization"]["status"] == (
+        "operator_supplied_pending_audit")
     raw_versions = provisional_collection_versions()
     assert set(raw_versions) == {"calibration_version", "normalization_version"}
     raw_request = start_request({
@@ -154,6 +159,17 @@ def main():
     assert raw_request["metadata"]["collection_contract_status"] == "training_not_ready_provisional_collection_versions"
     assert "action_provenance" not in raw_request["metadata"]
     assert set(raw_request["metadata"]["collection_version_evidence"]) == set(raw_versions)
+    checks = raw_request["metadata"]["collection_contract_checks"]
+    assert checks["time_domain"]["status"] == "declared_pending_audit"
+    assert checks["teleoperation_mapping"]["status"] == "declared_pending_audit"
+    assert checks["action_space"]["status"] == "declared_pending_audit"
+    assert checks["action_provenance"]["status"] == "declared_pending_audit"
+    assert checks["calibration"]["status"] == "provisional"
+    assert checks["normalization"]["status"] == "provisional"
+    assert len(raw_request["metadata"]["collection_contract_blockers"]) == 2
+    unverified = collection_contract_diagnostics({}, "LEFT", **raw_versions)
+    assert unverified["checks"]["teleoperation_mapping"]["status"] == "unverified"
+    assert len(unverified["blockers"]) == 3
     with tempfile.TemporaryDirectory(prefix="piper-web-test-") as temp:
         root = Path(temp)
         config = root / "config.json"
@@ -243,8 +259,10 @@ def main():
             rejected(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
                                           "language_instruction": "双臂合上翻盖",
                                           "skill": "latch_box_lid_bimanual"})
-            assert http(port, "/api/contract")["teleoperation_ready"] == {
+            contract = http(port, "/api/contract")
+            assert contract["teleoperation_ready"] == {
                 "LEFT": False, "RIGHT": False, "BIMANUAL": False}
+            assert contract["contract_diagnostics"]["LEFT"]["checks"]["calibration"]["status"] == "provisional"
             rejected(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
                                           "language_instruction": "双臂合上翻盖",
                                           "skill": "latch_box_lid_bimanual",

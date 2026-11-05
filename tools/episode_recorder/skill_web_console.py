@@ -72,6 +72,52 @@ def teleoperation_ready(config, arm_mode):
         for arm in required)
 
 
+def collection_contract_diagnostics(config, arm_mode, calibration_version, normalization_version):
+    """Separate recorded source declarations from training acceptance."""
+    provisional = provisional_collection_versions()
+    calibration_raw = calibration_version == provisional.get("calibration_version")
+    normalization_raw = normalization_version == provisional.get("normalization_version")
+    mapping_ready = arm_mode in ("LEFT", "RIGHT", "BIMANUAL") and teleoperation_ready(config, arm_mode)
+    convention = Path(__file__).parents[2] / "config" / COLLECTION_VERSION_FILES["normalization_version"]
+    try:
+        raw_time_domain = json.loads(convention.read_text(encoding="utf-8")).get("time_domain")
+    except (OSError, ValueError, TypeError):
+        raw_time_domain = None
+    time_declared = raw_time_domain == "unix_ns"
+    checks = {
+        "time_domain": {
+            "status": "declared_pending_audit" if time_declared else "unverified",
+            "detail": ("原始采集约定为 Unix 纳秒；每条 Episode 仍须核对 Header 单调性和跨源同步"
+                       if time_declared else "缺少可追溯的原始时间域约定")},
+        "teleoperation_mapping": {
+            "status": "declared_pending_audit" if mapping_ready else "unverified",
+            "detail": ("配置声明所选执行臂的主目标、从反馈及夹爪映射已核对；仍须逐帧审计"
+                       if mapping_ready else "所选执行臂的主从话题或夹爪映射尚未在采集配置中声明已核对")},
+        "action_space": {
+            "status": "declared_pending_audit" if mapping_ready else "unverified",
+            "detail": ("配置声明七维绝对关节目标；仍须核对原始 CAN 来源和夹爪换算"
+                       if mapping_ready else "动作空间尚不能根据未核验的主从映射声明")},
+        "action_provenance": {
+            "status": "declared_pending_audit" if mapping_ready else "unverified",
+            "detail": ("配置声明主端遥操作示教来源；仍须核对实体归属和逐帧来源"
+                       if mapping_ready else "主端动作到从端反馈的实体归属尚未在采集配置中核验")},
+        "calibration": {
+            "status": "provisional" if calibration_raw else "operator_supplied_pending_audit",
+            "detail": ("当前版本只有 CameraInfo 内参快照，缺少手眼与跨相机外参验收"
+                       if calibration_raw else "操作员填写了标定版本；仍须提供独立验收证据")},
+        "normalization": {
+            "status": "provisional" if normalization_raw else "operator_supplied_pending_audit",
+            "detail": ("当前版本仅约定原始数据字段和单位，尚未计算训练集归一化统计"
+                       if normalization_raw else "操作员填写了归一化版本；仍须核对训练统计及 checkpoint 绑定")},
+    }
+    blockers = [checks[key]["detail"] for key in ("teleoperation_mapping", "calibration", "normalization")
+                if checks[key]["status"] != "declared_pending_audit"]
+    if not time_declared:
+        blockers.append(checks["time_domain"]["detail"])
+    return {"checks": checks, "blockers": blockers,
+            "metadata_claimable": bool(mapping_ready and not calibration_raw and not normalization_raw)}
+
+
 def camera_topics(config):
     topics = [topic for topic in config["topics"] if topic.endswith("/color/image_raw")]
     for marker in ("camera_wrist_left", "camera_wrist_right", "camera_top"):
@@ -286,8 +332,11 @@ def start_request(body, config, preview):
         metadata["collection_version_evidence"] = {
             field: record for field, record in collection_version_evidence().items()
             if metadata.get(field) == provisional.get(field)}
-        if teleoperation_ready(config, arm_mode) and not any(
-                metadata.get(field) == version for field, version in provisional.items()):
+        diagnostics = collection_contract_diagnostics(
+            config, arm_mode, metadata["calibration_version"], metadata["normalization_version"])
+        metadata["collection_contract_checks"] = diagnostics["checks"]
+        metadata["collection_contract_blockers"] = diagnostics["blockers"]
+        if diagnostics["metadata_claimable"]:
             metadata.update(time_domain="unix_ns", action_space="absolute_joint_position_7",
                             action_provenance="human_demonstration")
             metadata["collection_contract_status"] = "metadata_ready_pending_data_audit"
@@ -373,9 +422,15 @@ def handler_factory(socket_path, preview, config):
                 except (OSError, ValueError, json.JSONDecodeError) as exc:
                     return self.respond(503, {"ok": False, "error": str(exc)})
             if path == "/api/contract":
+                provisional = provisional_collection_versions()
                 return self.respond(200, {"ok": True, "teleoperation_ready": {
                     mode: teleoperation_ready(config, mode) for mode in ("LEFT", "RIGHT", "BIMANUAL")},
-                    "provisional_collection_versions": provisional_collection_versions()})
+                    "provisional_collection_versions": provisional,
+                    "contract_diagnostics": {
+                        mode: collection_contract_diagnostics(
+                            config, mode, provisional.get("calibration_version", ""),
+                            provisional.get("normalization_version", ""))
+                        for mode in ("LEFT", "RIGHT", "BIMANUAL")}})
             if path.startswith("/camera/") and path.endswith(".jpg"):
                 try:
                     index = int(path[8:-4])
