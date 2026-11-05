@@ -107,3 +107,17 @@ def test_clock_step_is_recorded_for_quality_audit(recorder, monkeypatch):
         "observed_at_unix_ns": 2_000_000_000,
         "offset_delta_ns": 100_000_000,
     }]
+
+
+def test_single_arm_does_not_require_inactive_arm_messages():
+    module = load_recorder_module()
+    topics = ["/piper_direct/left/master_target", "/piper_direct/right/master_target",
+              "/piper_vector/left/slave_feedback", "/piper_vector/right/slave_feedback",
+              "/camera_top/color/image_raw"]
+    required = module.required_topics_for_episode(topics, "skill", {"arm_mode": "LEFT"})
+    assert "/piper_direct/right/master_target" not in required
+    assert "/piper_vector/right/slave_feedback" not in required
+    assert "/piper_direct/left/master_target" in required
+    assert "/camera_top/color/image_raw" in required
+    assert module.required_topics_for_episode(topics, "task", {"arm_mode": "LEFT"}) == topics
+    assert module.required_topics_for_episode(topics, "skill", {"arm_mode": "BIMANUAL"}) == topics

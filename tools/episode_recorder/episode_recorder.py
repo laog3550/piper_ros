@@ -45,7 +45,17 @@ def load_json(path):
         return json.load(stream)
 
 
-def inspect_bag(bag_dir, topics, frame_topics=(), expected_fps=None):
+def required_topics_for_episode(topics, mode, metadata):
+    """Require action/state from the executing arm; retain other streams as optional context."""
+    arm_mode = metadata.get("arm_mode") if isinstance(metadata, dict) else None
+    if mode != "skill" or arm_mode not in ("LEFT", "RIGHT"):
+        return list(topics)
+    inactive = "right" if arm_mode == "LEFT" else "left"
+    return [topic for topic in topics if not topic.startswith((
+        f"/piper_direct/{inactive}/", f"/piper_vector/{inactive}/"))]
+
+
+def inspect_bag(bag_dir, topics, frame_topics=(), expected_fps=None, required_topics=None):
     files = sorted(bag_dir.glob("*.db3"))
     if not files or not (bag_dir / "metadata.yaml").is_file():
         raise ValueError("rosbag2 SQLite 文件或 metadata.yaml 缺失")
@@ -80,7 +90,10 @@ def inspect_bag(bag_dir, topics, frame_topics=(), expected_fps=None):
                     stamps[name].append(sec * 1_000_000_000 + nanosec)
         finally:
             connection.close()
-    missing = [topic for topic, count in counts.items() if count == 0]
+    required = topics if required_topics is None else required_topics
+    if not set(required).issubset(topics):
+        raise ValueError("required_topics 必须是 topics 的子集")
+    missing = [topic for topic in required if counts[topic] == 0]
     if missing:
         raise ValueError("话题无消息: " + ", ".join(missing))
     frame_stats = {}
@@ -228,7 +241,7 @@ class Recorder:
 
     def _graph_ready(self, node_name):
         time.sleep(0.1)
-        for topic in self.topics:
+        for topic in self.metadata.get("required_topics", self.topics):
             pubs = self.node.get_publishers_info_by_topic(topic)
             subs = self.node.get_subscriptions_info_by_topic(topic)
             if not pubs or not any(info.node_name == node_name for info in subs):
@@ -288,6 +301,7 @@ class Recorder:
             "active_skill": skill if mode == "skill" else None,
             "annotations": [],
             "task_metadata": fields, "topics": self.topics,
+            "required_topics": required_topics_for_episode(self.topics, mode, fields),
             "rosbag_relative_path": "bag",
             "duration_limit_sec": duration,
             "frame_topics": self.frame_topics, "expected_fps": self.expected_fps,
@@ -423,7 +437,8 @@ class Recorder:
         self.metadata["stopped_at_unix_ns"] = time.time_ns()
         try:
             self.metadata["bag_validation"] = inspect_bag(
-                self.current / "bag", self.topics, self.frame_topics, self.expected_fps)
+                self.current / "bag", self.topics, self.frame_topics, self.expected_fps,
+                self.metadata["required_topics"])
             self.metadata["state"] = "stopped"
         except (ValueError, sqlite3.Error) as error:
             self.metadata["state"] = "failed"
@@ -460,7 +475,8 @@ class Recorder:
         if destination_root == self.staging or self.staging in destination_root.parents:
             raise ValueError("保存目录不能位于录制暂存目录内")
         inspect_bag(self.current / "bag", self.metadata["topics"],
-                    self.metadata.get("frame_topics", []), self.metadata.get("expected_fps", {}))
+                    self.metadata.get("frame_topics", []), self.metadata.get("expected_fps", {}),
+                    self.metadata.get("required_topics"))
         destination_root.mkdir(parents=True, exist_ok=True)
         counter = self.root / ".next_id"
         stored = int(counter.read_text()) if counter.exists() else 1
