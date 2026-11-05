@@ -341,7 +341,7 @@ def sft_label(meta):
     for item in (*outcomes, *completes):
         if ((item.get("kind") == "outcome" and item.get("annotation_origin") == "save_selection")
                 or (item.get("kind") == "skill_complete"
-                    and item.get("annotation_origin") == "post_recording_review")):
+                    and item.get("annotation_origin") in ("post_recording_review", "duration_limit_last_frame"))):
             reviewed = item.get("reviewed_at_unix_ns")
             if (type(reviewed) is not int or type(meta.get("stopped_at_unix_ns")) is not int
                     or type(meta.get("saved_at_unix_ns")) is not int

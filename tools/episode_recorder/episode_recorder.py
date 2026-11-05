@@ -158,6 +158,23 @@ def recorded_frame_near(bag_dir, topic, target_ns, start_ns, stop_ns):
     return nearest[1], nearest[2]
 
 
+def recorded_header_exists(bag_dir, topic, header_ns, start_ns, stop_ns):
+    for path in sorted(bag_dir.glob("*.db3")):
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+            rows = connection.execute(
+                "SELECT substr(messages.data, 1, 12) FROM messages "
+                "JOIN topics ON messages.topic_id=topics.id "
+                "WHERE topics.name=? AND messages.timestamp BETWEEN ? AND ?",
+                (topic, start_ns, stop_ns))
+            for (prefix,) in rows:
+                if len(prefix) < 12 or prefix[:1] != b"\0" or prefix[1] not in (0, 1):
+                    continue
+                sec, nanosec = struct.unpack_from("<iI" if prefix[1] == 1 else ">iI", prefix, 4)
+                if nanosec < 1_000_000_000 and sec * 1_000_000_000 + nanosec == header_ns:
+                    return True
+    return False
+
+
 class Recorder:
     def __init__(self, config):
         self.root = Path(config["output_dir"]).expanduser().resolve()
@@ -406,6 +423,11 @@ class Recorder:
             raise ValueError("停止后仅可复核原子技能完成帧；结果请在保存时选择")
         if state == "recording" and self.metadata.get("mode") == "skill" and kind in ("skill_complete", "outcome"):
             raise ValueError("原子技能完成帧和结果请在录制结束后标记")
+        if state == "recording" and self.metadata.get("mode") == "task" and kind == "skill_complete":
+            if request.get("skill_result") != "success":
+                raise ValueError("完整任务请点击“标记当前技能成功”以记录完成帧")
+            if request.get("source_topic") is None or request.get("header_stamp_ns") is None:
+                raise ValueError("技能成功标记必须关联当前彩色相机帧")
         active = self.metadata.get("active_skill")
         next_active = active
         if kind == "skill_start":
@@ -452,6 +474,8 @@ class Recorder:
                                   not isinstance(stamp, int) or isinstance(stamp, bool) or stamp <= 0):
             raise ValueError("完成帧来源必须是配置中的图像话题及有效 Header 时间戳")
         annotation = {"kind": kind, "value": value}
+        if kind == "skill_complete" and not post_review and self.metadata.get("mode") == "task":
+            annotation["skill_result"] = "success"
         if post_review:
             annotation.update(annotation_origin="post_recording_review",
                               reviewed_at_unix_ns=time.time_ns(),
@@ -508,6 +532,46 @@ class Recorder:
                 self.current / "bag", self.topics, self.frame_topics, self.expected_fps,
                 self.metadata["required_topics"])
             self.metadata["state"] = "stopped"
+            if self.metadata.get("mode") == "task":
+                for item in self.metadata.get("annotations", []):
+                    if item.get("kind") != "skill_complete" or item.get("skill_result") != "success":
+                        continue
+                    try:
+                        if not recorded_header_exists(
+                                self.current / "bag", item["source_topic"], item["header_stamp_ns"],
+                                self.metadata["ready_at_unix_ns"],
+                                self.metadata["stop_requested_at_unix_ns"]):
+                            raise ValueError("点击成功时的相机帧未写入本条 rosbag")
+                        item["verified_in_bag"] = True
+                    except (ValueError, KeyError, sqlite3.Error) as error:
+                        item["frame_resolution_required"] = True
+                        item["frame_verification_error"] = str(error)
+                        item.pop("source_topic", None)
+                        item.pop("header_stamp_ns", None)
+            if (reason == "duration_limit" and self.metadata.get("schema_version") == 2
+                    and self.metadata.get("mode") == "skill"
+                    and self.metadata.get("skill") in SKILLS
+                    and not any(item.get("kind") == "skill_complete"
+                                for item in self.metadata.get("annotations", []))):
+                color_topics = [topic for topic in self.frame_topics
+                                if topic.endswith("/color/image_raw")]
+                color_topics.sort(key=lambda topic: ("camera_top" not in topic, topic))
+                try:
+                    if not color_topics:
+                        raise ValueError("没有配置彩色相机帧话题")
+                    ready = self.metadata["ready_at_unix_ns"]
+                    received, stamp = recorded_frame_near(
+                        self.current / "bag", color_topics[0],
+                        self.metadata["stop_requested_at_unix_ns"], ready,
+                        self.metadata["stop_requested_at_unix_ns"])
+                    self.metadata["annotations"].append({
+                        "kind": "skill_complete", "value": self.metadata["skill"],
+                        "annotation_origin": "duration_limit_last_frame",
+                        "reviewed_at_unix_ns": time.time_ns(),
+                        "source_topic": color_topics[0], "header_stamp_ns": stamp,
+                        "matched_offset_sec": round((received - ready) / 1_000_000_000, 3)})
+                except (ValueError, sqlite3.Error) as error:
+                    self.metadata["auto_completion_error"] = str(error)
         except (ValueError, sqlite3.Error) as error:
             self.metadata["state"] = "failed"
             self.metadata["error"] = str(error)

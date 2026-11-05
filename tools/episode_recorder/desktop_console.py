@@ -316,7 +316,7 @@ class Console(QMainWindow):
         save_location.addWidget(self.save_dir, 1)
         save_location.addWidget(browse)
         fields.addLayout(save_location, 2, 1)
-        fields.addWidget(QLabel("本条时长上限"), 3, 0)
+        fields.addWidget(QLabel("本条时长上限（完整任务/原子技能）"), 3, 0)
         self.duration = QSpinBox()
         self.duration.setRange(1, 86400)
         self.duration.setValue(60)
@@ -346,14 +346,15 @@ class Console(QMainWindow):
         layout.addWidget(self.message)
         marks = QHBoxLayout(); layout.addLayout(marks)
         self.mark_start = QPushButton("开始下一技能")
-        self.mark_complete = QPushButton("标记技能完成")
-        self.mark_success = QPushButton("标记成功")
-        self.mark_failure = QPushButton("标记失败")
+        self.mark_complete = QPushButton("提前停止后补标完成帧")
+        self.mark_success = QPushButton("标记当前技能成功")
+        self.mark_failure = QPushButton("标记本条失败")
         self.mark_exception = QPushButton("标记异常")
         self.mark_recovery = QPushButton("标记恢复")
         self.trigger_reason = QLineEdit(); self.trigger_reason.setPlaceholderText("异常或恢复原因")
         self.camera_ref = QComboBox(); self.camera_ref.addItem("无画面关联", None)
         for i, name in enumerate(CAMERA_NAMES): self.camera_ref.addItem(name, i)
+        self.camera_ref.setCurrentIndex(3)
         self.review_offset = QLineEdit()
         self.review_offset.setPlaceholderText("完成时刻：录制开始后第几秒")
         self.review_offset.setMaximumWidth(230)
@@ -361,7 +362,7 @@ class Console(QMainWindow):
                        self.mark_exception, self.mark_recovery, self.trigger_reason, self.camera_ref,
                        self.review_offset):
             marks.addWidget(widget)
-        mark_help = QLabel("原子技能停止后：选择相机、填写完成时刻（秒）并标记完成；保存时选择成功或失败。完整任务的技能边界仍在录制中标记。")
+        mark_help = QLabel("完整任务：点击“标记当前技能成功”即用当前相机帧标记完成；到达时长上限自动停止。原子技能：到时自动取录制末帧；提前停止可手动补标。保存时仍需选择整条 Episode 的结果。")
         mark_help.setWordWrap(True)
         layout.addWidget(mark_help)
         self.annotation_label = QLabel("尚无标注")
@@ -384,7 +385,7 @@ class Console(QMainWindow):
         self.normalization.textChanged.connect(self.update_contract)
         self.mark_start.clicked.connect(self.mark_next_skill)
         self.mark_complete.clicked.connect(lambda: self.mark_annotation("skill_complete", self.active_skill))
-        self.mark_success.clicked.connect(lambda: self.mark_annotation("outcome", "success"))
+        self.mark_success.clicked.connect(lambda: self.mark_annotation("skill_complete", self.active_skill))
         self.mark_failure.clicked.connect(lambda: self.mark_annotation("outcome", "failure"))
         self.mark_exception.clicked.connect(lambda: self.mark_annotation("recovery_trigger", "异常：" + (self.trigger_reason.text().strip() or "人工触发")))
         self.mark_recovery.clicked.connect(lambda: self.mark_annotation("recovery_trigger", "恢复：" + (self.trigger_reason.text().strip() or "人工触发")))
@@ -482,6 +483,10 @@ class Console(QMainWindow):
     def mark_annotation(self, kind, value):
         try:
             body = {"kind": kind, "value": value, "camera_index": self.camera_ref.currentData()}
+            if kind == "skill_complete" and self.state == "recording" and self.active_mode == "task":
+                if self.camera_ref.currentData() is None:
+                    raise ValueError("请选择当前彩色相机画面")
+                body["skill_result"] = "success"
             if kind == "skill_complete" and self.state == "stopped":
                 if self.camera_ref.currentData() is None or not self.review_offset.text().strip():
                     raise ValueError("请选择相机并填写录制开始后的完成时刻（秒）")
@@ -531,12 +536,11 @@ class Console(QMainWindow):
                                    and not self.active_skill and len([a for a in self.annotations if a.get("kind") == "skill_complete"]) < len(SKILLS))
         skill_review = not busy and self.state == "stopped" and mode == "skill"
         completed = any(a.get("kind") == "skill_complete" for a in self.annotations)
-        self.mark_complete.setEnabled((recording and mode == "task" and bool(self.active_skill))
-                                      or (skill_review and not completed))
+        self.mark_complete.setEnabled(skill_review and not completed)
         self.review_offset.setEnabled(skill_review)
         self.camera_ref.setEnabled(recording or skill_review)
-        for widget in (self.mark_success, self.mark_failure):
-            widget.setEnabled(recording and mode == "task")
+        self.mark_success.setEnabled(recording and mode == "task" and bool(self.active_skill))
+        self.mark_failure.setEnabled(recording and mode == "task")
         for widget in (self.mark_exception, self.mark_recovery):
             widget.setEnabled(recording)
 
@@ -566,6 +570,12 @@ class Console(QMainWindow):
                         detail += f" · 剩余约 {math.ceil(result['remaining_sec'])} 秒"
                     if meta.get("stop_reason") == "duration_limit":
                         detail += " · 已到时自动停止"
+                    if meta.get("auto_completion_error"):
+                        detail += f" · 末帧自动标记失败：{meta['auto_completion_error']}；请手动补标"
+                    unresolved = [item.get("frame_verification_error") for item in self.annotations
+                                  if item.get("frame_verification_error")]
+                    if unresolved:
+                        detail += f" · 技能完成帧核验失败：{unresolved[-1]}"
                     if meta.get("error"):
                         detail += f" · {meta['error']}"
                     self.state_label.setText(f"录制状态：{STATE_NAMES.get(self.state, self.state)}{detail}")

@@ -320,6 +320,8 @@ def annotation_request(body, preview):
     else:
         raise ValueError("未知标注类型")
     request = {"action": "annotate", "kind": kind, "value": value}
+    if body.get("skill_result") == "success" and kind == "skill_complete":
+        request["skill_result"] = "success"
     index = body.get("camera_index")
     if index is not None:
         if isinstance(index, bool) or not isinstance(index, int) or index not in range(3):

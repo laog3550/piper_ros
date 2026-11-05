@@ -213,22 +213,21 @@ def main():
             assert started["annotation"]["source_topic"] == TOPICS[2]
             assert started["annotation"]["header_stamp_ns"] > 0
             completed = http(port, "/api/annotate", {"kind": "skill_complete", "value": "pick_and_place_banana_in_box",
-                                                    "camera_index": 2})["result"]
+                                                    "camera_index": 2, "skill_result": "success"})["result"]
             assert completed["active_skill"] is None
             assert completed["annotation"]["source_topic"] == TOPICS[2]
+            assert completed["annotation"]["skill_result"] == "success"
             http(port, "/api/annotate", {"kind": "recovery_trigger", "value": "异常：夹爪打滑"})
             http(port, "/api/annotate", {"kind": "skill_start", "value": "flip_box_lid_bimanual"})
-            unresolved = http(port, "/api/annotate", {"kind": "skill_complete",
-                                                     "value": "flip_box_lid_bimanual",
-                                                     "source_topic": TOPICS[2],
-                                                     "header_stamp_ns": 123})["result"]
-            assert unresolved["annotation"]["frame_resolution_required"] is True
-            assert "source_topic" not in unresolved["annotation"]
+            rejected(port, "/api/annotate", {"kind": "skill_complete",
+                                             "value": "flip_box_lid_bimanual", "camera_index": 2})
+            http(port, "/api/annotate", {"kind": "skill_complete",
+                                           "value": "flip_box_lid_bimanual", "camera_index": 2,
+                                           "skill_result": "success"})
             http(port, "/api/annotate", {"kind": "skill_start", "value": "latch_box_lid_bimanual"})
             http(port, "/api/annotate", {"kind": "skill_complete", "value": "latch_box_lid_bimanual",
-                                          "camera_index": 2})
-            http(port, "/api/annotate", {"kind": "outcome", "value": "success"})
-            assert len(http(port, "/api/status")["result"]["metadata"]["annotations"]) == 8
+                                          "camera_index": 2, "skill_result": "success"})
+            assert len(http(port, "/api/status")["result"]["metadata"]["annotations"]) == 7
             assert http(port, "/api/stop", {})["result"]["state"] == "stopped"
             custom_save = root / "manual_destination"
             saved = http(port, "/api/save", {"outcome": "success",
@@ -236,8 +235,10 @@ def main():
             assert saved["state"] == "saved"
             assert Path(saved["path"]).parent == custom_save
             saved_meta = json.loads((Path(saved["path"]) / "episode.json").read_text())
-            assert len(saved_meta["annotations"]) == 8
+            assert len(saved_meta["annotations"]) == 7
             assert saved_meta["annotations"][1]["kind"] == "skill_complete"
+            assert all(item["verified_in_bag"] for item in saved_meta["annotations"]
+                       if item["kind"] == "skill_complete")
             entries = http(port, "/api/episodes")["result"]["episodes"]
             assert len(entries) == 1 and entries[0]["outcome"] == "success"
             assert entries[0]["language_instruction"] == "拿起测试物体"

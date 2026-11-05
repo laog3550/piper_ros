@@ -126,8 +126,10 @@ def main():
                 elif stage[0] == "started" and window.state == "recording":
                     window.mark_start.click(); stage[0] = "task_mark_started"
                 elif stage[0] == "task_mark_started" and window.active_skill == "pick_and_place_banana_in_box":
-                    window.mark_complete.click(); stage[0] = "task_mark_completed"
+                    window.mark_success.click(); stage[0] = "task_mark_completed"
                 elif stage[0] == "task_mark_completed" and len(window.annotations) >= 2:
+                    assert window.annotations[1]["skill_result"] == "success"
+                    assert window.annotations[1].get("header_stamp_ns", 0) > 0
                     window.mark_exception.click(); stage[0] = "task_exception"
                 elif stage[0] == "task_exception" and len(window.annotations) >= 3:
                     window.mark_recovery.click(); stage[0] = "task_recovery"
@@ -146,6 +148,7 @@ def main():
                     assert set(metadata["task_metadata"]["initial_conditions"]["joint_positions"]) == {"left", "right"}
                     assert [a["kind"] for a in metadata["annotations"]] == [
                         "skill_start", "skill_complete", "recovery_trigger", "recovery_trigger"]
+                    assert metadata["annotations"][1]["verified_in_bag"] is True
                     collision = target_dir / "episode_000001"
                     collision.mkdir()
                     try:
@@ -188,9 +191,8 @@ def main():
                     assert not window.mark_complete.isEnabled()
                     stage[0] = "skill_wait_stop"
                 elif stage[0] == "skill_wait_stop" and window.state == "stopped":
-                    window.camera_ref.setCurrentIndex(3)
-                    window.review_offset.setText("1.5")
-                    window.mark_complete.click(); stage[0] = "skill_labeled"
+                    assert not window.mark_complete.isEnabled()
+                    stage[0] = "skill_labeled"
                 elif stage[0] == "skill_labeled" and window.state == "stopped" and len(window.annotations) >= 1:
                     meta = recorder_request(socket_path, {"action": "status"})["metadata"]
                     assert meta["mode"] == "skill" and meta["skill"] == "pick_and_place_banana_in_box"
@@ -198,6 +200,8 @@ def main():
                     assert meta["task_metadata"]["initial_conditions"]["joint_positions"]["left"]["position_rad"]
                     assert meta["task_metadata"]["collection_contract_status"] == "training_not_ready_unverified_teleoperation_mapping"
                     assert any(a["kind"] == "skill_complete" and a.get("source_topic") == TOPICS[2]
+                               for a in meta["annotations"])
+                    assert any(a.get("annotation_origin") == "duration_limit_last_frame"
                                for a in meta["annotations"])
                     window.outcome.setCurrentIndex(1)
                     window.save.click(); stage[0] = "skill_saving"

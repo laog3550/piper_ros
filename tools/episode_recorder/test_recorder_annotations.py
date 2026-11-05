@@ -57,7 +57,7 @@ def recorder():
 def test_task_order_and_completion_frame(recorder):
     recorder.annotate({"kind": "skill_start", "value": "pick_and_place_banana_in_box"})
     result = recorder.annotate({"kind": "skill_complete", "value": "pick_and_place_banana_in_box",
-                                "source_topic": "/camera_top/color/image_raw",
+                                "skill_result": "success", "source_topic": "/camera_top/color/image_raw",
                                 "header_stamp_ns": 123})
     assert result["active_skill"] is None
     assert result["annotation"]["header_stamp_ns"] == 123
@@ -66,9 +66,13 @@ def test_task_order_and_completion_frame(recorder):
         recorder.annotate({"kind": "skill_start", "value": "latch_box_lid_bimanual"})
     assert len(recorder.metadata["annotations"]) == 2
     recorder.annotate({"kind": "skill_start", "value": "flip_box_lid_bimanual"})
-    recorder.annotate({"kind": "skill_complete", "value": "flip_box_lid_bimanual"})
+    recorder.annotate({"kind": "skill_complete", "value": "flip_box_lid_bimanual",
+                       "skill_result": "success", "source_topic": "/camera_top/color/image_raw",
+                       "header_stamp_ns": 124})
     recorder.annotate({"kind": "skill_start", "value": "latch_box_lid_bimanual"})
-    recorder.annotate({"kind": "skill_complete", "value": "latch_box_lid_bimanual"})
+    recorder.annotate({"kind": "skill_complete", "value": "latch_box_lid_bimanual",
+                       "skill_result": "success", "source_topic": "/camera_top/color/image_raw",
+                       "header_stamp_ns": 125})
     assert [item["value"] for item in recorder.metadata["annotations"] if item["kind"] == "skill_start"] == [
         "pick_and_place_banana_in_box", "flip_box_lid_bimanual", "latch_box_lid_bimanual"]
 
@@ -81,11 +85,11 @@ def test_invalid_frame_does_not_change_state(recorder):
     assert recorder.metadata["annotations"] == []
 
 
-def test_unresolved_completion_marked_for_audit(recorder):
+def test_task_completion_requires_current_camera_frame(recorder):
     recorder.annotate({"kind": "skill_start", "value": "pick_and_place_banana_in_box"})
-    result = recorder.annotate({"kind": "skill_complete", "value": "pick_and_place_banana_in_box"})
-    assert result["annotation"]["frame_resolution_required"] is True
-    assert (recorder.current / "episode.json").is_file()
+    with pytest.raises(ValueError):
+        recorder.annotate({"kind": "skill_complete", "value": "pick_and_place_banana_in_box"})
+    assert recorder.metadata["active_skill"] == "pick_and_place_banana_in_box"
 
 
 def test_recovery_trigger_has_stable_link(recorder):
