@@ -22,7 +22,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from piper_msgs.msg import PiperArmVector
 
-from desktop_console import Cameras, Console, recorder_request
+from desktop_console import Cameras, Console, recorder_request, skill_completion_issue
 from skill_web_console import provisional_collection_versions
 
 HERE = Path(__file__).parent
@@ -107,7 +107,8 @@ def main():
         closed_at = [None]
         failure = []
         preview_p95_ms = [None]
-        deadline = time.monotonic() + 35
+        manual_started_at = [None]
+        deadline = time.monotonic() + 50
 
         def step():
             nonlocal window
@@ -205,12 +206,53 @@ def main():
                                for a in meta["annotations"])
                     assert any(a.get("annotation_origin") == "duration_limit_last_frame"
                                for a in meta["annotations"])
+                    assert skill_completion_issue(meta["skill"], meta["annotations"], set(config["frame_topics"])) is None
                     window.mark_success.click()
                     assert window.outcome.currentText() == "成功"
                     window.save.click(); stage[0] = "skill_saving"
                 elif stage[0] == "skill_saving" and window.state == "idle":
                     assert window.task.text() == "合成抓取"
                     assert window.instruction.toPlainText() == "抓取合成物体"
+                    window.perturbation.setText("manual-review-scene")
+                    window.duration.setValue(8)
+                    window.start.click(); stage[0] = "manual_start"
+                elif stage[0] == "manual_start" and window.state == "recording":
+                    manual_started_at[0] = time.monotonic()
+                    stage[0] = "manual_wait"
+                elif stage[0] == "manual_wait" and time.monotonic() - manual_started_at[0] > 1:
+                    window.stop.click(); stage[0] = "manual_stop"
+                elif stage[0] == "manual_stop" and window.state == "stopped":
+                    window.outcome.setCurrentIndex(1)
+                    assert not window.save.isEnabled()
+                    window.save_recording()
+                    assert "完成帧" in window.message.text()
+                    assert recorder_request(socket_path, {"action": "status"})["state"] == "stopped"
+                    window.review_offset.setText("0.4")
+                    window.mark_complete.click(); stage[0] = "manual_review"
+                elif stage[0] == "manual_review" and window.state == "stopped" and any(
+                        item.get("kind") == "skill_complete" for item in window.annotations):
+                    meta = recorder_request(socket_path, {"action": "status"})["metadata"]
+                    assert skill_completion_issue(meta["skill"], meta["annotations"], set(config["frame_topics"])) is None
+                    assert window.save.isEnabled()
+                    window.save.click(); stage[0] = "manual_saving"
+                elif stage[0] == "manual_saving" and window.state == "idle":
+                    window.perturbation.setText("recorded-success-scene")
+                    window.start.click(); stage[0] = "recorded_start"
+                elif stage[0] == "recorded_start" and window.state == "recording":
+                    manual_started_at[0] = time.monotonic()
+                    stage[0] = "recorded_wait"
+                elif stage[0] == "recorded_wait" and time.monotonic() - manual_started_at[0] > 1:
+                    window.mark_success.click(); stage[0] = "recorded_mark"
+                elif stage[0] == "recorded_mark" and any(
+                        item.get("kind") == "skill_complete" and item.get("recorded_at_unix_ns")
+                        for item in window.annotations):
+                    window.stop.click(); stage[0] = "recorded_stop"
+                elif stage[0] == "recorded_stop" and window.state == "stopped":
+                    meta = recorder_request(socket_path, {"action": "status"})["metadata"]
+                    assert skill_completion_issue(meta["skill"], meta["annotations"], set(config["frame_topics"])) is None
+                    assert window.outcome.currentText() == "成功"
+                    window.save.click(); stage[0] = "recorded_saving"
+                elif stage[0] == "recorded_saving" and window.state == "idle":
                     window.task.setText("丢弃测试")
                     window.instruction.setPlainText("测试")
                     window.mode.setCurrentIndex(0)
@@ -249,7 +291,7 @@ def main():
                     time.sleep(0.1)
             else:
                 raise AssertionError("重启录制器后无法查询 Episode")
-            assert len(episodes) == 2 and all(Path(item["path"]).parent == target_dir for item in episodes)
+            assert len(episodes) == 4 and all(Path(item["path"]).parent == target_dir for item in episodes)
             print("重启录制器后仍能列出跨磁盘保存的 Episode：通过")
         finally:
             timer.stop(); window.close()

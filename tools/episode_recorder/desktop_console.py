@@ -30,7 +30,7 @@ from std_msgs.msg import String
 from piper_msgs.msg import PiperArmVector
 from preview_depth import DEPTH_MAX_METERS, camera_topics, depth_to_bgr, overlay_color_edges
 from skill_web_console import (SKILLS, ARM_TOPICS, start_request, annotation_request,
-                               teleoperation_ready, provisional_collection_versions)
+                               collection_contract_diagnostics, provisional_collection_versions)
 
 
 CAMERA_NAMES = ("左腕", "右腕", "顶部")
@@ -44,6 +44,21 @@ TASK_TEXT = {
 STATE_NAMES = {"idle": "空闲", "starting": "启动中", "recording": "录制中",
                "stopped": "已停止，待保存", "failed": "失败，待丢弃",
                "interrupted": "意外中断，待丢弃"}
+
+
+def skill_completion_issue(skill, annotations, frame_topics):
+    """Describe why a successful atomic episode lacks one verified completion frame."""
+    completions = [item for item in annotations if item.get("kind") == "skill_complete"]
+    if len(completions) != 1 or completions[0].get("value") != skill:
+        return "成功保存前须有且仅有一条与当前技能匹配的完成帧标注"
+    item = completions[0]
+    topic, stamp = item.get("source_topic"), item.get("header_stamp_ns")
+    if (topic not in frame_topics or not isinstance(topic, str)
+            or not topic.endswith("/color/image_raw") or type(stamp) is not int or stamp <= 0):
+        return "完成帧缺少已录制彩色相机的有效 Header 引用"
+    if item.get("verified_in_bag") is not True or item.get("frame_verification_error"):
+        return "完成帧尚未通过 rosbag 核验；请在录制后补标"
+    return None
 
 
 def recorder_request(socket_path, request):
@@ -291,6 +306,7 @@ class Console(QMainWindow):
         self.calibration.setToolTip("仅记录在线 CameraInfo 内参；手眼与跨相机外参尚未验收")
         self.normalization.setToolTip("记录原始数据顺序与单位；训练集归一化统计尚未生成")
         self.contract = QLabel("训练契约：待检查")
+        self.contract.setWordWrap(True)
         fields.addWidget(self.contract, 5, 0, 1, 4)
         self.joint_labels = {}
         for offset, arm in enumerate(("left", "right"), 6):
@@ -347,7 +363,7 @@ class Console(QMainWindow):
         marks = QHBoxLayout(); layout.addLayout(marks)
         self.mark_start = QPushButton("开始下一技能")
         self.mark_start.hide()
-        self.mark_complete = QPushButton("提前停止后补标完成帧")
+        self.mark_complete = QPushButton("录制后补标完成帧")
         self.mark_success = QPushButton("标记当前技能成功")
         self.mark_failure = QPushButton("标记本条失败")
         self.mark_exception = QPushButton("标记异常")
@@ -363,11 +379,14 @@ class Console(QMainWindow):
                        self.mark_exception, self.mark_recovery, self.trigger_reason, self.camera_ref,
                        self.review_offset):
             marks.addWidget(widget)
-        mark_help = QLabel("完整任务：点击“标记当前技能成功”即用当前相机帧标记完成；到达时长上限自动停止。原子技能：到时自动取录制末帧；提前停止可手动补标。保存时仍需选择整条 Episode 的结果。")
+        mark_help = QLabel("完整任务：录制中点击“标记当前技能成功”记录当前画面并进入下一技能。原子技能：可在成功时点击记录当前画面，再停止录制；停机核验通过后自动选择成功。到时自动取末帧，提前停止可补标。成功保存须有一条经 rosbag 核验的完成帧。")
         mark_help.setWordWrap(True)
         layout.addWidget(mark_help)
         self.annotation_label = QLabel("尚无标注")
         layout.addWidget(self.annotation_label)
+        self.completion_label = QLabel("")
+        self.completion_label.setWordWrap(True)
+        layout.addWidget(self.completion_label)
         self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels(("编号", "类型", "技能", "任务", "语言指令", "结果", "录制时长", "开始时间", "路径"))
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -469,13 +488,13 @@ class Console(QMainWindow):
             self.task.setPlaceholderText(recommended[0])
             self.instruction.setPlaceholderText(recommended[1])
             self._text_context = context
-        provisional = provisional_collection_versions()
-        pending = any(field.text() == provisional.get(key) for key, field in (
-            ("calibration_version", self.calibration), ("normalization_version", self.normalization))
-                      if provisional.get(key))
-        ready = teleoperation_ready(self.config, self.arm_mode.currentData()) and not pending
-        self.contract.setText("训练契约：遥操作映射配置已声明，仍须逐帧审计" if ready else
-                              "训练契约：仅可录原始技能；内外参、归一化或映射未验收")
+        diagnostics = collection_contract_diagnostics(
+            self.config, self.arm_mode.currentData(),
+            self.calibration.text(), self.normalization.text())
+        if diagnostics["blockers"]:
+            self.contract.setText("训练契约：仅可录原始技能；" + "；".join(diagnostics["blockers"]))
+        else:
+            self.contract.setText("训练契约：采集元数据可声明；仍须逐帧来源审计")
 
     def mark_next_skill(self):
         done = [row for row in self.annotations if row.get("kind") == "skill_complete"]
@@ -483,8 +502,12 @@ class Console(QMainWindow):
 
     def mark_skill_success(self):
         if self.state == "stopped" and self.active_mode == "skill":
-            self.outcome.setCurrentIndex(1)
-            self.message.setText("已选择本条原子技能成功；请检查完成帧标注后保存 Episode")
+            issue = self.success_completion_issue()
+            if issue:
+                self.message.setText(issue + "；请先补标，再选择成功")
+            else:
+                self.outcome.setCurrentIndex(1)
+                self.message.setText("完成帧已核验；已选择本条原子技能成功，可保存 Episode")
         else:
             self.mark_annotation("skill_complete", self.active_skill)
 
@@ -498,7 +521,7 @@ class Console(QMainWindow):
     def mark_annotation(self, kind, value):
         try:
             body = {"kind": kind, "value": value, "camera_index": self.camera_ref.currentData()}
-            if kind == "skill_complete" and self.state == "recording" and self.active_mode == "task":
+            if kind == "skill_complete" and self.state == "recording":
                 if self.camera_ref.currentData() is None:
                     raise ValueError("请选择当前彩色相机画面")
                 body["skill_result"] = "success"
@@ -517,6 +540,11 @@ class Console(QMainWindow):
     def save_recording(self):
         outcome = (None, "success", "failure")[self.outcome.currentIndex()]
         if outcome:
+            if outcome == "success" and self.active_mode == "skill":
+                issue = self.success_completion_issue()
+                if issue:
+                    self.message.setText(issue + "；请先补标，再保存")
+                    return
             path = self.save_dir.text().strip()
             if not path:
                 self.message.setText("请填写 Episode 保存目录")
@@ -532,6 +560,9 @@ class Console(QMainWindow):
         if QMessageBox.question(self, "确认丢弃", "确定丢弃当前 Episode？录制数据将被删除。") == QMessageBox.Yes:
             self.action("discard")
 
+    def success_completion_issue(self):
+        return skill_completion_issue(self.active_skill, self.annotations, self.cameras.frame_topics)
+
     def update_buttons(self):
         busy = "action" in self.pending
         editable = not busy and self.state == "idle"
@@ -543,7 +574,16 @@ class Console(QMainWindow):
                                  and self.skill.currentData() not in SKILLS[1:])
         self.start.setEnabled(not busy and self.state == "idle")
         self.stop.setEnabled(not busy and self.state == "recording")
-        self.save.setEnabled(not busy and self.state == "stopped" and self.outcome.currentIndex() > 0)
+        success_issue = (self.success_completion_issue() if self.state == "stopped"
+                         and self.active_mode == "skill" else None)
+        success_selected = self.outcome.currentIndex() == 1
+        self.save.setEnabled(not busy and self.state == "stopped" and self.outcome.currentIndex() > 0
+                             and not (success_selected and success_issue))
+        self.completion_label.setText(
+            f"原子技能完成帧：{success_issue}。选择彩色相机并填写完成时刻后点击补标。"
+            if self.state == "stopped" and self.active_mode == "skill" and success_issue
+            else "原子技能完成帧：已在 rosbag 中核验。"
+            if self.state == "stopped" and self.active_mode == "skill" else "")
         self.discard.setEnabled(not busy and self.state in ("recording", "stopped", "failed", "interrupted"))
         recording = not busy and self.state == "recording"
         mode = self.active_mode if self.state in ("recording", "stopped") else self.mode.currentData()
@@ -554,7 +594,7 @@ class Console(QMainWindow):
         self.mark_complete.setEnabled(skill_review and not completed)
         self.review_offset.setEnabled(skill_review)
         self.camera_ref.setEnabled(recording or skill_review)
-        self.mark_success.setEnabled((recording and mode == "task" and bool(self.active_skill)) or skill_review)
+        self.mark_success.setEnabled((recording and bool(self.active_skill)) or skill_review)
         self.mark_failure.setEnabled((recording and mode == "task") or skill_review)
         for widget in (self.mark_exception, self.mark_recovery):
             widget.setEnabled(recording)
@@ -583,6 +623,13 @@ class Console(QMainWindow):
                             and not any(item.get("kind") == "outcome" and item.get("value") == "failure"
                                         for item in self.annotations)):
                         self.outcome.setCurrentIndex(1)
+                    if (self.state == "stopped" and meta.get("mode") == "skill"
+                            and self.outcome.currentIndex() == 0
+                            and self.success_completion_issue() is None
+                            and any(item.get("kind") == "skill_complete"
+                                    and type(item.get("recorded_at_unix_ns")) is int
+                                    for item in self.annotations)):
+                        self.outcome.setCurrentIndex(1)
                     if self.annotations:
                         last = self.annotations[-1]
                         matched = last.get("matched_offset_sec")
@@ -608,8 +655,13 @@ class Console(QMainWindow):
                 elif key == "list":
                     self.show_episodes(result["episodes"])
                 else:
-                    self.message.setText(f"已保存至 {result['path']}" if result.get("state") == "saved"
-                                         else "操作完成")
+                    if result.get("state") == "saved":
+                        self.message.setText(f"已保存至 {result['path']}")
+                    elif (result.get("annotation", {}).get("kind") == "skill_complete"
+                          and self.active_mode == "skill" and self.state == "recording"):
+                        self.message.setText("已记录原子技能完成时刻；请停止录制，等待完成帧核验")
+                    else:
+                        self.message.setText("操作完成")
                     if result.get("state") == "saved":
                         self.outcome.setCurrentIndex(0)
                     self.refresh(); self.refresh_list()
