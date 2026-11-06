@@ -16,7 +16,7 @@ from piper_pi05_openpi import check_dataset, digest, episode_source_digest, main
 
 
 class PiperAdapterTest(unittest.TestCase):
-    def test_v3_training_launch_stays_blocked(self):
+    def test_v3_training_requires_reader_environment(self):
         argv = ["piper_pi05_openpi.py", "--openpi-root", "openpi", "--base-checkpoint", "checkpoint",
                 "--dataset", "dataset", "--evidence", "evidence.json", "--audit-report", "audit.json",
                 "--work-dir", "work", "--train"]
@@ -26,7 +26,13 @@ class PiperAdapterTest(unittest.TestCase):
                 mock.patch("piper_pi05_openpi.check_openpi", return_value="fixed-commit"), \
                 redirect_stderr(output):
             self.assertEqual(main(), 1)
-        self.assertIn("训练启动已拒绝", output.getvalue())
+        self.assertIn("--lerobot-v3-site-packages", output.getvalue())
+
+    def test_v3_reader_preflight_rejects_missing_dataset(self):
+        from piper_pi05_openpi import verify_openpi_v3_reader
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(FileNotFoundError):
+                verify_openpi_v3_reader(Path(temporary), Path(temporary), "LEFT")
 
     def test_left_right_and_absolute_action(self):
         image = np.zeros((3, 480, 640), dtype=np.float32)

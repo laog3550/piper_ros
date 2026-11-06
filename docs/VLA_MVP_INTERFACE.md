@@ -129,14 +129,16 @@ python3 -m unittest discover -s tools/vla_contract -p 'test_shadow_run.py' -v
 ```bash
 python3 tools/vla_contract/piper_pi05_adapter.py --self-test
 python3 -m unittest discover -s tools/vla_contract -p 'test_piper_pi05_adapter.py' -v
-/path/to/openpi/.venv/bin/python tools/vla_contract/piper_pi05_openpi.py \
+PYTHONPATH=/path/to/lerobot-v3/lib/python3.11/site-packages:tools/vla_contract \
+  /path/to/openpi/.venv/bin/python tools/vla_contract/piper_pi05_openpi.py \
   --openpi-root /path/to/openpi --base-checkpoint /path/to/pi05_droid \
   --dataset /path/to/validated_lerobot --evidence /path/to/independent_evidence.json \
   --audit-report /path/to/independent_audit.json \
+  --lerobot-v3-site-packages /path/to/lerobot-v3/lib/python3.11/site-packages \
   --work-dir /path/to/new_training_run
 ```
 
-数据核验通过后，在同一命令末尾加 `--train` 才会计算归一化统计并启动微调。`--work-dir` 必须为空；命令仅操作本地文件和 GPU，不连接 ROS/CAN。当前 `/home/mips/piper_tjp/data` 的只读核验结果见 `/tmp/piper-real-data-audit.json`：7 个来源中符合本仓库 Episode/LeRobot 契约的真实 Episode 为 0、有效训练帧为 0、`pick`/`place` 覆盖为空。静态场景缺示教动作及反馈；直接采集的 139 帧候选尚缺实体归属、夹爪映射、标定、动作来源与时间域等核验。因此当前训练门禁拒绝，未生成 Piper 微调 checkpoint，也没有真实技能成功率证据。
+固定 OpenPI commit `215abfb217dbac7d5f1273282331b9b1866c0479` 原本导入 LeRobot 旧模块路径。上述命令在进程启动时加载独立的 `lerobot==0.4.4` 依赖，并为旧导入路径建立同进程别名；预检实际通过固定 OpenPI 的 `create_data_loader()` 读取一批 LeRobot v3 训练数据及 Piper 图像、状态、动作变换。此预检只证明读取链路和形状可用，不证明真实数据合格、归一化、完整训练或模型效果。由于进程内模块别名不会进入子进程，读取器的 `num_workers` 固定为 0；应先用本机 Python 3.11 环境验证所列依赖版本。数据核验和读取预检通过后，在同一命令末尾加 `--train` 才会计算归一化统计并启动微调。`--work-dir` 必须为空；命令仅操作本地文件和 GPU，不连接 ROS/CAN。当前真实数据仍未通过逐帧审计与训练门禁，未生成 Piper 微调 checkpoint，也没有真实技能成功率证据。
 
 真机前还需确认七维夹爪与关节反馈映射、相机手眼与外参及同时刻 TF、三机深度单位和时间同步、Piper 数据归一化及已适配 checkpoint、动作空间与周期、物理限位及扫掠碰撞模型。当前影子入口不提供这些参数，也不接入任何执行驱动。
 

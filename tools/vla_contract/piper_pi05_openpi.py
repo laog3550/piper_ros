@@ -4,11 +4,14 @@
 import argparse
 import dataclasses
 import hashlib
+from importlib.metadata import PackageNotFoundError, version
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+import types
 from contextlib import redirect_stderr, redirect_stdout
 
 from piper_pi05_adapter import ACTION_HORIZON, PiperInputs, PiperOutputs
@@ -18,8 +21,6 @@ OPENPI_COMMIT = "215abfb217dbac7d5f1273282331b9b1866c0479"
 CONFIG_NAME = "pi05_piper_absolute_7"
 ASSET_ID = "local/piper_train"
 SINGLE_ARM_SKILLS = {"pick_and_place_banana_in_box": "banana_in_box"}
-TRAIN_LAUNCH_BLOCKER = "固定 openpi commit 的 LeRobot v2.1 读取器尚未完成 v3.0 兼容验收"
-OPENPI_V3_COMPATIBLE = False
 
 
 def digest(path):
@@ -59,6 +60,68 @@ def check_openpi(root, base_checkpoint):
         raise ValueError("缺少完整的官方 pi05_droid checkpoint")
     sys.path.insert(0, str(root / "src"))
     return revision
+
+
+def install_lerobot_v3_compat(site_packages):
+    """Bind the fixed OpenPI reader's old import path to an isolated LeRobot v3 install."""
+    site_packages = site_packages.resolve()
+    if not site_packages.is_dir():
+        raise ValueError("LeRobot v3 site-packages 目录不存在")
+    if str(site_packages) not in sys.path:
+        raise ValueError("须在启动 Python 前把 LeRobot v3 site-packages 加入 PYTHONPATH；运行中切换会混用依赖")
+    try:
+        installed_version = version("lerobot")
+    except PackageNotFoundError as error:
+        raise ValueError("训练读取环境未安装 lerobot==0.4.4") from error
+    if installed_version != "0.4.4":
+        raise ValueError("训练读取环境必须提供 lerobot==0.4.4")
+    import lerobot
+    import lerobot.datasets.lerobot_dataset as dataset_v3
+    if not Path(dataset_v3.__file__).resolve().is_relative_to(site_packages):
+        raise ValueError("LeRobot v3 模块未从指定环境加载")
+    common = types.ModuleType("lerobot.common")
+    common.__path__ = []
+    datasets = types.ModuleType("lerobot.common.datasets")
+    datasets.__path__ = []
+    common.datasets = datasets
+    datasets.lerobot_dataset = dataset_v3
+    lerobot.common = common
+    sys.modules["lerobot.common"] = common
+    sys.modules["lerobot.common.datasets"] = datasets
+    sys.modules["lerobot.common.datasets.lerobot_dataset"] = dataset_v3
+
+
+def verify_openpi_v3_reader(dataset, base_checkpoint, arm_mode):
+    """Read one real v3 batch through the fixed OpenPI training transforms."""
+    info_path = dataset / "train" / "meta" / "info.json"
+    if json.loads(info_path.read_text(encoding="utf-8")).get("codebase_version") != "v3.0":
+        raise ValueError("训练集不是 LeRobot v3.0")
+    from openpi.training import data_loader
+    import lerobot.datasets.lerobot_dataset as dataset_v3
+    with tempfile.TemporaryDirectory(prefix="piper-openpi-v3-reader-") as temporary:
+        home = Path(temporary) / "lerobot"
+        link = home / "local" / "piper_train"
+        link.parent.mkdir(parents=True)
+        link.symlink_to((dataset / "train").resolve(), target_is_directory=True)
+        previous = os.environ.get("HF_LEROBOT_HOME")
+        previous_home = dataset_v3.HF_LEROBOT_HOME
+        os.environ["HF_LEROBOT_HOME"] = str(home)
+        dataset_v3.HF_LEROBOT_HOME = home
+        try:
+            config = build_config("local/piper_train", base_checkpoint, Path(temporary), 1, 1, arm_mode)
+            config = dataclasses.replace(config, num_workers=0)
+            loader = data_loader.create_data_loader(
+                config, num_batches=1, skip_norm_stats=True, framework="pytorch")
+            observation, actions = next(iter(loader))
+        finally:
+            if previous is None:
+                os.environ.pop("HF_LEROBOT_HOME", None)
+            else:
+                os.environ["HF_LEROBOT_HOME"] = previous
+            dataset_v3.HF_LEROBOT_HOME = previous_home
+    if tuple(observation.state.shape) != (1, 32) or tuple(actions.shape) != (1, ACTION_HORIZON, 32):
+        raise ValueError("固定 OpenPI 训练读取器输出的 Piper 状态或动作形状错误")
+    return {"state_shape": list(observation.state.shape), "action_shape": list(actions.shape)}
 
 
 def verify_base_checkpoint(base_checkpoint):
@@ -206,7 +269,7 @@ def build_config(repo_id, base_checkpoint, work_dir, steps, batch_size, arm_mode
         data=data, weight_loader=weight_loaders.CheckpointWeightLoader(str(base_checkpoint / "params")),
         assets_base_dir=str(work_dir / "assets"), checkpoint_base_dir=str(work_dir / "checkpoints"),
         num_train_steps=steps, batch_size=batch_size, save_interval=min(1000, steps),
-        log_interval=min(50, steps), wandb_enabled=False,
+        log_interval=min(50, steps), wandb_enabled=False, num_workers=0,
         policy_metadata={"robot": "Piper", "action_space": "absolute_joint_position_7",
                          "state": "joint1..joint6 rad; gripper m", "action": "absolute joint1..joint6 rad; gripper m"},
     )
@@ -240,6 +303,8 @@ def main():
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--audit-report", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
+    parser.add_argument("--lerobot-v3-site-packages", type=Path,
+                        help="隔离安装 lerobot==0.4.4 的 site-packages；固定 OpenPI 源码保持不变")
     parser.add_argument("--steps", type=int, default=20000)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--train", action="store_true", help="门禁通过后计算归一化并微调")
@@ -249,13 +314,15 @@ def main():
     try:
         evidence = check_dataset(args.dataset, args.evidence, args.audit_report)
         revision = check_openpi(args.openpi_root, args.base_checkpoint)
+        if args.lerobot_v3_site_packages is None:
+            raise ValueError("训练读取预检缺少 --lerobot-v3-site-packages")
+        install_lerobot_v3_compat(args.lerobot_v3_site_packages)
+        reader = verify_openpi_v3_reader(args.dataset, args.base_checkpoint, evidence["arm_mode"])
         if not args.train:
-            print(json.dumps({"status": "data_gate_passed_launch_blocked", "openpi_commit": revision,
-                              "launch_blockers": [TRAIN_LAUNCH_BLOCKER],
+            print(json.dumps({"status": "data_gate_and_v3_reader_passed", "openpi_commit": revision,
+                              "v3_reader": reader,
                               **evidence}, ensure_ascii=False, indent=2))
             return 0
-        if args.train and not OPENPI_V3_COMPATIBLE:
-            raise ValueError("训练启动已拒绝：" + TRAIN_LAUNCH_BLOCKER)
         verify_base_checkpoint(args.base_checkpoint)
         if args.work_dir.exists() and any(args.work_dir.iterdir()):
             raise ValueError("训练目录必须为空，防止混入旧 checkpoint")
@@ -265,6 +332,8 @@ def main():
         repo.parent.mkdir(parents=True)
         repo.symlink_to((args.dataset / "train").resolve(), target_is_directory=True)
         os.environ["HF_LEROBOT_HOME"] = str(home)
+        import lerobot.datasets.lerobot_dataset as dataset_v3
+        dataset_v3.HF_LEROBOT_HOME = home
         cfg = build_config("local/piper_train", args.base_checkpoint, args.work_dir,
                            args.steps, args.batch_size, evidence["arm_mode"])
         from importlib.util import module_from_spec, spec_from_file_location
