@@ -28,9 +28,12 @@ def source_row(message, topic):
             and len(message.data) == message.step * message.height)}
     arm, kind = topic.split("/")[2:]
     sources = [value.sec * 1_000_000_000 + value.nanosec for value in message.source_stamps]
+    names = list(message.joint_names)
+    by_name = dict(zip(names, message.position))
     return {"header_ns": stamp, "source_stamps_ns": sources,
-            "vector_format_ok": (list(message.joint_names) == JOINTS
-                                 and len(message.position) == 7
+            "vector_format_ok": (len(names) == len(set(names)) == len(JOINTS)
+                                 and set(names) == set(JOINTS)
+                                 and len(message.position) == len(names)
                                  and all(math.isfinite(value) for value in message.position)),
             "source_topic_ok": message.source_topic == f"/piper_direct/{arm}/{kind}",
             "frame_id_ok": message.header.frame_id == f"can_{arm}",
@@ -39,7 +42,7 @@ def source_row(message, topic):
             "time_inconsistent": bool(message.time_inconsistent),
             "valid": bool(message.valid),
             "gripper_mapping_verified": bool(message.gripper_mapping_verified),
-            "gripper_raw_m": float(message.position[6]) if len(message.position) == 7 else None}
+            "gripper_raw_m": float(by_name["gripper"]) if "gripper" in by_name else None}
 
 
 def load_streams(episode, topics):
@@ -82,10 +85,12 @@ def audit(episode, arm_mode, fps, max_age_ms, max_source_skew_ms, max_can_skew_m
     stop = metadata.get("stop_requested_at_unix_ns") or metadata.get("stopped_at_unix_ns")
     if type(start) is not int or type(stop) is not int or stop <= start:
         raise ValueError("Episode 缺少有效的录制起止时间")
+    if any(not indexes[topic] for topic in topics):
+        raise ValueError("所需 RGB、主目标或从反馈话题缺帧，无法建立逐帧时基")
     period_ns = round(1_000_000_000 / fps)
-    first = max(start, *(indexes[topic][0] for topic in actions if indexes[topic]))
-    last = min(stop, *(indexes[topic][-1] for topic in actions if indexes[topic]))
-    if any(not indexes[topic] for topic in topics) or last < first:
+    first = max(start, *(indexes[topic][0] for topic in actions))
+    last = min(stop, *(indexes[topic][-1] for topic in actions))
+    if last < first:
         raise ValueError("所需 RGB、主目标或从反馈话题缺帧，无法建立逐帧时基")
     frames = []
     reason_counts = Counter()
@@ -113,9 +118,10 @@ def audit(episode, arm_mode, fps, max_age_ms, max_source_skew_ms, max_can_skew_m
                     reasons.append(f"{topic}:{key}无效")
             if not row["vector_format_ok"]:
                 reasons.append(f"{topic}:向量格式无效")
-            if (len(row["source_stamps_ns"]) != 4 or min(row["source_stamps_ns"]) <= 0
-                    or max(row["source_stamps_ns"]) != row["header_ns"]
-                    or max(row["source_stamps_ns"]) - min(row["source_stamps_ns"]) > max_can_skew_ns):
+            sources = row["source_stamps_ns"]
+            if (len(sources) != 4 or min(sources) <= 0
+                    or max(sources) != row["header_ns"]
+                    or max(sources) - min(sources) > max_can_skew_ns):
                 reasons.append(f"{topic}:CAN来源时间无效")
             if any(row["missing"]):
                 reasons.append(f"{topic}:missing")
