@@ -23,12 +23,12 @@
     "/camera_top/D455/aligned_depth_to_color/image_raw"
   ],
   "expected_fps": {
-    "/camera_wrist_left/color/image_raw": 30,
-    "/camera_wrist_left/depth/image_raw": 30,
-    "/camera_wrist_right/color/image_raw": 30,
-    "/camera_wrist_right/depth/image_raw": 30,
-    "/camera_top/D455/color/image_raw": 30,
-    "/camera_top/D455/aligned_depth_to_color/image_raw": 30
+    "/camera_wrist_left/color/image_raw": 15,
+    "/camera_wrist_left/depth/image_raw": 15,
+    "/camera_wrist_right/color/image_raw": 15,
+    "/camera_wrist_right/depth/image_raw": 15,
+    "/camera_top/D455/color/image_raw": 15,
+    "/camera_top/D455/aligned_depth_to_color/image_raw": 15
   },
   "min_free_gb": 20,
   "startup_timeout_sec": 15

@@ -215,6 +215,24 @@ class AtomicSkillGateTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "任务文本"):
             self.check(files, "flip_box_lid_bimanual")
 
+    def test_hold_frame_requires_operator_evidence_and_anchor(self):
+        files = self.fixture()
+        path = files[0] / "source_timestamps.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        row = rows[0]
+        action = "/demonstration/action_left"
+        reference = row["header_timestamp_ns"][action]
+        row["target_timestamp_ns"] = reference
+        row["header_timestamp_ns"][action] = reference - 500_000_000
+        row["hold"] = {"hold_id": "hold-1", "source": "operator_annotation",
+                       "arms": ["left"], "anchor_header_ns": reference - 500_000_000}
+        path.write_text("".join(json.dumps(item) + "\n" for item in rows))
+        self.check(files, "pick_and_place_banana_in_box")
+        row["hold"].pop("anchor_header_ns")
+        path.write_text("".join(json.dumps(item) + "\n" for item in rows))
+        with self.assertRaisesRegex(ValueError, "保持段证据无效"):
+            self.check(files, "pick_and_place_banana_in_box")
+
     def test_launch_remains_closed_after_data_gate(self):
         argv = ["atomic_skill_sft.py", "--dataset", "dataset", "--annotations", "labels.json",
                 "--audit-report", "audit.json", "--skill", "pick_and_place_banana_in_box", "--max-sync-ns", "10000000",

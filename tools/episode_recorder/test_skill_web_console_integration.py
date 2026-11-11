@@ -13,6 +13,7 @@ import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from unittest.mock import patch
 
 import rclpy
 from sensor_msgs.msg import Image
@@ -21,7 +22,7 @@ from piper_msgs.msg import PiperArmVector
 from rclpy.qos import qos_profile_sensor_data
 from skill_web_console import (ARM_TOPICS, Preview, recorder_request, start_request,
                                teleoperation_ready, provisional_collection_versions,
-                               collection_contract_diagnostics)
+                               collection_contract_diagnostics, collection_version_records)
 
 HERE = Path(__file__).parent
 TOPICS = [f"/camera_{name}/color/image_raw" for name in ("wrist_left", "wrist_right", "top")]
@@ -135,29 +136,36 @@ def main():
                                   "arms": {"left": ARM_TOPICS["left"]}}}
     assert teleoperation_ready(declared, "LEFT")
     assert not teleoperation_ready(declared, "RIGHT")
+    raw_versions = provisional_collection_versions()
+    assert set(raw_versions) == {"calibration_version", "data_convention_version"}
     verified_request = start_request({
         "mode": "skill", "skill": "pick_and_place_banana_in_box", "task": "合成抓取", "language_instruction": "抓取香蕉",
         "perturbation_id": "scene_001",
-        "arm_mode": "LEFT", "calibration_version": "cal-v1", "normalization_version": "norm-v1"}, declared, FakePreview())
+        "arm_mode": "LEFT", "calibration_version": "cal-v1",
+        "data_convention_version": raw_versions["data_convention_version"]}, declared, FakePreview())
     assert {key: verified_request["metadata"][key] for key in
             ("arm_mode", "time_domain", "action_space", "action_provenance",
-             "calibration_version", "normalization_version")} == {
+             "calibration_version", "data_convention_version")} == {
                  "arm_mode": "LEFT", "time_domain": "unix_ns",
                  "action_space": "absolute_joint_position_7",
                  "action_provenance": "human_demonstration",
-                 "calibration_version": "cal-v1", "normalization_version": "norm-v1"}
+                 "calibration_version": "cal-v1", "data_convention_version": raw_versions["data_convention_version"]}
     assert verified_request["metadata"]["collection_contract_checks"]["calibration"]["status"] == (
         "operator_supplied_pending_audit")
-    assert verified_request["metadata"]["collection_contract_checks"]["normalization"]["status"] == (
-        "operator_supplied_pending_audit")
-    raw_versions = provisional_collection_versions()
-    assert set(raw_versions) == {"calibration_version", "normalization_version"}
-    raw_request = start_request({
+    assert verified_request["metadata"]["collection_contract_checks"]["training_normalization"]["status"] == "not_computed"
+    raw_body = {
         "mode": "skill", "skill": "pick_and_place_banana_in_box", "task": "原始香蕉入盒",
         "language_instruction": "抓起香蕉并放入盒中", "perturbation_id": "scene_001",
-        "arm_mode": "LEFT", **raw_versions}, declared, FakePreview())
-    assert raw_request["metadata"]["collection_contract_status"] == "training_not_ready_provisional_collection_versions"
-    assert "action_provenance" not in raw_request["metadata"]
+        "arm_mode": "LEFT", **raw_versions}
+    raw_request = start_request(raw_body, declared, FakePreview())
+    assert raw_request["metadata"]["collection_contract_status"] == "metadata_ready_pending_data_audit"
+    assert {field: raw_request["metadata"][field] for field in
+            ("time_domain", "action_space", "action_provenance")} == {
+                "time_domain": "unix_ns", "action_space": "absolute_joint_position_7",
+                "action_provenance": "human_demonstration"}
+    assert "normalization_version" not in raw_request["metadata"]
+    assert raw_request["metadata"]["training_eligibility"] == {
+        "eligible": False, "status": "pending_independent_evidence_and_audit"}
     assert set(raw_request["metadata"]["collection_version_evidence"]) == set(raw_versions)
     checks = raw_request["metadata"]["collection_contract_checks"]
     assert checks["time_domain"]["status"] == "declared_pending_audit"
@@ -165,11 +173,60 @@ def main():
     assert checks["action_space"]["status"] == "declared_pending_audit"
     assert checks["action_provenance"]["status"] == "declared_pending_audit"
     assert checks["calibration"]["status"] == "provisional"
-    assert checks["normalization"]["status"] == "provisional"
-    assert len(raw_request["metadata"]["collection_contract_blockers"]) == 2
+    assert checks["data_convention"]["status"] == "declared_pending_audit"
+    assert checks["training_normalization"]["status"] == "not_computed"
+    assert checks["training_normalization"]["required_source_split"] == "train"
+    assert checks["training_normalization"]["requires_approved_source_audit"] is True
+    assert checks["training_normalization"]["requires_checkpoint_binding"] is True
+    assert checks["independent_audit"]["status"] == "pending"
+    assert len(raw_request["metadata"]["collection_contract_blockers"]) == 3
     unverified = collection_contract_diagnostics({}, "LEFT", **raw_versions)
     assert unverified["checks"]["teleoperation_mapping"]["status"] == "unverified"
-    assert len(unverified["blockers"]) == 3
+    assert unverified["declarations"] == {"time_domain": "unix_ns"}
+    assert len(unverified["blockers"]) == 4
+
+    # The time declaration survives an unverified mapping; action declarations survive missing time evidence.
+    unverified_request = start_request(raw_body, {}, FakePreview())["metadata"]
+    assert unverified_request["time_domain"] == "unix_ns"
+    assert all(field not in unverified_request for field in ("action_space", "action_provenance"))
+    unknown_convention = start_request({**raw_body, "data_convention_version": "unknown-raw-v1"},
+                                      declared, FakePreview())["metadata"]
+    assert "time_domain" not in unknown_convention
+    assert unknown_convention["action_provenance"] == "human_demonstration"
+    assert unknown_convention["action_space"] == "absolute_joint_position_7"
+    assert not unknown_convention["training_eligibility"]["eligible"]
+    records = collection_version_records()
+    records["data_convention_version"].pop("time_domain")
+    with patch("skill_web_console.collection_version_records", return_value=records):
+        missing_time = start_request(raw_body, declared, FakePreview())["metadata"]
+    assert "time_domain" not in missing_time
+    assert missing_time["action_provenance"] == "human_demonstration"
+    assert missing_time["collection_contract_status"] == "training_not_ready_unverified_time_domain"
+    for invalid_record in ("null", "[]", "{invalid"):
+        with patch("skill_web_console.Path.read_text", return_value=invalid_record):
+            assert not collection_version_records()
+    with patch("skill_web_console.Path.read_text", side_effect=OSError("测试来源文件缺失")):
+        assert not collection_version_records()
+
+    # A known old raw identifier may migrate, but never becomes a training-statistics version.
+    legacy_body = {key: value for key, value in raw_body.items() if key != "data_convention_version"}
+    legacy = start_request({**legacy_body, "normalization_version": raw_versions["data_convention_version"]},
+                           declared, FakePreview())["metadata"]
+    assert legacy["data_convention_version"] == raw_versions["data_convention_version"]
+    assert "normalization_version" not in legacy
+    for invalid_body in ({**raw_body, "normalization_version": "operator-claims-training-stats-v1"},
+                         {**raw_body, "data_convention_version": "other",
+                          "normalization_version": raw_versions["data_convention_version"]},
+                         {**raw_body, "data_convention_version": "UNVERIFIED_PLACEHOLDER"}):
+        try:
+            start_request(invalid_body, declared, FakePreview())
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("采集接口接受了混用的训练统计或未核验数据约定版本")
+    injected = start_request({**raw_body, "training_eligibility": {"eligible": True}},
+                             declared, FakePreview())["metadata"]
+    assert injected["training_eligibility"]["eligible"] is False
     with tempfile.TemporaryDirectory(prefix="piper-web-test-") as temp:
         root = Path(temp)
         config = root / "config.json"
@@ -267,24 +324,24 @@ def main():
                                           "language_instruction": "双臂合上翻盖",
                                           "skill": "latch_box_lid_bimanual",
                                           "perturbation_id": "scene_003", "arm_mode": "LEFT",
-                                          "calibration_version": "cal-v1", "normalization_version": "norm-v1"})
+                                          "calibration_version": "cal-v1", "data_convention_version": raw_versions["data_convention_version"]})
             rejected(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
                                           "language_instruction": "双臂翻过盒盖",
                                           "skill": "flip_box_lid_bimanual",
                                           "perturbation_id": "scene_003", "arm_mode": "LEFT",
-                                          "calibration_version": "cal-v1", "normalization_version": "norm-v1"})
+                                          "calibration_version": "cal-v1", "data_convention_version": raw_versions["data_convention_version"]})
             rejected(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
                                           "language_instruction": "双臂合上翻盖",
                                           "skill": "latch_box_lid_bimanual",
                                           "perturbation_id": "scene_003", "arm_mode": "BIMANUAL",
                                           "calibration_version": "UNVERIFIED_PLACEHOLDER",
-                                          "normalization_version": "norm-v1"})
+                                          "data_convention_version": raw_versions["data_convention_version"]})
             skill = http(port, "/api/start", {"mode": "skill", "task": "翻盖片段",
                                                "language_instruction": "双臂合上翻盖",
                                                "skill": "latch_box_lid_bimanual",
                                                "perturbation_id": "scene_003", "arm_mode": "BIMANUAL",
                                                "calibration_version": "cal-v1",
-                                               "normalization_version": "norm-v1"})["result"]
+                                               "data_convention_version": raw_versions["data_convention_version"]})["result"]
             initial = skill["metadata"]["task_metadata"]["initial_conditions"]
             assert initial["source"] == "ros_slave_feedback"
             assert initial["perturbation_id"] == "scene_003"
@@ -292,10 +349,13 @@ def main():
             skill_contract = skill["metadata"]["task_metadata"]
             assert skill_contract["arm_mode"] == "BIMANUAL"
             assert skill_contract["calibration_version"] == "cal-v1"
-            assert skill_contract["normalization_version"] == "norm-v1"
+            assert skill_contract["data_convention_version"] == raw_versions["data_convention_version"]
+            assert "normalization_version" not in skill_contract
+            assert skill_contract["training_eligibility"]["eligible"] is False
+            assert skill_contract["time_domain"] == "unix_ns"
             assert skill_contract["collection_contract_status"] == "training_not_ready_unverified_teleoperation_mapping"
             assert all(field not in skill_contract for field in
-                       ("time_domain", "action_space", "action_provenance"))
+                       ("action_space", "action_provenance"))
             assert skill["metadata"]["active_skill"] == "latch_box_lid_bimanual"
             rejected(port, "/api/annotate", {"kind": "skill_complete",
                                              "value": "latch_box_lid_bimanual", "camera_index": 0})
@@ -321,7 +381,7 @@ def main():
             assert http(port, "/api/start", {"task": "丢弃测试", "language_instruction": "测试"})["result"]["state"] == "recording"
             assert http(port, "/api/discard", {})["result"]["state"] == "discarded"
             assert http(port, "/api/status")["result"]["state"] == "idle"
-            print("合成 ROS 流、旧任务兼容、技能采集契约、未验证映射训练未就绪、真实 Header 标注、重启与丢弃：通过")
+            print("合成 ROS 流、旧任务兼容、原始事实独立声明、数据约定与训练统计分离、独立训练待审、真实 Header 标注、重启与丢弃：通过")
         finally:
             stop.set(); feeder.join(timeout=2)
             for process in (web, recorder):

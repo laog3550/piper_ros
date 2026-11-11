@@ -99,6 +99,20 @@ def test_v2_audit_requires_resolved_success_and_complete_camera_frame(tmp_path):
     (automatic / "episode.json").write_text(json.dumps(automatic_meta), encoding="utf-8")
     assert checked_audit(automatic, max_age_ms=30)["eligible"]
 
+    anchored = fixture(tmp_path, "episode_000010")
+    anchored_meta = annotate(anchored)
+    anchored_meta["saved_at_unix_ns"] = anchored_meta["stopped_at_unix_ns"] + 2
+    anchored_meta["annotations"][0].pop("recorded_at_unix_ns")
+    anchored_meta["annotations"][0].update(
+        annotation_origin="duration_limit_last_valid_master_frame",
+        reviewed_at_unix_ns=anchored_meta["stopped_at_unix_ns"] + 1)
+    (anchored / "episode.json").write_text(json.dumps(anchored_meta), encoding="utf-8")
+    assert checked_audit(anchored, max_age_ms=30)["eligible"]
+
+    anchored_meta["annotations"][0]["annotation_origin"] = "duration_limit_before_terminal_stale"
+    (anchored / "episode.json").write_text(json.dumps(anchored_meta), encoding="utf-8")
+    assert checked_audit(anchored, max_age_ms=30)["eligible"]
+
     unresolved = fixture(tmp_path, "episode_000002")
     annotate(unresolved, resolved=False)
     row = checked_audit(unresolved, max_age_ms=30)

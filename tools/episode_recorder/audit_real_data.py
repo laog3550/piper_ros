@@ -9,6 +9,8 @@ from pathlib import Path
 import yaml
 
 from to_lerobot import (CAN_ACTIONS, CAN_STATES, ACTIONS, STATES, group_split, read_episode,
+                        DOWNSTREAM_TRAINING_CHECKS, load_gripper_calibration, load_source_acceptance,
+                        normalization_status, source_acceptance_for_episode, training_contract_reasons,
                         select_sft_frames, sft_label)
 
 CAMERAS = {"top_rgb": "/camera_top/D455/color/image_raw",
@@ -66,24 +68,26 @@ def audit_legacy(metadata_path):
 
 
 def audit_native(episode_path, fps=10, max_age_ms=100, max_can_skew_ms=30,
-                 max_camera_gap_ms=100, max_camera_skew_ms=30, max_source_skew_ms=None):
+                 max_camera_gap_ms=100, max_camera_skew_ms=30, max_source_skew_ms=None,
+                 gripper_calibration=None, extract_valid_segments=False, source_acceptance=None):
     meta = json.loads((episode_path / "episode.json").read_text(encoding="utf-8"))
     info, counts = bag_info(episode_path / "bag" / "metadata.yaml")
     fields = meta.get("task_metadata") or {}
+    if not isinstance(fields, dict):
+        fields = {}
     reasons = []
     if meta.get("state") != "saved":
         reasons.append("Episode 尚未保存完成")
-    if meta.get("clock_adjustments"):
-        reasons.append("录制期间检测到系统时钟跳变")
-    for topic, stats in (meta.get("bag_validation") or {}).get("frame_stats_by_header_stamp", {}).items():
-        if stats.get("non_increasing_stamps", 0):
-            reasons.append(f"{topic} 的 Header 时间戳不单调")
-    for key in ("arm_mode", "time_domain", "action_space", "action_provenance",
-                "calibration_version", "normalization_version"):
-        if not fields.get(key):
-            reasons.append(f"缺少 {key}")
-    arms = ("left", "right") if fields.get("arm_mode") == "BIMANUAL" else (
-        fields.get("arm_mode", "").lower(),)
+    acceptance = None
+    try:
+        acceptance = source_acceptance_for_episode(episode_path, meta, source_acceptance)
+    except (ValueError, OSError) as error:
+        reasons.append(str(error))
+    accepted_checks = acceptance["record"]["checks"] if acceptance else ()
+    reasons.extend(training_contract_reasons(meta, fields.get("arm_mode"), accepted_checks))
+    mode = fields.get("arm_mode")
+    arms = ("left", "right") if mode == "BIMANUAL" else (
+        mode.lower() if isinstance(mode, str) else "",)
     for arm in arms:
         if arm not in STATES:
             continue
@@ -104,7 +108,7 @@ def audit_native(episode_path, fps=10, max_age_ms=100, max_can_skew_ms=30,
     reasons.extend(label_reasons)
     if label is not None and max_source_skew_ms is None:
         reasons.append("未指定 RGB、状态与示教目标 Header 的总体同步阈值 --max-source-skew-ms")
-    aligned_frames = annotated_frames = 0
+    aligned_frames = annotated_frames = candidate_frames = candidate_segments = 0
     quality = None
     input_format = None
     if meta.get("state") == "saved" and all(arm in STATES for arm in arms):
@@ -124,9 +128,18 @@ def audit_native(episode_path, fps=10, max_age_ms=100, max_can_skew_ms=30,
                     max_source_skew_ns=(int(max_source_skew_ms * 1e6)
                                         if max_source_skew_ms is not None else None),
                     extra_frame_topics=(label["completion_frame"]["source_topic"],) if (
-                        label and label["completion_frame"]["source_topic"] not in CAMERAS.values()) else ())
+                        label and label["completion_frame"]["source_topic"] not in CAMERAS.values()) else (),
+                    gripper_calibration=gripper_calibration if input_format == "can-vector" else None,
+                    extract_valid_segments=extract_valid_segments and input_format == "can-vector",
+                    require_training_contract=not (extract_valid_segments and input_format == "can-vector"),
+                    source_acceptance=source_acceptance)
                 aligned_frames = len(frames)
                 quality = validated["_quality"]
+                candidates = [item for item in quality["segments"] if item["meets_16_step_window"]]
+                candidate_segments = len(candidates)
+                candidate_frames = sum(item["frames"] for item in candidates)
+                if extract_valid_segments and input_format == "can-vector" and not candidates:
+                    reasons.append("没有满足 16 步窗口的连续有效片段")
                 if label is not None:
                     selected, coverage = select_sft_frames(validated, frames, label, list(arms), input_format)
                     annotated_frames = len(selected)
@@ -146,10 +159,20 @@ def audit_native(episode_path, fps=10, max_age_ms=100, max_can_skew_ms=30,
         "has_feedback": any(counts.get(t, 0) for t in (*STATES.values(), *CAN_STATES.values())),
         "annotation_coverage": annotated_frames / aligned_frames if aligned_frames else 0.0,
         "aligned_frame_count": aligned_frames, "eligible_frame_count": annotated_frames if not reasons else 0,
+        "candidate_segment_count": candidate_segments,
+        "candidate_frame_count": candidate_frames,
         "skill_id": label["skill_id"] if label else meta.get("skill"),
         "group_id": label["group_id"] if label else None,
         "task_text": label["task_text"] if label else meta.get("task"),
         "input_format": input_format, "quality": quality,
+        "eligibility_scope": "source_sft_export", "training_ready": False,
+        "data_convention_version": fields.get("data_convention_version"),
+        "normalization_version": fields.get("normalization_version"),
+        "training_normalization": normalization_status(fields),
+        "source_export_acceptance": acceptance,
+        "deferred_training_checks": {key: check for key, check in (
+            fields.get("collection_contract_checks") or {}).items() if key in DOWNSTREAM_TRAINING_CHECKS}
+            if isinstance(fields.get("collection_contract_checks", {}), dict) else {},
         "eligible": not reasons, "reasons": reasons,
     }
 
@@ -159,6 +182,12 @@ def main():
     parser.add_argument("data_root", type=Path)
     parser.add_argument("--episode-root", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--gripper-calibration", type=Path,
+                        help="can-vector 的左右主从及夹爪零点映射配置")
+    parser.add_argument("--source-acceptance", type=Path,
+                        help="绑定原 Episode 摘要与独立来源证据的验收 JSON；不修改原始来源")
+    parser.add_argument("--extract-valid-segments", action="store_true",
+                        help="只读提取原始 Header 连续片段及 16 步候选；候选不授予训练资格")
     parser.add_argument("--fps", type=int, default=10)
     parser.add_argument("--max-age-ms", type=float, default=100)
     parser.add_argument("--max-can-skew-ms", type=float, default=30)
@@ -175,13 +204,19 @@ def main():
     if args.max_source_skew_ms is not None and (not math.isfinite(args.max_source_skew_ms)
                                                 or args.max_source_skew_ms <= 0):
         parser.error("--max-source-skew-ms 必须为正数")
+    if args.extract_valid_segments and args.max_source_skew_ms is None:
+        parser.error("--extract-valid-segments 必须显式指定 --max-source-skew-ms")
+    gripper_calibration = (load_gripper_calibration(args.gripper_calibration)
+                           if args.gripper_calibration else None)
+    source_acceptance = load_source_acceptance(args.source_acceptance) if args.source_acceptance else None
     rows = [audit_legacy(path) for path in sorted(args.data_root.rglob("metadata.yaml"))
             if not (path.parent / "episode.json").exists()
             and not (path.parent.parent / "episode.json").exists()]
     if args.episode_root:
         rows += [audit_native(path.parent, args.fps, args.max_age_ms, args.max_can_skew_ms,
                               args.max_camera_gap_ms, args.max_camera_skew_ms,
-                              args.max_source_skew_ms)
+                              args.max_source_skew_ms, gripper_calibration, args.extract_valid_segments,
+                              source_acceptance)
                  for path in sorted(args.episode_root.rglob("episode.json"))
                  if (path.parent / "bag" / "metadata.yaml").exists()]
     eligible = [row for row in rows if row["eligible"]]
@@ -194,15 +229,18 @@ def main():
               for skill in sorted({row.get("skill_id") for row in eligible})}
     report = {
         "schema_version": "piper_real_data_audit_v2", "sources": rows,
+        "eligibility_scope": "source_sft_export", "training_ready": False,
         "source_count": len(rows), "eligible_episode_count": len(eligible),
         "eligible_frame_count": sum(row.get("eligible_frame_count", 0) for row in eligible),
+        "candidate_segment_count": sum(row.get("candidate_segment_count", 0) for row in rows),
+        "candidate_frame_count": sum(row.get("candidate_frame_count", 0) for row in rows),
         "split_ready": split_ready,
         "split_blocker": None if split_ready else "至少需要两个不同的 perturbation_id 场景组",
         "split_rule": "sha256(task_metadata.initial_conditions.perturbation_id) 按完整场景组划分",
         "train_episode_count": sum(row.get("suggested_split") == "train" for row in eligible),
         "test_episode_count": sum(row.get("suggested_split") == "test" for row in eligible),
         "skill_coverage": skills,
-        "note": "记录有效性不等于训练契约有效性；候选帧不得作为已验收训练帧。",
+        "note": "eligible 仅表示源数据通过 SFT 导出筛选；候选帧不得作为已验收训练帧。训练归一化统计与 checkpoint 绑定另行验收。",
     }
     rendered = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
     if args.output:

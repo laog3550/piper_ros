@@ -2,6 +2,7 @@
 # 用途：只读监听 can_left/can_right，逐帧发布主臂目标与从臂实测反馈。
 # 运行：ros2 run piper piper_direct_can
 import threading
+import socket
 
 import can
 import rclpy
@@ -11,6 +12,7 @@ from rclpy.node import Node
 from piper_msgs.msg import PiperDirectCanFrame
 
 from piper.piper_direct_can_decode import C_PiperParserV2, FRAME_IDS, decode_frame
+from piper.collection_lock import CollectionLocks
 
 
 class PiperDirectCanNode(Node):
@@ -20,7 +22,16 @@ class PiperDirectCanNode(Node):
         if side not in ('all', 'left', 'right'):
             raise ValueError('side must be all, left, or right')
         channels = ('can_left', 'can_right') if side == 'all' else ('can_' + side,)
+        self._collection_locks = CollectionLocks(
+            ['/piper_direct/' + channel[4:] for channel in channels])
         self._stop = threading.Event()
+        receive_buffer_bytes = self.declare_parameter(
+            'receive_buffer_bytes', 16_777_216).value
+        if (isinstance(receive_buffer_bytes, bool)
+                or not isinstance(receive_buffer_bytes, int)
+                or receive_buffer_bytes < 0):
+            raise ValueError('receive_buffer_bytes must be a non-negative integer')
+        self._receive_buffer_bytes = receive_buffer_bytes
         self._frame_publishers = {}
         for channel in channels:
             channel_side = channel[4:]
@@ -40,6 +51,7 @@ class PiperDirectCanNode(Node):
                    for can_id in sorted(FRAME_IDS)]
         try:
             with can.Bus(channel=channel, interface='socketcan', can_filters=filters) as bus:
+                self._configure_receive_buffer(bus, channel)
                 while rclpy.ok() and not self._stop.is_set():
                     frame = bus.recv(timeout=0.2)
                     if frame is not None:
@@ -52,6 +64,37 @@ class PiperDirectCanNode(Node):
             self._stop.set()
             if rclpy.ok():
                 rclpy.shutdown()
+
+    def _configure_receive_buffer(self, bus, channel):
+        """Enlarge the SocketCAN receive queue so a short stall is not frame loss.
+
+        The kernel caps the value at net.core.rmem_max; a warning here means the
+        host must raise that limit before collecting training data.
+        """
+        requested = self._receive_buffer_bytes
+        if not requested:
+            return
+        sock = getattr(bus, 'socket', None)
+        if sock is None:
+            self.get_logger().warning(
+                '{}: cannot access the SocketCAN socket; receive buffer unchanged'.format(channel))
+            return
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, requested)
+            effective = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        except OSError as exc:
+            self.get_logger().warning(
+                '{}: cannot set SocketCAN receive buffer: {}'.format(channel, exc))
+            return
+        if not isinstance(effective, int):
+            return
+        if effective < requested:
+            self.get_logger().warning(
+                '{}: SocketCAN receive buffer is {} bytes (requested {}); '
+                'raise net.core.rmem_max before collection'.format(channel, effective, requested))
+        else:
+            self.get_logger().info(
+                '{}: SocketCAN receive buffer {} bytes'.format(channel, effective))
 
     def _publish_frame(self, channel, frame, parser):
         value = decode_frame(frame, parser)
@@ -72,18 +115,22 @@ class PiperDirectCanNode(Node):
         self._stop.set()
         for thread in self._threads:
             thread.join(timeout=1.0)
-        return super().destroy_node()
+        result = super().destroy_node()
+        self._collection_locks.close()
+        return result
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = PiperDirectCanNode()
+    node = None
     try:
+        node = PiperDirectCanNode()
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
+        if node is not None:
+            node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 

@@ -64,9 +64,9 @@ th,td { padding:9px; border-bottom:1px solid #334354; text-align:left; }
 <p class="muted">到时自动停止，之后仍需选择结果并保存；保存时在所填目录下自动创建 Episode 子目录。</p>
 <div id="contract_fields" hidden>
 <h2>技能采集契约</h2>
-<div class="row"><div><label for="arm_mode">执行臂</label><select id="arm_mode"><option value="">请选择</option><option value="LEFT">LEFT</option><option value="RIGHT">RIGHT</option><option value="BIMANUAL">BIMANUAL</option></select></div><div><label for="calibration_version">相机内参快照版本</label><input id="calibration_version" maxlength="120" placeholder="自动读取当前采集快照"></div><div><label for="normalization_version">数据约定版本</label><input id="normalization_version" maxlength="120" placeholder="自动读取原始数据约定"></div></div>
+<div class="row"><div><label for="arm_mode">执行臂</label><select id="arm_mode"><option value="">请选择</option><option value="LEFT">LEFT</option><option value="RIGHT">RIGHT</option><option value="BIMANUAL">BIMANUAL</option></select></div><div><label for="calibration_version">相机内参快照版本</label><input id="calibration_version" maxlength="120" placeholder="自动读取当前采集快照"></div><div><label for="data_convention_version">数据约定版本</label><input id="data_convention_version" maxlength="120" placeholder="自动读取原始数据约定"></div></div>
 <p id="contract_status" class="notice">训练未就绪：正在检查主从遥操作映射。</p>
-<p class="muted">预填版本只证明 CameraInfo 内参和原始数据顺序、单位有记录；手眼外参、训练归一化统计和映射仍需验收。使用这些版本录制的 Episode 不会被标为训练就绪。</p>
+<p class="muted">预填版本只记录 CameraInfo 内参和原始数据顺序、单位；训练所需相机身份、安装状态、内参及示教映射仍须独立验收。训练统计在审计后计算，部署几何外参另行验收；原始采集始终保持训练待审。</p>
 </div>
 <div id="initial_fields">
 <p class="muted">机械臂初始关节角度会自动读取并写入 Episode。单技能采集需填写扰动编号，以便按场景划分训练与测试。</p>
@@ -145,9 +145,8 @@ function updateContract() {
   if(bimanual) $('arm_mode').value='BIMANUAL';
   else if($('arm_mode').value==='BIMANUAL') $('arm_mode').value='';
   updateTaskText();
-  const pending=Object.entries(provisionalVersions).some(([key,value])=>$(key)?.value===value);
-  const ready=teleoperationReady[$('arm_mode').value]===true && !pending;
-  $('contract_status').textContent=ready ? '采集元数据可声明主从示教；训练仍需逐帧数据审计。' : '仅可录原始技能：内外参、归一化或映射尚未验收。';
+  const ready=teleoperationReady[$('arm_mode').value]===true;
+  $('contract_status').textContent=ready ? '原始采集可声明主从示教来源；正式训练须独立证据和逐 Episode 审计核准，归一化统计仅用审计通过的 train 划分并绑定 checkpoint。' : '原始采集按已核对证据分别记录；主从示教映射未核验，正式训练待独立审计。';
 }
 async function loadContract() {
   try { const data=await readJson(await fetch('/api/contract',{cache:'no-store'})); teleoperationReady=data.teleoperation_ready; provisionalVersions=data.provisional_collection_versions || {}; for(const [key,value] of Object.entries(provisionalVersions)) if($(key) && !$(key).value) $(key).value=value; }
@@ -251,13 +250,13 @@ async function action(name, payload={}) {
   } catch(error) { notice(error.message,true); await refresh(); }
   finally { busy=false; updateButtons(); }
 }
-$('mode').onchange=updateContract; $('skill').onchange=updateContract; $('arm_mode').onchange=updateContract; $('calibration_version').oninput=updateContract; $('normalization_version').oninput=updateContract;
+$('mode').onchange=updateContract; $('skill').onchange=updateContract; $('arm_mode').onchange=updateContract; $('calibration_version').oninput=updateContract; $('data_convention_version').oninput=updateContract;
 $('start').onclick=()=>{
   const payload={mode:$('mode').value,task:$('task').value,language_instruction:$('instruction').value,duration_sec:Number($('duration_sec').value)};
   payload.perturbation_id=$('initial_perturbation_id').value;
   if(payload.mode==='skill') { payload.skill=$('skill').value;
     payload.arm_mode=$('arm_mode').value; payload.calibration_version=$('calibration_version').value;
-    payload.normalization_version=$('normalization_version').value; }
+    payload.data_convention_version=$('data_convention_version').value; }
   action('start',payload);
 };
 $('stop').onclick=()=>action('stop');

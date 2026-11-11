@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "version_id": "piper_camera_geometry_checklist_v1",
+  "status": "checklist_only_not_calibrated",
+  "purpose": "机器人坐标下的视觉定位、深度几何、跨视角融合与运动规划所需的待补证据；不是原始 RGB+关节训练门禁",
+  "transform_convention": "T_target_from_source：列向量 p_target = T_target_from_source @ p_source，平移单位 m，旋转为右手系",
+  "board": {
+    "type": null,
+    "dictionary_or_pattern": null,
+    "inner_corner_or_marker_layout": null,
+    "square_size_m": null,
+    "marker_size_m": null,
+    "measured_uncertainty_m": null,
+    "board_frame_definition": null,
+    "physical_board_photo_sha256": null
+  },
+  "transforms": {
+    "left_hand_eye": {
+      "target_frame": null,
+      "source_frame": "camera_wrist_left_color_optical_frame",
+      "matrix_4x4": null,
+      "status": "not_collected"
+    },
+    "right_hand_eye": {
+      "target_frame": null,
+      "source_frame": "camera_wrist_right_color_optical_frame",
+      "matrix_4x4": null,
+      "status": "not_collected"
+    },
+    "top_to_robot_or_table": {
+      "target_frame": null,
+      "source_frame": "D455_color_optical_frame",
+      "matrix_4x4": null,
+      "status": "not_collected"
+    },
+    "left_base_from_right_base_if_shared_geometry": {
+      "target_frame": null,
+      "source_frame": null,
+      "matrix_4x4": null,
+      "status": "not_collected"
+    }
+  },
+  "required_evidence": [
+    "实际序列号、安装批次、RGB 与 CameraInfo 源包哈希及原始光学坐标系定义",
+    "已核实的畸变模型、内参求解数据和独立保留图像的重投影误差",
+    "多组非退化静止姿态的原始图像、板角点、关节反馈、FK/URDF 版本和各自 Header；样本须区分求解集与保留验收集",
+    "腕相机与末端刚性安装、顶部固定安装和公共基座/桌面参考的来源记录",
+    "求解器、依赖与参数版本，输入文件逐文件 SHA-256，变换方向、单位和求解输出",
+    "在求解前按任务精度填写重投影、平移、旋转、时间配对、工作区覆盖门限；不能事后放宽以通过",
+    "独立保留姿态的重投影误差分布、参考点三维误差和跨相机同点闭环误差，含失败或被拒样本",
+    "若使用深度，额外保存深度单位/无效值、配套内参、RGB-Depth 对齐误差与实物距离复核",
+    "腕到顶部的变换随关节位姿变化，须经 FK 与手眼构成带时间戳的动态 TF 链，不能填一份常量跨相机外参"
+  ],
+  "acceptance_limits": {
+    "max_reprojection_error_px": null,
+    "max_translation_error_m": null,
+    "max_rotation_error_rad": null,
+    "max_rgb_joint_skew_ns": null,
+    "minimum_independent_holdout_poses": null,
+    "workspace_coverage_definition": null
+  },
+  "intrinsic_geometry_verified": false,
+  "extrinsic_geometry_verified": false,
+  "motion_planning_geometry_ready": false
+}

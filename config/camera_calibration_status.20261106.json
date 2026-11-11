@@ -1,0 +1,441 @@
+{
+  "schema_version": 1,
+  "version_id": "camera_status_20261106_task2_v1",
+  "status": "camera_identity_captured_training_camera_review_pending_geometry_not_verified",
+  "purpose": "当前三机身份与 RGB/CameraInfo 只读留档；仅原始 RGB+关节训练相机证据，不声明内参几何精度或外参验收",
+  "capture_started_at": "2026-11-06T16:40:37.801492+08:00",
+  "capture_ended_at": "2026-11-06T16:40:45.924418+08:00",
+  "source": {
+    "package_path": "/home/mips/pi05_datas/validation/camera_evidence_20261106_task2_final",
+    "manifest_sha256": "7f243c721fa1d1600286294370bafb88cea4f1b819c9e4db85dd443a954b0616",
+    "capture_sha256": "3651137327b6b795eb74a60f62b342ed579edd2bb23eed9efcaf292e93335f5a",
+    "report_sha256": "fe70859554713d8455edf469022ee5083ae2b114240e8f848ef6e74b2a42efe2",
+    "collector_sha256": "fdc63187646c1766e941dc486dbf0853215521e3210acacf4cd8368b007387b0",
+    "contract_path": "config/camera_training_contract.v1.json",
+    "contract_sha256": "04717914d1295316cd982b4bcf57bc0499ac5be5da4cd7b07c64d76419ec6f83",
+    "camera_map_sha256": "4f6e19311ce7ce1a25259e94e1745fa30e82da6a8155d86def9cd7b56dad3ca7",
+    "historical_camera_info_sha256": "9d6fe0112438446057b5a426d2c74b8a05c14797e16a60d6ea359febe3d6203d",
+    "pending_mount_review_path": "/home/mips/pi05_datas/validation/camera_mount_review_20261106_task2_pending.json"
+  },
+  "input_profile": "raw_rgb_joint_absolute_position",
+  "hand_eye_or_cross_camera_extrinsics_required_for_this_training_input": false,
+  "training_camera_evidence_ready": false,
+  "episode_training_eligible": "not_evaluated",
+  "intrinsic_geometry_verified": false,
+  "extrinsic_geometry_verified": false,
+  "motion_planning_geometry_ready": false,
+  "installation_status": "历史角色在 2026-10-04 已确认，本次仍缺绑定当前原图与安装批次的人工复核；不得由 position_verified 自动升级",
+  "historical_snapshot_interpretation": "20261105 快照中的 missing_for_training 属早期混合用途清单；原始 RGB+关节路径以 camera_training_contract.v1.json 区分训练与几何用途，旧文件不改写",
+  "cameras": {
+    "left_wrist": {
+      "serial": "CV27561000MR",
+      "usb_serial": "CV27561000MR",
+      "usb_device": {
+        "sysfs_device": "2-4",
+        "idVendor": "2bc5",
+        "idProduct": "0840",
+        "serial": "CV27561000MR",
+        "manufacturer": "Orbbec(R)",
+        "product": "Orbbec Gemini 305",
+        "speed": "5000"
+      },
+      "device_info_response": {
+        "info": {
+          "header": {
+            "stamp": {
+              "sec": 0,
+              "nanosec": 0
+            },
+            "frame_id": ""
+          },
+          "name": "Orbbec Gemini 305",
+          "serial_number": "CV27561000MR",
+          "firmware_version": "1.0.70",
+          "supported_min_sdk_version": "1.0.1",
+          "current_sdk_version": "2.9.3",
+          "hardware_version": "0.1"
+        },
+        "success": true,
+        "message": ""
+      },
+      "publishers": {
+        "rgb": [
+          "/camera_wrist_left/camera_wrist_left"
+        ],
+        "info": [
+          "/camera_wrist_left/camera_wrist_left"
+        ]
+      },
+      "rgb_topic": "/camera_wrist_left/color/image_raw",
+      "camera_info_topic": "/camera_wrist_left/color/camera_info",
+      "rgb_image_count": 236,
+      "camera_info_count": 242,
+      "sample_rgb_header_stamp_ns": 1793954445885832000,
+      "sample_camera_info_header_stamp_ns": 1793954445885832000,
+      "sample_rgb_info_skew_ns": 0,
+      "sample_rgb_data_sha256": "d92f915b874697d80ce4997a9f45af9489dfb5ab669821e9b86dfd97e560b7d3",
+      "sample_rgb_png_sha256": "e786fee86fc8064bda584a881bbb1a1e249840ac0a4f0aeecfef59eb2a24c229",
+      "camera_info_sample": {
+        "header_stamp_ns": 1793954445885832000,
+        "frame_id": "camera_wrist_left_color_optical_frame",
+        "width": 640,
+        "height": 480,
+        "distortion_model": "plumb_bob",
+        "d": [
+          -1.2672860622406006,
+          0.8456447720527649,
+          -0.00018396777159068733,
+          -7.354895205935463e-05,
+          -0.19701412320137024,
+          -1.2507156133651733,
+          0.8229307532310486,
+          -0.18820805847644806
+        ],
+        "k": [
+          370.69873046875,
+          0.0,
+          319.6726989746094,
+          0.0,
+          370.5902404785156,
+          238.65777587890625,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "r": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "p": [
+          370.69873046875,
+          0.0,
+          319.6726989746094,
+          0.0,
+          0.0,
+          370.5902404785156,
+          238.65777587890625,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        "binning_x": 0,
+        "binning_y": 0,
+        "roi": {
+          "x_offset": 0,
+          "y_offset": 0,
+          "width": 0,
+          "height": 0,
+          "do_rectify": false
+        }
+      },
+      "historical_k": [
+        370.69873046875,
+        0.0,
+        319.6726989746094,
+        0.0,
+        370.5902404785156,
+        238.65777587890625,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "changed_baseline_fields": [],
+      "automated_checks": {
+        "automated_pass": true,
+        "errors": [],
+        "warnings": [
+          "畸变模型 plumb_bob 与 D[8] 的 ROS 语义须独立核实；禁止据此去畸变或反投影"
+        ],
+        "image_count": 236,
+        "camera_info_count": 242,
+        "intrinsic_profile_count": 1
+      }
+    },
+    "right_wrist": {
+      "serial": "CV275610002H",
+      "usb_serial": "CV275610002H",
+      "usb_device": {
+        "sysfs_device": "2-7",
+        "idVendor": "2bc5",
+        "idProduct": "0840",
+        "serial": "CV275610002H",
+        "manufacturer": "Orbbec(R)",
+        "product": "Orbbec Gemini 305",
+        "speed": "5000"
+      },
+      "device_info_response": {
+        "info": {
+          "header": {
+            "stamp": {
+              "sec": 0,
+              "nanosec": 0
+            },
+            "frame_id": ""
+          },
+          "name": "Orbbec Gemini 305",
+          "serial_number": "CV275610002H",
+          "firmware_version": "1.0.70",
+          "supported_min_sdk_version": "1.0.1",
+          "current_sdk_version": "2.9.3",
+          "hardware_version": "0.1"
+        },
+        "success": true,
+        "message": ""
+      },
+      "publishers": {
+        "rgb": [
+          "/camera_wrist_right/camera_wrist_right"
+        ],
+        "info": [
+          "/camera_wrist_right/camera_wrist_right"
+        ]
+      },
+      "rgb_topic": "/camera_wrist_right/color/image_raw",
+      "camera_info_topic": "/camera_wrist_right/color/camera_info",
+      "rgb_image_count": 238,
+      "camera_info_count": 241,
+      "sample_rgb_header_stamp_ns": 1793954445872843000,
+      "sample_camera_info_header_stamp_ns": 1793954445872843000,
+      "sample_rgb_info_skew_ns": 0,
+      "sample_rgb_data_sha256": "5ccbc11bbdfac227cc3c95da92c072edc9aa2939c5f9817d76a9140cb3775468",
+      "sample_rgb_png_sha256": "0d0faf792b454e139c5271a289244376782095ca68b6592ff96ce7be6b42f02a",
+      "camera_info_sample": {
+        "header_stamp_ns": 1793954445872843000,
+        "frame_id": "camera_wrist_right_color_optical_frame",
+        "width": 640,
+        "height": 480,
+        "distortion_model": "plumb_bob",
+        "d": [
+          -1.3093353509902954,
+          0.9402931332588196,
+          1.6651645637466572e-05,
+          0.00019437696028035134,
+          -0.24455887079238892,
+          -1.2930426597595215,
+          0.9182922840118408,
+          -0.23610684275627136
+        ],
+        "k": [
+          370.6130676269531,
+          0.0,
+          317.78387451171875,
+          0.0,
+          370.4552001953125,
+          239.0191650390625,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "r": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "p": [
+          370.6130676269531,
+          0.0,
+          317.78387451171875,
+          0.0,
+          0.0,
+          370.4552001953125,
+          239.0191650390625,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        "binning_x": 0,
+        "binning_y": 0,
+        "roi": {
+          "x_offset": 0,
+          "y_offset": 0,
+          "width": 0,
+          "height": 0,
+          "do_rectify": false
+        }
+      },
+      "historical_k": [
+        370.6130676269531,
+        0.0,
+        317.78387451171875,
+        0.0,
+        370.4552001953125,
+        239.0191650390625,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "changed_baseline_fields": [],
+      "automated_checks": {
+        "automated_pass": true,
+        "errors": [],
+        "warnings": [
+          "畸变模型 plumb_bob 与 D[8] 的 ROS 语义须独立核实；禁止据此去畸变或反投影"
+        ],
+        "image_count": 238,
+        "camera_info_count": 241,
+        "intrinsic_profile_count": 1
+      }
+    },
+    "top": {
+      "serial": "338122301303",
+      "usb_serial": "250343060799",
+      "usb_device": {
+        "sysfs_device": "2-3",
+        "idVendor": "8086",
+        "idProduct": "0b5c",
+        "serial": "250343060799",
+        "manufacturer": "Intel(R) RealSense(TM) Depth Camera 455",
+        "product": "Intel(R) RealSense(TM) Depth Camera 455",
+        "speed": "5000"
+      },
+      "device_info_response": {
+        "device_name": "realsense_d455",
+        "serial_number": "338122301303",
+        "firmware_version": "5.17.0.10",
+        "usb_type_descriptor": "3.2",
+        "firmware_update_id": "250343060799",
+        "sensors": "depth_module,rgb_camera,motion_module",
+        "physical_port": "/sys/devices/pci0000:00/0000:00:14.0/usb2/2-3/2-3:1.0/video4linux/video0"
+      },
+      "publishers": {
+        "rgb": [
+          "/camera_top/D455"
+        ],
+        "info": [
+          "/camera_top/D455"
+        ]
+      },
+      "rgb_topic": "/camera_top/D455/color/image_raw",
+      "camera_info_topic": "/camera_top/D455/color/camera_info",
+      "rgb_image_count": 237,
+      "camera_info_count": 240,
+      "sample_rgb_header_stamp_ns": 1793954445877393311,
+      "sample_camera_info_header_stamp_ns": 1793954445877393311,
+      "sample_rgb_info_skew_ns": 0,
+      "sample_rgb_data_sha256": "da1443bd24862d1dc021920c6b843b478e32188f7038212e88db3613c94e7f27",
+      "sample_rgb_png_sha256": "5960c22ed4c9c469f73f17abd1a5c1b84986fff67cd5df354c08be53d7a2e7ba",
+      "camera_info_sample": {
+        "header_stamp_ns": 1793954445877393311,
+        "frame_id": "D455_color_optical_frame",
+        "width": 640,
+        "height": 480,
+        "distortion_model": "plumb_bob",
+        "d": [
+          -0.05444161593914032,
+          0.06275110691785812,
+          -0.00037424781476147473,
+          0.0009041884914040565,
+          -0.019876660779118538
+        ],
+        "k": [
+          388.6639404296875,
+          0.0,
+          323.251708984375,
+          0.0,
+          388.099365234375,
+          244.88717651367188,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "r": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "p": [
+          388.6639404296875,
+          0.0,
+          323.251708984375,
+          0.0,
+          0.0,
+          388.099365234375,
+          244.88717651367188,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        "binning_x": 0,
+        "binning_y": 0,
+        "roi": {
+          "x_offset": 0,
+          "y_offset": 0,
+          "width": 0,
+          "height": 0,
+          "do_rectify": false
+        }
+      },
+      "historical_k": [
+        388.55841064453125,
+        0.0,
+        323.251708984375,
+        0.0,
+        387.9939880371094,
+        244.88717651367188,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "changed_baseline_fields": [
+        "k",
+        "p"
+      ],
+      "automated_checks": {
+        "automated_pass": false,
+        "errors": [
+          "相对冻结内参发生变化：k,p；须新建版本复核"
+        ],
+        "warnings": [],
+        "image_count": 237,
+        "camera_info_count": 240,
+        "intrinsic_profile_count": 1
+      }
+    }
+  },
+  "software": {
+    "orbbec_camera": {
+      "version": "2.9.3",
+      "package_xml_sha256": "b28f0740a00bd126de2219609c9fa101187f75b67316fe780e29719ec9cb4791",
+      "executable_sha256": "54e17d5a2d42ea0c7bd5e124d59088128cdb8e4bd027c3ac92bb1f0c0b369391",
+      "executable_path": "/opt/ros/humble/lib/orbbec_camera/orbbec_camera_node"
+    },
+    "realsense2_camera": {
+      "version": "4.58.4",
+      "package_xml_sha256": "a15e85855f0be2ce295776b8a243c3a9ccac1df15cba8faf5d88fdb219e02fee",
+      "executable_sha256": "c06536520d4eb7da9c4c622c28bff29af9848818e1fc359b3c1e0e38d20cdc5d",
+      "executable_path": "/opt/ros/humble/lib/realsense2_camera/realsense2_camera_node"
+    }
+  },
+  "remaining_items": [
+    "顶部 K/P 相对冻结快照改变；保留差异，查明图像/预处理与来源后新建候选快照及契约版本复核",
+    "为实际使用的相机角色补齐当前设备实体、镜头方向、固定件、视野、遮挡与安装批次复核",
+    "若使用几何，先核实两台 Orbbec plumb_bob + D[8] 的系数语义并做独立板图复验",
+    "按 camera_geometry_checklist.v1.json 另补内参几何、左右手眼、顶部与公共坐标系证据及保留姿态残差",
+    "相机证据须由主集成流程按哈希与每条 Episode 绑定；仍须逐帧同步、动作来源、技能完成帧及归一化独立审计"
+  ]
+}

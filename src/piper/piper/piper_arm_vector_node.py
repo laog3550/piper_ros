@@ -11,6 +11,7 @@ from rclpy.node import Node
 from piper_msgs.msg import PiperArmVector, PiperDirectCanFrame
 
 from piper.piper_arm_vector import ArmVectorAssembler
+from piper.collection_lock import CollectionLocks
 
 
 def set_stamp(stamp, timestamp_ns):
@@ -32,6 +33,7 @@ class PiperArmVectorNode(Node):
             raise ValueError('side must be all, left, or right')
         self._streams = []
         sides = ('left', 'right') if side == 'all' else (side,)
+        self._collection_locks = CollectionLocks(['/piper_vector/' + side for side in sides])
         for side in sides:
             for kind in ('master_target', 'slave_feedback'):
                 assembler = ArmVectorAssembler(
@@ -48,6 +50,10 @@ class PiperArmVectorNode(Node):
         now_ns = time.time_ns()
         for assembler, publisher in self._streams:
             value = assembler.snapshot(now_ns)
+            # An entirely missing source has no Header to preserve. Wait for
+            # the first real CAN frame; later missing/stale flags stay intact.
+            if value['stamp_ns'] <= 0:
+                continue
             msg = PiperArmVector()
             set_stamp(msg.header.stamp, value['stamp_ns'])
             msg.header.frame_id = value['frame_id']
@@ -64,16 +70,23 @@ class PiperArmVectorNode(Node):
             msg.gripper_mapping_verified = self._gripper_verified
             publisher.publish(msg)
 
+    def destroy_node(self):
+        result = super().destroy_node()
+        self._collection_locks.close()
+        return result
+
 
 def main(args=None):
     rclpy.init(args=args)
-    node = PiperArmVectorNode()
+    node = None
     try:
+        node = PiperArmVectorNode()
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
+        if node is not None:
+            node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 

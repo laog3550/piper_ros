@@ -12,7 +12,7 @@ from unittest import mock
 import numpy as np
 
 from piper_pi05_adapter import PiperInputs, PiperOutputs
-from piper_pi05_openpi import check_dataset, digest, episode_source_digest, main
+from piper_pi05_openpi import check_dataset, digest, main
 
 
 class PiperAdapterTest(unittest.TestCase):
@@ -69,65 +69,9 @@ class PiperAdapterTest(unittest.TestCase):
     def test_training_gate_requires_independent_provenance(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for split in ("train", "test"):
-                (root / split / "meta").mkdir(parents=True)
-                (root / split / "meta" / "info.json").write_text("{}", encoding="utf-8")
-            episodes = []
-            labels = {}
-            for skill in ("banana_in_box",):
-                for index in range(13):
-                    identifier = f"{skill}-{index}"
-                    labels[identifier] = skill
-                    atomic_skill = "pick_and_place_banana_in_box"
-                    split = "train" if index < 10 else "test"
-                    group_id = f"scene-{skill}-{index}"
-                    task_text = f"{skill} 第 {index} 次示教"
-                    source = root / "sources" / identifier
-                    (source / "bag").mkdir(parents=True)
-                    (source / "episode.json").write_text(json.dumps({
-                        "schema_version": 2, "mode": "skill", "state": "saved",
-                        "episode_id": identifier, "skill": atomic_skill, "task": task_text,
-                        "outcome": "success", "task_metadata": {
-                            "arm_mode": "LEFT", "time_domain": "unix_ns",
-                            "action_space": "absolute_joint_position_7",
-                            "action_provenance": "human_demonstration",
-                            "calibration_version": "verified-v1",
-                            "normalization_version": "piper-v1",
-                            "initial_conditions": {"perturbation_id": group_id}}}), encoding="utf-8")
-                    (source / "bag" / "metadata.yaml").write_text("x", encoding="utf-8")
-                    (source / "bag" / "sample.db3").write_bytes(b"test")
-                    episodes.append({"episode_id": identifier, "split": split,
-                                     "frames": 16, "source": str(source),
-                                     "source_sha256": episode_source_digest(source),
-                                     "skill_id": atomic_skill, "task_text": task_text,
-                                     "group_id": group_id,
-                                     "calibration_version": "verified-v1", "normalization_version": "piper-v1"})
-            manifest = {"format": "LeRobotDataset v3.0", "purpose": "success_sft", "arm_mode": "LEFT",
-                        "action_space": "absolute_joint_position_7",
-                        "joint_names": [f"left.joint{i}" for i in range(1, 7)] + ["left.gripper"],
-                        "episodes": episodes}
-            manifest_path = root / "conversion_manifest.json"
-            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-            audit_path = root / "audit.json"
-            audit_path.write_text(json.dumps({"schema_version": "piper_real_data_audit_v2",
-                                              "split_ready": True,
-                                              "eligible_episode_count": len(episodes),
-                                              "sources": [{"episode_id": row["episode_id"], "eligible": True,
-                                                           "kind": "native_episode", "source": row["source"],
-                                                           "skill_id": row["skill_id"],
-                                                           "task_text": row["task_text"],
-                                                           "group_id": row["group_id"],
-                                                           "suggested_split": row["split"]}
-                                                          for row in episodes]}), encoding="utf-8")
-            proof = {"status": "verified_for_piper_pi05_training", "arm_mode": "LEFT",
-                     "action_space": "absolute_joint_position_7",
-                     "conversion_manifest_sha256": digest(manifest_path),
-                     "source_audit_sha256": digest(audit_path),
-                     "action_provenance": "human_demonstration", "gripper_mapping_verified": True,
-                     "calibration_verified": True, "calibration_version": "verified-v1",
-                     "normalization_version": "piper-v1", "episode_skills": labels}
-            proof_path = root / "evidence.json"
-            proof_path.write_text(json.dumps(proof), encoding="utf-8")
+            from test_piper_normalization_gate import audited_dataset
+            proof, _ = audited_dataset(root)
+            audit_path, proof_path = root / "audit.json", root / "evidence.json"
             self.assertEqual(check_dataset(root, proof_path, audit_path)["counts"]["train_banana_in_box"], 10)
             audit = json.loads(audit_path.read_text(encoding="utf-8"))
             audit["sources"][0]["suggested_split"] = "test"

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "version_id": "camera_training_acceptance_20261110_v3",
+  "status": "accepted_for_raw_rgb_joint_training_camera_source",
+  "scope": "仅本次三路原始 RGB 与 CameraInfo 来源；Episode 逐帧审计、训练统计和几何标定另行验收",
+  "camera_contract_version": "piper_rgb_joint_camera_contract_v2_20261110",
+  "camera_info_snapshot_version": "camera_info_snapshot_20261110_v1",
+  "installation_epoch_id": "piper_camera_installation_20261110_operator_confirmed_v1",
+  "sources": {
+    "manifest": {
+      "path": "/home/mips/pi05_datas/validation/camera_evidence_20261110_v3/manifest.json",
+      "sha256": "d8b757fb858a674dc797cfcf82567dd125ac24dc99dc6bc2d3465743fd3777d4"
+    },
+    "capture": {
+      "path": "/home/mips/pi05_datas/validation/camera_evidence_20261110_v3/capture.json",
+      "sha256": "0629059e083913b92df98d1d02ca4b6d3fa198248fe9231f4ed343d7e06cb786"
+    },
+    "contract": {
+      "path": "/home/mips/pi05_datas/validation/camera_evidence_20261110_v3/contract.json",
+      "sha256": "f62aa6b7891ddb7886898c7cc6256ef261f096516f327c4f08ac8b7358d02a64"
+    },
+    "baseline": {
+      "path": "/home/mips/pi05_datas/validation/camera_evidence_20261110_v3/baseline.json",
+      "sha256": "82311a9e767037843bb7e46c685655ae6f09e3fb9083445963225a4545cc5297"
+    },
+    "mount_review": {
+      "path": "/home/mips/pi05_datas/validation/camera_mount_review_20261110_v3.json",
+      "sha256": "c25ecdd5319f1243aec4629b5235f5137bf3c5fc0b031de234ee2c10fe893803"
+    },
+    "audit_report": {
+      "path": "/home/mips/pi05_datas/validation/camera_training_acceptance_20261110_v3.json",
+      "sha256": "0bafdece1d0eeb8983888c24c40a97b7cd4701f40cb40f1ad5a280b5e1c3f483"
+    }
+  },
+  "training_camera_evidence_ready": true,
+  "episode_training_eligible": "not_evaluated",
+  "intrinsic_geometry_verified": false,
+  "extrinsic_geometry_verified": false,
+  "motion_planning_geometry_ready": false,
+  "remaining": "每条 Episode 需绑定本验收、逐帧同步与动作来源审计；训练归一化和 checkpoint 另行验收。"
+}

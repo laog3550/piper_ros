@@ -299,12 +299,12 @@ class Console(QMainWindow):
         fields.addWidget(QLabel("相机内参快照版本"), 4, 0)
         self.calibration = QLineEdit(); fields.addWidget(self.calibration, 4, 1)
         fields.addWidget(QLabel("数据约定版本"), 4, 2)
-        self.normalization = QLineEdit(); fields.addWidget(self.normalization, 4, 3)
+        self.data_convention = QLineEdit(); fields.addWidget(self.data_convention, 4, 3)
         defaults = provisional_collection_versions()
         self.calibration.setText(defaults.get("calibration_version", ""))
-        self.normalization.setText(defaults.get("normalization_version", ""))
-        self.calibration.setToolTip("仅记录在线 CameraInfo 内参；手眼与跨相机外参尚未验收")
-        self.normalization.setToolTip("记录原始数据顺序与单位；训练集归一化统计尚未生成")
+        self.data_convention.setText(defaults.get("data_convention_version", ""))
+        self.calibration.setToolTip("记录在线 CameraInfo 内参快照；训练所需相机身份、安装状态与内参仍须独立验收")
+        self.data_convention.setToolTip("记录原始数据顺序与单位；训练集归一化统计尚未生成")
         self.contract = QLabel("训练契约：待检查")
         self.contract.setWordWrap(True)
         fields.addWidget(self.contract, 5, 0, 1, 4)
@@ -368,6 +368,7 @@ class Console(QMainWindow):
         self.mark_failure = QPushButton("标记本条失败")
         self.mark_exception = QPushButton("标记异常")
         self.mark_recovery = QPushButton("标记恢复")
+        self.mark_hold = QPushButton("开始保持（重复最后目标）")
         self.trigger_reason = QLineEdit(); self.trigger_reason.setPlaceholderText("异常或恢复原因")
         self.camera_ref = QComboBox(); self.camera_ref.addItem("无画面关联", None)
         for i, name in enumerate(CAMERA_NAMES): self.camera_ref.addItem(name, i)
@@ -376,8 +377,8 @@ class Console(QMainWindow):
         self.review_offset.setPlaceholderText("完成时刻：录制开始后第几秒")
         self.review_offset.setMaximumWidth(230)
         for widget in (self.mark_start, self.mark_complete, self.mark_success, self.mark_failure,
-                       self.mark_exception, self.mark_recovery, self.trigger_reason, self.camera_ref,
-                       self.review_offset):
+                       self.mark_exception, self.mark_recovery, self.mark_hold, self.trigger_reason,
+                       self.camera_ref, self.review_offset):
             marks.addWidget(widget)
         mark_help = QLabel("完整任务：录制中点击“标记当前技能成功”记录当前画面并进入下一技能。原子技能：可在成功时点击记录当前画面，再停止录制；停机核验通过后自动选择成功。到时自动取末帧，提前停止可补标。成功保存须有一条经 rosbag 核验的完成帧。")
         mark_help.setWordWrap(True)
@@ -402,17 +403,19 @@ class Console(QMainWindow):
         self.skill.currentIndexChanged.connect(self.update_contract)
         self.arm_mode.currentIndexChanged.connect(self.update_contract)
         self.calibration.textChanged.connect(self.update_contract)
-        self.normalization.textChanged.connect(self.update_contract)
+        self.data_convention.textChanged.connect(self.update_contract)
         self.mark_start.clicked.connect(self.mark_next_skill)
         self.mark_complete.clicked.connect(lambda: self.mark_annotation("skill_complete", self.active_skill))
         self.mark_success.clicked.connect(self.mark_skill_success)
         self.mark_failure.clicked.connect(self.mark_skill_failure)
         self.mark_exception.clicked.connect(lambda: self.mark_annotation("recovery_trigger", "异常：" + (self.trigger_reason.text().strip() or "人工触发")))
         self.mark_recovery.clicked.connect(lambda: self.mark_annotation("recovery_trigger", "恢复：" + (self.trigger_reason.text().strip() or "人工触发")))
+        self.mark_hold.clicked.connect(self.toggle_hold)
         self.config = config
         self.active_skill = None
         self.active_mode = None
         self.annotations = []
+        self.hold_segments = []
         self._text_context = None
         self._text_cache = {}
         self.update_contract()
@@ -457,7 +460,7 @@ class Console(QMainWindow):
                 "mode": self.mode.currentData(), "skill": self.skill.currentData(),
                 "arm_mode": self.arm_mode.currentData(), "perturbation_id": self.perturbation.text(),
                 "calibration_version": self.calibration.text(),
-                "normalization_version": self.normalization.text(), "duration_sec": self.duration.value()}
+                "data_convention_version": self.data_convention.text(), "duration_sec": self.duration.value()}
         try:
             request = start_request(body, self.config, self.cameras)
         except ValueError as exc:
@@ -467,7 +470,7 @@ class Console(QMainWindow):
     def update_contract(self):
         skill_mode = self.mode.currentData() == "skill"
         bimanual = self.skill.currentData() in SKILLS[1:]
-        for widget in (self.skill, self.calibration, self.normalization):
+        for widget in (self.skill, self.calibration, self.data_convention):
             widget.setEnabled(skill_mode and self.state == "idle")
         self.arm_mode.setEnabled(skill_mode and not bimanual and self.state == "idle")
         if bimanual and skill_mode:
@@ -490,11 +493,9 @@ class Console(QMainWindow):
             self._text_context = context
         diagnostics = collection_contract_diagnostics(
             self.config, self.arm_mode.currentData(),
-            self.calibration.text(), self.normalization.text())
-        if diagnostics["blockers"]:
-            self.contract.setText("训练契约：仅可录原始技能；" + "；".join(diagnostics["blockers"]))
-        else:
-            self.contract.setText("训练契约：采集元数据可声明；仍须逐帧来源审计")
+            self.calibration.text(), self.data_convention.text())
+        declaration_status = ("原始事实声明齐全" if diagnostics["metadata_claimable"] else "原始事实声明尚不齐全")
+        self.contract.setText(declaration_status + "；训练待审：" + "；".join(diagnostics["blockers"]))
 
     def mark_next_skill(self):
         done = [row for row in self.annotations if row.get("kind") == "skill_complete"]
@@ -517,6 +518,13 @@ class Console(QMainWindow):
             self.message.setText("已选择本条原子技能失败；可保存 Episode")
         else:
             self.mark_annotation("outcome", "failure")
+
+    def toggle_hold(self):
+        open_hold = any(item.get("end_unix_ns") is None for item in self.hold_segments)
+        if open_hold:
+            self.mark_annotation("hold_end", "operator_release")
+        else:
+            self.mark_annotation("hold_start", "operator_keep_last_target")
 
     def mark_annotation(self, kind, value):
         try:
@@ -568,7 +576,7 @@ class Console(QMainWindow):
         editable = not busy and self.state == "idle"
         for widget in (self.mode, self.task, self.instruction, self.duration, self.perturbation):
             widget.setEnabled(editable)
-        for widget in (self.skill, self.calibration, self.normalization):
+        for widget in (self.skill, self.calibration, self.data_convention):
             widget.setEnabled(editable and self.mode.currentData() == "skill")
         self.arm_mode.setEnabled(editable and self.mode.currentData() == "skill"
                                  and self.skill.currentData() not in SKILLS[1:])
@@ -598,6 +606,9 @@ class Console(QMainWindow):
         self.mark_failure.setEnabled((recording and mode == "task") or skill_review)
         for widget in (self.mark_exception, self.mark_recovery):
             widget.setEnabled(recording)
+        open_hold = any(item.get("end_unix_ns") is None for item in self.hold_segments)
+        self.mark_hold.setText("结束保持" if open_hold else "开始保持（重复最后目标）")
+        self.mark_hold.setEnabled(recording and bool(self.active_skill))
 
     def check_futures(self):
         for key, future in list(self.pending.items()):
@@ -612,6 +623,7 @@ class Console(QMainWindow):
                     self.active_mode = meta.get("mode")
                     self.active_skill = meta.get("active_skill") or (meta.get("skill") if meta.get("mode") == "skill" else None)
                     self.annotations = meta.get("annotations") or []
+                    self.hold_segments = meta.get("hold_segments") or []
                     recorded_outcomes = [item.get("value") for item in self.annotations
                                          if item.get("kind") == "outcome"]
                     if self.outcome.currentIndex() == 0 and recorded_outcomes:
@@ -645,6 +657,8 @@ class Console(QMainWindow):
                         detail += " · 已到时自动停止"
                     if meta.get("auto_completion_error"):
                         detail += f" · 末帧自动标记失败：{meta['auto_completion_error']}；请手动补标"
+                    if meta.get("auto_completion_source_warning"):
+                        detail += f" · {meta['auto_completion_source_warning']}"
                     unresolved = [item.get("frame_verification_error") for item in self.annotations
                                   if item.get("frame_verification_error")]
                     if unresolved:

@@ -122,7 +122,8 @@ class DirectCanDecodeTest(unittest.TestCase):
                                            'rclpy.executors': fake_rclpy_executors,
                                            'piper_msgs.msg': fake_messages}):
             spec.loader.exec_module(module)
-            with mock.patch.object(can, 'Bus', return_value=bus) as bus_factory:
+            with (mock.patch.object(can, 'Bus', return_value=bus) as bus_factory,
+                  mock.patch.object(module, 'CollectionLocks')):
                 with mock.patch.object(module.threading.Thread, 'start'):
                     node = module.PiperDirectCanNode()
                 node._listen('can_left')

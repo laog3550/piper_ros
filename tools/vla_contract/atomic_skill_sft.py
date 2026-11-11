@@ -192,7 +192,8 @@ def check_source(row, annotation, mode, skill):
                 f"{row['episode_id']}: 双臂角色或同步核验缺失")
 
 
-def check_source_timestamps(path, episodes, mode, input_format, max_sync_ns, max_age_ns):
+def check_source_timestamps(path, episodes, mode, input_format, max_sync_ns, max_age_ns,
+                            alignment_policy=None):
     records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     by_key = {}
     for item in records:
@@ -206,6 +207,7 @@ def check_source_timestamps(path, episodes, mode, input_format, max_sync_ns, max
               for arm in arms]
     actions = [f"/piper_vector/{arm}/master_target" if input_format == "can-vector"
                else f"/demonstration/action_{arm}" for arm in arms]
+    action_by_arm = dict(zip(arms, actions))
     references = {}
     for row in episodes:
         items = by_key[row["split"], row["episode_id"]]
@@ -218,16 +220,51 @@ def check_source_timestamps(path, episodes, mode, input_format, max_sync_ns, max
             require(set(topics + states + actions) <= set(stamps)
                     and all(type(stamps[key]) is int and stamps[key] > 0 for key in topics + states + actions),
                     f"{row['episode_id']}: 缺 RGB/状态/示教动作 Header 时间")
-            reference = max(stamps[key] for key in actions)
-            references[row["split"], row["episode_id"]].append((item["frame_index"], reference))
-            require(max(stamps[key] for key in actions) - min(stamps[key] for key in actions) <= max_sync_ns
-                    and max(stamps[key] for key in states) - min(stamps[key] for key in states) <= max_sync_ns,
-                    f"{row['episode_id']}: 左右臂时间不同步")
-            require(all(0 <= reference - stamps[key] <= max_age_ns for key in topics + states),
-                    f"{row['episode_id']}: RGB 或状态超窗")
-            sources = [stamps[key] for key in topics + states + actions]
-            require(max(sources) - min(sources) <= max_sync_ns,
+            hold = item.get("hold") or {}
+            held = set(hold.get("arms") or [])
+            if hold:
+                require(bool(held) and held <= set(arms)
+                        and hold.get("source") == "operator_annotation"
+                        and isinstance(hold.get("hold_id"), str) and bool(hold["hold_id"])
+                        and type(hold.get("anchor_header_ns")) is int
+                        and all(stamps[action_by_arm[arm]] == hold["anchor_header_ns"] for arm in held)
+                        and all(stamps[action_by_arm[arm]] <= item.get("target_timestamp_ns",
+                                                                      stamps[action_by_arm[arm]])
+                                for arm in held),
+                        f"{row['episode_id']}: 保持段证据无效")
+            fresh_actions = [stamps[action_by_arm[arm]] for arm in arms if arm not in held]
+            fresh_sources = [stamps[key] for key in topics + states] + fresh_actions
+            reference_time = item.get("target_timestamp_ns")
+            if type(reference_time) is not int:
+                reference_time = max(stamps[key] for key in actions)
+            alignment = item.get("alignment")
+            if alignment_policy == "causal_rgb_bundle_v1":
+                require(isinstance(alignment, dict) and bool(alignment),
+                        f"{row['episode_id']}: 缺少图像组对齐依据")
+            if alignment:
+                anchor = alignment.get("reference_timestamp_ns")
+                require(alignment.get("policy") == "causal_rgb_bundle_v1"
+                        and type(anchor) is int and anchor > 0
+                        and anchor == max(stamps[key] for key in topics)
+                        and anchor <= reference_time
+                        and alignment.get("grid_lag_ns") == reference_time - anchor
+                        and all(stamps[key] <= anchor for key in states)
+                        and all(stamps[key] <= anchor for key in actions),
+                        f"{row['episode_id']}: 图像组对齐依据无效或使用未来来源")
+            references[row["split"], row["episode_id"]].append((item["frame_index"], reference_time))
+            require(max(fresh_sources) - min(fresh_sources) <= max_sync_ns,
                     f"{row['episode_id']}: RGB、状态与动作 Header 总体不同步")
+            require(all(0 <= reference_time - stamps[key] <= max_age_ns for key in topics + states),
+                    f"{row['episode_id']}: RGB 或状态超窗")
+            require(all(0 <= reference_time - stamps[action_by_arm[arm]] <= max_age_ns
+                        for arm in arms if arm not in held),
+                    f"{row['episode_id']}: 示教动作超窗")
+            if len(fresh_actions) > 1:
+                require(max(fresh_actions) - min(fresh_actions) <= max_sync_ns,
+                        f"{row['episode_id']}: 左右臂动作不同步")
+            if len(states) > 1:
+                require(max(stamps[key] for key in states) - min(stamps[key] for key in states) <= max_sync_ns,
+                        f"{row['episode_id']}: 左右臂状态不同步")
             if input_format == "can-vector":
                 sources = item.get("source_can_stamps_ns", {})
                 require(set(states + actions) <= set(sources)
@@ -331,12 +368,13 @@ def inspect(dataset, annotations_path, audit_path, skill, max_sync_ns, max_age_n
             task_texts.add(row["task_text"])
             parquet_times[split, row["episode_id"]] = [frame["timestamp"] for frame in grouped[index]]
     references = check_source_timestamps(dataset / "source_timestamps.jsonl", episodes, mode,
-                                         manifest["input_format"], max_sync_ns, max_age_ns)
+                                         manifest["input_format"], max_sync_ns, max_age_ns,
+                                         manifest.get("alignment_policy"))
     for key, stamps in parquet_times.items():
         source = references[key]
         require(all(abs((timestamp - stamps[0]) - (source[index] - source[0]) / 1e9) <= 0.002
                     for index, timestamp in enumerate(stamps)),
-                f"{key[1]}: LeRobot 时间与来源动作 Header 不对应")
+                f"{key[1]}: LeRobot 时间与来源采样网格不对应")
     return {"status": "data_gate_passed_launch_blocked", "skill_id": skill, "arm_mode": mode,
             "counts": counts, "frames": sum(row["frames"] for row in episodes),
             "versions": {field: next(iter(values)) for field, values in versions.items()},

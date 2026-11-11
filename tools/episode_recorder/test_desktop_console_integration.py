@@ -102,7 +102,7 @@ def main():
         window.show()
         raw_versions = provisional_collection_versions()
         assert window.calibration.text() == raw_versions["calibration_version"]
-        assert window.normalization.text() == raw_versions["normalization_version"]
+        assert window.data_convention.text() == raw_versions["data_convention_version"]
         stage = ["ready"]
         closed_at = [None]
         failure = []
@@ -183,7 +183,7 @@ def main():
                     assert window.arm_mode.currentData() == "LEFT" and window.arm_mode.isEnabled()
                     window.arm_mode.setCurrentIndex(0)
                     window.calibration.setText("synthetic-camera-v1")
-                    window.normalization.setText("synthetic-norm-v1")
+                    window.data_convention.setText(raw_versions["data_convention_version"])
                     window.perturbation.setText("synthetic-scene-1")
                     window.task.setText("合成抓取")
                     window.instruction.setPlainText("抓取合成物体")
@@ -202,6 +202,11 @@ def main():
                     assert meta["task_metadata"]["initial_conditions"]["perturbation_id"] == "synthetic-scene-1"
                     assert meta["task_metadata"]["initial_conditions"]["joint_positions"]["left"]["position_rad"]
                     assert meta["task_metadata"]["collection_contract_status"] == "training_not_ready_unverified_teleoperation_mapping"
+                    assert meta["task_metadata"]["data_convention_version"] == raw_versions["data_convention_version"]
+                    assert "normalization_version" not in meta["task_metadata"]
+                    assert meta["task_metadata"]["time_domain"] == "unix_ns"
+                    assert "action_provenance" not in meta["task_metadata"]
+                    assert meta["task_metadata"]["training_eligibility"]["eligible"] is False
                     assert any(a["kind"] == "skill_complete" and a.get("source_topic") == TOPICS[2]
                                for a in meta["annotations"])
                     assert any(a.get("annotation_origin") == "duration_limit_last_frame"

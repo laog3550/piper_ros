@@ -30,24 +30,31 @@ ARM_TOPICS = {arm: {"master_target": f"/piper_vector/{arm}/master_target",
                     "slave_feedback": f"/piper_vector/{arm}/slave_feedback"}
               for arm in ("left", "right")}
 COLLECTION_VERSION_FILES = {
-    "calibration_version": "collection_camera_info_snapshot.20261105.json",
-    "normalization_version": "collection_data_convention.20261105.json",
+    "calibration_version": "collection_camera_info_snapshot.20261110.json",
+    "data_convention_version": "collection_data_convention.20261105.json",
 }
 
 
-def provisional_collection_versions():
-    """Return traceable raw-collection identifiers, never training approval."""
+def collection_version_records():
     root = Path(__file__).parents[2] / "config"
     result = {}
     for field, filename in COLLECTION_VERSION_FILES.items():
         path = root / filename
-        if not path.is_file():
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
             continue
-        record = json.loads(path.read_text(encoding="utf-8"))
-        if (isinstance(record.get("version_id"), str)
-                and record.get("status") in ("raw_collection_intrinsics_only", "raw_collection_schema_only")):
-            result[field] = record["version_id"]
+        expected_status = ("raw_collection_intrinsics_only" if field == "calibration_version"
+                           else "raw_collection_schema_only")
+        if (isinstance(record, dict) and isinstance(record.get("version_id"), str)
+                and record["version_id"].strip() and record.get("status") == expected_status):
+            result[field] = record
     return result
+
+
+def provisional_collection_versions():
+    """Return traceable raw-collection identifiers, never training approval."""
+    return {field: record["version_id"] for field, record in collection_version_records().items()}
 
 
 def collection_version_evidence():
@@ -72,18 +79,14 @@ def teleoperation_ready(config, arm_mode):
         for arm in required)
 
 
-def collection_contract_diagnostics(config, arm_mode, calibration_version, normalization_version):
+def collection_contract_diagnostics(config, arm_mode, calibration_version, data_convention_version):
     """Separate recorded source declarations from training acceptance."""
-    provisional = provisional_collection_versions()
-    calibration_raw = calibration_version == provisional.get("calibration_version")
-    normalization_raw = normalization_version == provisional.get("normalization_version")
+    records = collection_version_records()
+    calibration_raw = calibration_version == records.get("calibration_version", {}).get("version_id")
+    convention = records.get("data_convention_version", {})
+    convention_known = bool(convention and data_convention_version == convention.get("version_id"))
     mapping_ready = arm_mode in ("LEFT", "RIGHT", "BIMANUAL") and teleoperation_ready(config, arm_mode)
-    convention = Path(__file__).parents[2] / "config" / COLLECTION_VERSION_FILES["normalization_version"]
-    try:
-        raw_time_domain = json.loads(convention.read_text(encoding="utf-8")).get("time_domain")
-    except (OSError, ValueError, TypeError):
-        raw_time_domain = None
-    time_declared = raw_time_domain == "unix_ns"
+    time_declared = convention_known and convention.get("time_domain") == "unix_ns"
     checks = {
         "time_domain": {
             "status": "declared_pending_audit" if time_declared else "unverified",
@@ -103,19 +106,34 @@ def collection_contract_diagnostics(config, arm_mode, calibration_version, norma
                        if mapping_ready else "主端动作到从端反馈的实体归属尚未在采集配置中核验")},
         "calibration": {
             "status": "provisional" if calibration_raw else "operator_supplied_pending_audit",
-            "detail": ("当前版本只有 CameraInfo 内参快照，缺少手眼与跨相机外参验收"
+            "detail": ("当前为 CameraInfo 内参快照；训练所需相机身份、安装状态与内参仍须独立验收"
                        if calibration_raw else "操作员填写了标定版本；仍须提供独立验收证据")},
-        "normalization": {
-            "status": "provisional" if normalization_raw else "operator_supplied_pending_audit",
-            "detail": ("当前版本仅约定原始数据字段和单位，尚未计算训练集归一化统计"
-                       if normalization_raw else "操作员填写了归一化版本；仍须核对训练统计及 checkpoint 绑定")},
+        "data_convention": {
+            "status": "declared_pending_audit" if convention_known else "operator_supplied_pending_audit",
+            "detail": ("已记录原始字段、顺序与单位约定；它不是训练归一化统计"
+                       if convention_known else "原始数据约定版本缺少本地来源证据，须独立核对字段、顺序与单位")},
+        "training_normalization": {
+            "status": "not_computed",
+            "required_source_split": "train", "requires_approved_source_audit": True,
+            "requires_checkpoint_binding": True,
+            "detail": "训练归一化统计仅可从通过独立审计的 train 划分计算，并将统计版本和 SHA-256 绑定 checkpoint"},
+        "independent_audit": {
+            "status": "pending",
+            "detail": "正式训练资格须由独立证据和逐 Episode 审计核准；采集声明与版本号不能授予资格"},
     }
-    blockers = [checks[key]["detail"] for key in ("teleoperation_mapping", "calibration", "normalization")
+    blockers = [checks[key]["detail"] for key in (
+        "teleoperation_mapping", "calibration", "data_convention", "training_normalization", "independent_audit")
                 if checks[key]["status"] != "declared_pending_audit"]
     if not time_declared:
         blockers.append(checks["time_domain"]["detail"])
+    declarations = {}
+    if time_declared:
+        declarations["time_domain"] = "unix_ns"
+    if mapping_ready:
+        declarations.update(action_space="absolute_joint_position_7", action_provenance="human_demonstration")
     return {"checks": checks, "blockers": blockers,
-            "metadata_claimable": bool(mapping_ready and not calibration_raw and not normalization_raw)}
+            "declarations": declarations, "metadata_claimable": bool(mapping_ready and time_declared),
+            "training_eligibility": {"eligible": False, "status": "pending_independent_evidence_and_audit"}}
 
 
 def camera_topics(config):
@@ -322,29 +340,37 @@ def start_request(body, config, preview):
         elif arm_mode not in ("LEFT", "RIGHT"):
             raise ValueError("单臂技能须选择 LEFT 或 RIGHT")
         metadata["arm_mode"] = arm_mode
-        for field in ("calibration_version", "normalization_version"):
-            value = body.get(field)
+        provisional = provisional_collection_versions()
+        # Older clients used normalization_version for the raw convention identifier.
+        # Only migrate that known identifier; collection cannot certify training statistics.
+        legacy_version = body.get("normalization_version")
+        if legacy_version is not None and (not isinstance(legacy_version, str) or not legacy_version.strip()
+                or legacy_version.strip() != provisional.get("data_convention_version")):
+            raise ValueError("normalization_version 保留给训练统计；采集请填写 data_convention_version")
+        convention_version = body.get("data_convention_version", legacy_version)
+        if (legacy_version is not None and convention_version != legacy_version):
+            raise ValueError("旧 normalization_version 与 data_convention_version 不一致")
+        for field, value in (("calibration_version", body.get("calibration_version")),
+                             ("data_convention_version", convention_version)):
             if (not isinstance(value, str) or not value.strip() or len(value.strip()) > 120
                     or value.strip().upper().startswith("UNVERIFIED")):
                 raise ValueError(f"{field} 须填写有来源的非空版本号，不能使用 UNVERIFIED 占位值")
             metadata[field] = value.strip()
-        provisional = provisional_collection_versions()
         metadata["collection_version_evidence"] = {
             field: record for field, record in collection_version_evidence().items()
             if metadata.get(field) == provisional.get(field)}
         diagnostics = collection_contract_diagnostics(
-            config, arm_mode, metadata["calibration_version"], metadata["normalization_version"])
+            config, arm_mode, metadata["calibration_version"], metadata["data_convention_version"])
         metadata["collection_contract_checks"] = diagnostics["checks"]
         metadata["collection_contract_blockers"] = diagnostics["blockers"]
+        metadata.update(diagnostics["declarations"])
+        metadata["training_eligibility"] = diagnostics["training_eligibility"]
         if diagnostics["metadata_claimable"]:
-            metadata.update(time_domain="unix_ns", action_space="absolute_joint_position_7",
-                            action_provenance="human_demonstration")
             metadata["collection_contract_status"] = "metadata_ready_pending_data_audit"
         else:
             metadata["collection_contract_status"] = (
-                "training_not_ready_provisional_collection_versions" if any(
-                    metadata.get(field) == version for field, version in provisional.items())
-                else "training_not_ready_unverified_teleoperation_mapping")
+                "training_not_ready_unverified_teleoperation_mapping" if not teleoperation_ready(config, arm_mode)
+                else "training_not_ready_unverified_time_domain")
     required_arms = ("left", "right") if mode == "task" or arm_mode == "BIMANUAL" else (arm_mode.lower(),)
     metadata["initial_conditions"] = {"source": "ros_slave_feedback",
                                       "joint_positions": preview.initial_joint_positions(required_arms)}
@@ -365,6 +391,10 @@ def annotation_request(body, preview):
     elif kind == "recovery_trigger":
         if not isinstance(value, str) or not value.strip() or len(value.strip()) > 200:
             raise ValueError("请填写 1 至 200 字的异常或恢复原因")
+        value = value.strip()
+    elif kind in ("hold_start", "hold_end"):
+        if not isinstance(value, str) or not value.strip() or len(value.strip()) > 200:
+            value = "operator_keep_last_target" if kind == "hold_start" else "operator_release"
         value = value.strip()
     else:
         raise ValueError("未知标注类型")
@@ -429,7 +459,7 @@ def handler_factory(socket_path, preview, config):
                     "contract_diagnostics": {
                         mode: collection_contract_diagnostics(
                             config, mode, provisional.get("calibration_version", ""),
-                            provisional.get("normalization_version", ""))
+                            provisional.get("data_convention_version", ""))
                         for mode in ("LEFT", "RIGHT", "BIMANUAL")}})
             if path.startswith("/camera/") and path.endswith(".jpg"):
                 try:

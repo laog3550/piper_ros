@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "description": "2026-11-05 现场开合记录的采集数据零点和范围；通过 to_lerobot.py --gripper-calibration 显式使用",
+  "unit": "m",
+  "valid_range": {"min": 0.0, "max": 0.1},
+  "evidence_path": "/tmp/piper_mapping_check_20261105_1027",
+  "direction": "opening_increases_value",
+  "arm_mapping": {
+    "left": {"master_target": "/piper_vector/left/master_target", "slave_feedback": "/piper_vector/left/slave_feedback"},
+    "right": {"master_target": "/piper_vector/right/master_target", "slave_feedback": "/piper_vector/right/slave_feedback"}
+  },
+  "streams": {
+    "/piper_vector/left/master_target": {"closed_reference": -0.0027, "observed_open": 0.0992},
+    "/piper_vector/left/slave_feedback": {"closed_reference": -0.0015, "observed_open": 0.0985},
+    "/piper_vector/right/master_target": {"closed_reference": -0.0014, "observed_open": 0.1017},
+    "/piper_vector/right/slave_feedback": {"closed_reference": -0.0011, "observed_open": 0.0996}
+  },
+  "application_status": "available_for_explicit_conversion",
+  "notes": "端点为现场单次操作的稳定读数，不能作为机械指令限位；导出时校正并钳制到 0～100 mm，原始数据不修改。"
+}

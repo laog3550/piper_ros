@@ -31,6 +31,13 @@ def _signal_isolated_cameras(event, context, nodes):
 
 def _start_cameras(context):
     path = Path(LaunchConfiguration('camera_map').perform(context)).expanduser()
+    fps_text = LaunchConfiguration('camera_fps').perform(context)
+    try:
+        fps = int(fps_text)
+    except ValueError as exc:
+        raise RuntimeError(f'camera_fps 必须为整数：{fps_text}') from exc
+    if fps not in (10, 15, 30, 60):
+        raise RuntimeError('camera_fps 只能为 10、15、30 或 60')
     try:
         mapping = json.loads(path.read_text(encoding='utf-8'))
         serials = [mapping[role]['serial'] for role in ROLES]
@@ -47,6 +54,8 @@ def _start_cameras(context):
     if selection not in ('all',) + ROLES:
         raise RuntimeError('camera 必须为 all、left_wrist、right_wrist 或 top')
     selected = ROLES if selection == 'all' else (selection,)
+    if fps == 10 and 'top' in selected:
+        raise RuntimeError('D455 在 640x480 下没有 10 fps 档位；请用 camera_fps:=15 或只启动腕部相机')
     actions = []
     nodes = []
     if mapping.get('position_verified') is not True:
@@ -61,8 +70,8 @@ def _start_cameras(context):
                 'camera_namespace': camera['camera_name'],
                 'camera_name': 'D455',
                 'serial_no': '_' + camera['serial'],
-                'rgb_camera.color_profile': '640,480,30',
-                'depth_module.depth_profile': '640,480,30',
+                'rgb_camera.color_profile': f'640,480,{fps}',
+                'depth_module.depth_profile': f'640,480,{fps}',
                 'enable_color': True,
                 'enable_depth': True,
                 'align_depth.enable': True,
@@ -90,11 +99,11 @@ def _start_cameras(context):
                 'serial_number': camera['serial'],
                 'color_width': 640,
                 'color_height': 480,
-                'color_fps': 30,
+                'color_fps': fps,
                 'color_format': 'YUYV',
                 'depth_width': 640,
                 'depth_height': 480,
-                'depth_fps': 30,
+                'depth_fps': fps,
                 'depth_format': 'Y16',
                 'enable_color': True,
                 'enable_depth': True,
@@ -120,7 +129,7 @@ def _start_cameras(context):
             )
         nodes.append(camera_action)
         group = GroupAction(actions=[
-            LogInfo(msg=f'启动 {role}：{camera["serial"]}，640x480 @ 30 fps RGB-D 流'),
+            LogInfo(msg=f'启动 {role}：{camera["serial"]}，640x480 @ {fps} fps RGB-D 流'),
             camera_action,
         ], scoped=True, forwarding=False)
         actions.append(TimerAction(period=float(index * 4), actions=[group]))
@@ -143,6 +152,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'camera', default_value='all',
             description='启动 all、left_wrist、right_wrist 或 top。',
+        ),
+        DeclareLaunchArgument(
+            'camera_fps', default_value='15',
+            description='三路相机帧率；采集默认 15 fps（D455 无 10 fps 档位），训练转换仍按 10 fps 采样。',
         ),
         OpaqueFunction(function=_start_cameras),
     ])

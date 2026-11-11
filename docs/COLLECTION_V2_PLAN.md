@@ -50,7 +50,9 @@
 
 已合入录制器 v2 标注、Web 实时标注、模块 1 只读检查表、原子技能质量审计与 LeRobot v3 导出、Qwen 规划运行时轨迹钩子、π0.5 原子技能训练准入。集成分支的 Web 合成 ROS 测试通过；LeRobot 转换测试 24 项、VLA 与录制器离线回归 78 项、π0.5 准入测试 7 项、恢复缓存测试 5 项通过。v2 合成 Episode 已走通审计、成功技能转换、外部人工标签与 SFT 数据门禁。这些测试使用合成输入验证软件契约。
 
-Web 单技能采集现在要求显式选择执行臂：香蕉入盒为 `LEFT` 或 `RIGHT`，翻盖与扣盖均为 `BIMANUAL`；并填写非空、非 `UNVERIFIED` 占位的 `calibration_version` 与 `normalization_version`。只有录制配置 `teleoperation` 明确声明 `source=master_slave_teleoperation`、`mapping_verified=true`、`gripper_mapping_verified=true`，且对应臂的主目标和从反馈话题映射与已录话题一致时，Web 才写入 `time_domain=unix_ns`、`action_space=absolute_joint_position_7`、`action_provenance=human_demonstration`。示例配置的验证开关均为 `false`；须在主从端真实遥操作、时间域和夹爪物理映射完成现场核对后才可修改。未验证时界面显示训练未就绪，Episode 元数据也不伪造这三项。即使元数据齐全，仍须通过逐帧来源审计和转换器检查；旧 `task` 请求不要求新增字段。
+Web 与桌面单技能采集要求显式选择执行臂：香蕉入盒为 `LEFT` 或 `RIGHT`，翻盖与扣盖均为 `BIMANUAL`；并填写非空、非 `UNVERIFIED` 占位的 `calibration_version` 与 `data_convention_version`。后者只标识原始字段、顺序和单位，与训练统计专用的 `normalization_version` 分开。采集选用本地有来源且声明 `unix_ns` 的数据约定时，独立记录 `time_domain=unix_ns`；录制配置 `teleoperation` 声明 `source=master_slave_teleoperation`、`mapping_verified=true`、`gripper_mapping_verified=true`，且所选臂的主目标和从反馈映射与已录话题一致时，记录 `action_space=absolute_joint_position_7`、`action_provenance=human_demonstration`。这些是待审计的事实声明，不受暂定相机标定或尚未计算训练统计的门禁影响。
+
+示例配置的验证开关均为 `false`；须在主从端真实遥操作及夹爪物理映射完成现场核对后才可修改。未核验的事实不写入 Episode，原因逐项保留。采集程序始终写入 `training_eligibility.eligible=false`；即使事实声明齐全，仍须独立证据与逐 Episode 来源审计核准正式训练资格。训练归一化统计只能从通过审计并冻结的 `train` 划分计算，保存独立版本及 SHA-256，再绑定实际 checkpoint；原始采集不需要提前填写训练统计版本。既有 Episode 保留原件，不倒填字段；旧 `task` 请求不要求新增字段。详细约定见[桌面采集说明](DESKTOP_SKILL_COLLECTION.md#当前原始采集版本)。
 
 采集控制台实时显示左右从臂六个关节角度；开始录制时自动冻结反馈值、来源话题和时间戳。页面同时显示相机话题的发布者与图像错误，便于区分未启动相机节点、尚未收到图像及编码失败。相机驱动仍由 `ros2 launch piper start_cameras.launch.py` 独立启动；控制台不会替代相机驱动。
 
