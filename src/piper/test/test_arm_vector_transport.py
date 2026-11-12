@@ -11,9 +11,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 def test_missing_source_waits_but_stale_source_keeps_original_header():
     modules = {name: ModuleType(name) for name in
-               ('rclpy', 'rclpy.node', 'rclpy.executors', 'piper_msgs.msg')}
+               ('rclpy', 'rclpy.node', 'rclpy.executors', 'rclpy.qos', 'piper_msgs.msg')}
     modules['rclpy.node'].Node = object
     modules['rclpy.executors'].ExternalShutdownException = RuntimeError
+    modules['rclpy.qos'].QoSProfile = lambda **kwargs: SimpleNamespace(**kwargs)
+    modules['rclpy.qos'].HistoryPolicy = SimpleNamespace(KEEP_LAST=1)
+    modules['rclpy.qos'].ReliabilityPolicy = SimpleNamespace(BEST_EFFORT=2)
+    modules['rclpy.qos'].DurabilityPolicy = SimpleNamespace(VOLATILE=1)
     def message():
         return SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(), frame_id=''),
                                source_stamps=[SimpleNamespace() for _ in range(4)])

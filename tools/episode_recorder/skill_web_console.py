@@ -30,7 +30,7 @@ ARM_TOPICS = {arm: {"master_target": f"/piper_vector/{arm}/master_target",
                     "slave_feedback": f"/piper_vector/{arm}/slave_feedback"}
               for arm in ("left", "right")}
 COLLECTION_VERSION_FILES = {
-    "calibration_version": "collection_camera_info_snapshot.20261110.json",
+    "calibration_version": "collection_camera_info_snapshot.20261112_v2.json",
     "data_convention_version": "collection_data_convention.20261105.json",
 }
 
@@ -82,6 +82,9 @@ def teleoperation_ready(config, arm_mode):
 def collection_contract_diagnostics(config, arm_mode, calibration_version, data_convention_version):
     """Separate recorded source declarations from training acceptance."""
     records = collection_version_records()
+    action_source = config.get("action_source", "master_target")
+    if action_source not in ("master_target", "follower_next_state"):
+        raise ValueError("action_source 必须为 master_target 或 follower_next_state")
     calibration_raw = calibration_version == records.get("calibration_version", {}).get("version_id")
     convention = records.get("data_convention_version", {})
     convention_known = bool(convention and data_convention_version == convention.get("version_id"))
@@ -98,11 +101,15 @@ def collection_contract_diagnostics(config, arm_mode, calibration_version, data_
                        if mapping_ready else "所选执行臂的主从话题或夹爪映射尚未在采集配置中声明已核对")},
         "action_space": {
             "status": "declared_pending_audit" if mapping_ready else "unverified",
-            "detail": ("配置声明七维绝对关节目标；仍须核对原始 CAN 来源和夹爪换算"
+            "detail": (("配置声明从臂反馈下一时刻七维关节位置作为动作；仍须核对原始 CAN 来源和夹爪换算"
+                        if action_source == "follower_next_state"
+                        else "配置声明七维绝对关节目标；仍须核对原始 CAN 来源和夹爪换算")
                        if mapping_ready else "动作空间尚不能根据未核验的主从映射声明")},
         "action_provenance": {
             "status": "declared_pending_audit" if mapping_ready else "unverified",
-            "detail": ("配置声明主端遥操作示教来源；仍须核对实体归属和逐帧来源"
+            "detail": (("配置声明从臂反馈作为示教动作来源；仍须核对实体归属和逐帧来源"
+                        if action_source == "follower_next_state"
+                        else "配置声明主端遥操作示教来源；仍须核对实体归属和逐帧来源")
                        if mapping_ready else "主端动作到从端反馈的实体归属尚未在采集配置中核验")},
         "calibration": {
             "status": "provisional" if calibration_raw else "operator_supplied_pending_audit",
@@ -130,7 +137,11 @@ def collection_contract_diagnostics(config, arm_mode, calibration_version, data_
     if time_declared:
         declarations["time_domain"] = "unix_ns"
     if mapping_ready:
-        declarations.update(action_space="absolute_joint_position_7", action_provenance="human_demonstration")
+        declarations.update(
+            action_space="absolute_joint_position_7",
+            action_provenance=("teleoperation_follower_next_state"
+                               if action_source == "follower_next_state" else "human_demonstration"),
+            action_source=action_source)
     return {"checks": checks, "blockers": blockers,
             "declarations": declarations, "metadata_claimable": bool(mapping_ready and time_declared),
             "training_eligibility": {"eligible": False, "status": "pending_independent_evidence_and_audit"}}
@@ -399,6 +410,13 @@ def annotation_request(body, preview):
     else:
         raise ValueError("未知标注类型")
     request = {"action": "annotate", "kind": kind, "value": value}
+    if body.get("candidate"):
+        topic = body.get("review_source_topic")
+        stamp = body.get("header_stamp_ns")
+        if not isinstance(topic, str) or type(stamp) is not int:
+            raise ValueError("候选完成帧缺少来源话题或 Header")
+        request.update(candidate=True, review_source_topic=topic, header_stamp_ns=stamp)
+        return request
     if body.get("skill_result") == "success" and kind == "skill_complete":
         request["skill_result"] = "success"
     index = body.get("camera_index")

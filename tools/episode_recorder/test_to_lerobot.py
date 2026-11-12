@@ -281,6 +281,53 @@ def test_twenty_topic_can_vector_episode(tmp_path):
     assert len(frames[0]["__source_header_ns__"]) == 7
 
 
+def test_follower_next_state_uses_feedback_when_master_target_has_gap(tmp_path):
+    def drop_master(topic, index, message):
+        if topic == converter.CAN_ACTIONS["left"] and 40 <= index <= 60:
+            return None
+        return message
+
+    episode = vector_fixture(tmp_path, "episode_000001", frame_count=100, transform=drop_master)
+    master_meta, master_frames = converter.read_episode(
+        episode, ["left", "right"], 10, 30_000_000, 2_000_000,
+        input_format="can-vector", extract_valid_segments=True,
+        max_source_skew_ns=30_000_000, require_training_contract=False)
+    assert not any(item["meets_16_step_window"] for item in master_meta["_quality"]["segments"])
+
+    meta, frames = converter.read_episode(
+        episode, ["left", "right"], 10, 30_000_000, 2_000_000,
+        input_format="can-vector", extract_valid_segments=True,
+        max_source_skew_ns=30_000_000,
+        require_training_contract=False, action_source="follower_next_state")
+    assert meta["_quality"]["action_source"] == "follower_next_state"
+    assert meta["_quality"]["alignment_policy"] == converter.FOLLOWER_ALIGNMENT_POLICY
+    assert len(frames) == 20
+    assert len(meta["_quality"]["segments"]) == 1
+    assert meta["_quality"]["segments"][0]["frames"] >= 16
+    topic = converter.CAN_STATES["left"]
+    for frame in frames:
+        assert frame["__action_source_header_ns__"][topic] > frame["__source_header_ns__"][topic]
+    assert frames[0]["action"].tolist() == frames[1]["observation.state"].tolist()
+
+
+def test_follower_next_state_contract_requires_matching_provenance(tmp_path):
+    episode = vector_fixture(tmp_path, "episode_000001")
+    meta = json.loads((episode / "episode.json").read_text(encoding="utf-8"))
+    fields = meta["task_metadata"]
+    fields.update(action_source="follower_next_state",
+                  action_provenance="teleoperation_follower_next_state")
+    assert converter.training_contract_reasons(meta, "BIMANUAL", (), "follower_next_state") == []
+    assert converter.training_contract_reasons(meta, "BIMANUAL", (), "master_target")
+
+    legacy = json.loads(json.dumps(meta))
+    legacy["task_metadata"].pop("action_source")
+    legacy["task_metadata"]["action_provenance"] = "human_demonstration"
+    assert converter.training_contract_reasons(legacy, "BIMANUAL", (), "follower_next_state")
+    accepted = {"action_provenance": {"status": "verified"}}
+    assert converter.training_contract_reasons(legacy, "BIMANUAL", accepted,
+                                               "follower_next_state") == []
+
+
 def test_can_vector_gripper_calibration_preserves_arm_mapping(tmp_path):
     calibration = converter.load_gripper_calibration(
         Path(__file__).parents[2] / "config/gripper_collection_calibration.20261105.json")
@@ -446,16 +493,16 @@ def test_stale_duplicate_headers_split_without_rewriting_sources(tmp_path):
                                input_format="can-vector")
     meta, frames = read_segments(episode)
     segments = meta["_quality"]["segments"]
-    assert [item["frames"] for item in segments] == [19, 20]
+    assert [item["frames"] for item in segments] == [20, 20]
     assert all(item["meets_16_step_window"] for item in segments)
-    assert [item["window_count"] for item in segments] == [4, 5]
+    assert [item["window_count"] for item in segments] == [5, 5]
     assert sum(item["count"] for item in meta["_quality"]["rejected_vector_messages"]) == 10
     assert all("stale" in item["reason"] for item in meta["_quality"]["rejected_vector_messages"])
     base = 1_800_000_100_000_000_000
-    assert frames[19]["__target_timestamp_ns__"] == base + 3_000_000_000
-    assert frames[19]["__source_header_ns__"][converter.CAN_ACTIONS["left"]] == base + 3_000_000_000
+    assert frames[19]["__target_timestamp_ns__"] == base + 1_900_000_000
+    assert frames[19]["__source_header_ns__"][converter.CAN_ACTIONS["left"]] == base + 1_900_000_000
     assert frames[19]["__source_can_stamps_ns__"][converter.CAN_ACTIONS["left"]] == [
-        base + 3_000_000_000 - offset * 1_000_000 for offset in (3, 2, 1, 0)]
+        base + 1_900_000_000 - offset * 1_000_000 for offset in (3, 2, 1, 0)]
     assert all(flags["raw_valid"] for frame in frames for flags in frame["__source_vector_quality__"].values())
     assert before == converter.source_digest(episode)
 
@@ -584,7 +631,7 @@ def test_segment_audit_keeps_provisional_candidates_ineligible(tmp_path):
     assert not strict["eligible"] and "stale" in " ".join(strict["reasons"])
     row = audit.audit_native(episode, max_source_skew_ms=30, extract_valid_segments=True)
     assert row["eligible"] and row["eligible_frame_count"] == 20
-    assert row["candidate_segment_count"] == 2 and row["candidate_frame_count"] == 39
+    assert row["candidate_segment_count"] == 2 and row["candidate_frame_count"] == 40
     path = episode / "episode.json"
     meta = json.loads(path.read_text(encoding="utf-8"))
     meta["task_metadata"].pop("normalization_version")
@@ -592,7 +639,7 @@ def test_segment_audit_keeps_provisional_candidates_ineligible(tmp_path):
     path.write_text(json.dumps(meta), encoding="utf-8")
     row = audit.audit_native(episode, max_source_skew_ms=30, extract_valid_segments=True)
     assert not row["eligible"] and row["eligible_frame_count"] == 0
-    assert row["candidate_segment_count"] == 2 and row["candidate_frame_count"] == 39
+    assert row["candidate_segment_count"] == 2 and row["candidate_frame_count"] == 40
     assert row["normalization_version"] is None
     assert row["training_normalization"]["status"] == "not_computed"
     assert not row["training_ready"]
@@ -606,7 +653,7 @@ def test_data_convention_is_not_training_normalization():
     assert "原始字段约定不能用作训练 normalization_version" in converter.training_contract_reasons(meta, "LEFT")
 
 
-@pytest.mark.parametrize("success_sft,counts", [(False, [19, 20]), (True, [20])])
+@pytest.mark.parametrize("success_sft,counts", [(False, [20, 20]), (True, [20])])
 def test_segmented_real_lerobot_roundtrip(tmp_path, success_sft, counts):
     """真实 v3 中各片段独立存储；Header 与场景组划分可以回溯。"""
     from types import SimpleNamespace

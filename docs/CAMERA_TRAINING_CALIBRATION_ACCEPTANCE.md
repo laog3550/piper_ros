@@ -146,13 +146,68 @@ ros2 bag record -o /home/mips/pi05_datas/validation/camera_geometry_YYYYMMDD_v1 
 
 目标目录须不存在；正常结束并确认所有录制文件关闭后，按文件排序保存 `metadata.yaml`、全部分片及板/姿态记录的 SHA-256。ROS 接收时间和 Header 时间分开保存，不能以 bag 写入时间代替曝光或关节源时间。单次静止场景留档不足以求解手眼。
 
-## 2026-11-10 当前启动批次验收
+## 2026-11-10 启动批次验收
 
 三路驱动于 2026-11-10 重新启动。新采集的[只读证据包](/home/mips/pi05_datas/validation/camera_evidence_20261110_v3/manifest.json)核对了设备实际序列号、USB 枚举、唯一发布者、`640×480 rgb8`、CameraInfo 与 RGB 时间配对；三路自动检查均通过。操作者在本对话中确认左腕、右腕和顶部安装角色、固定件、镜头方向及任务视野。确认结果绑定本次三张原图、设备序列号和安装批次，保存在[安装复核记录](/home/mips/pi05_datas/validation/camera_mount_review_20261110_v3.json)。最终[审计结果](/home/mips/pi05_datas/validation/camera_training_acceptance_20261110_v3.json)为 `training_camera_evidence_ready=true`。
 
 顶部 D455 的 `K/P` 与 2026-11-05、2026-11-06 快照不同。本次启动的两份独立采样中值相同，左右腕参数也与旧版一致。已保留旧快照，另建[`collection_camera_info_snapshot.20261110.json`](../config/collection_camera_info_snapshot.20261110.json)与[`camera_training_contract.v2.20261110.json`](../config/camera_training_contract.v2.20261110.json)，将本次实际 CameraInfo 作为新版本；没有推断数值变化的物理原因，也没有放宽比较门限。新启动批次若再变化，须重新采证和版本化，不能沿用本次通过结论。
 
 该结论仅适用于当前**原始 RGB + 关节绝对位置**训练输入的相机来源，见[状态索引](../config/camera_calibration_status.20261110.json)。两台 Orbbec 的 `plumb_bob + D[8]` 警告保留；内参几何精度、手眼、跨相机外参及运动规划几何仍未验收。每条新 Episode 仍须绑定相机来源并接受逐帧审计，不能由这份相机通过记录直接获得训练资格。
+
+## 2026-11-12 重新采证与 Episode 绑定
+
+相机驱动在 2026-11-11 14:12～14:18 重启，11-10 的证据不再直接覆盖当前启动批次。2026-11-12 以相同契约和 11-10 内参快照重新采集[只读证据包](/home/mips/pi05_datas/validation/camera_evidence_20261112_v1/manifest.json)：三路设备序列号、USB 枚举、唯一发布者、`640×480 rgb8`、CameraInfo 稳定性及与 `camera_info_snapshot_20261110_v1` 的逐项一致性均通过，`capture.json` 哈希为 `8d9dfcf307449cc176acedc59d6c6fd23d46aa52a1ade5cb7e16965290e6ef93`。
+
+安装角色复核记录为[`camera_mount_review_20261112_v1.json`](/home/mips/pi05_datas/validation/camera_mount_review_20261112_v1.json)，沿用同一物理安装批次 `piper_camera_installation_20261110_operator_confirmed_v1`，绑定本次三张原图、实际序列号与画面观察。本次复核由 ZCode 只读完成，不是新的现场人工确认；若流程要求具名人工复核人，须由操作者补签。
+
+[审计结果](/home/mips/pi05_datas/validation/camera_training_acceptance_20261112_v1.json)为 `training_camera_evidence_ready=true`，状态索引为 [`camera_calibration_status.20261112.json`](../config/camera_calibration_status.20261112.json)。本批次未观察到 CameraInfo 相对 11-10 快照的变化，因此继续使用 `camera_info_snapshot_20261110_v1`；该结论不证明内参几何精度、手眼或外参，仍只适用于原始 RGB + 关节绝对位置训练路径。
+
+episode_000005 已按[`episode_9edb3410_camera_binding_20261112.json`](/home/mips/pi05_datas/validation/episode_9edb3410_camera_binding_20261112.json)绑定本批次三路 CameraInfo 与相机证据；带[`episode_9edb3410_source_acceptance_20261112.json`](/home/mips/pi05_datas/validation/episode_9edb3410_source_acceptance_20261112.json)重跑来源审计得到 `eligible=true`。逐 Episode 同步、动作来源、技能结果、数据划分与训练统计仍按各自门禁验收。
+
+跨相机曝光相位不在本证据包口径内。episode_000007 的顶部—左腕相位差中位约 29.2 ms、p95 约 33.0 ms，超过当时的 30 ms 门禁；2026-11-12 当前采集/SFT 阈值已放宽到 40 ms，30 ms 保留为严格模式。D455 主/Orbbec 从的 launch 配置和验证步骤见[三路相机硬件同步](CAMERA_HARDWARE_SYNC_D455_MASTER_20261112.md)；该配置默认 `standalone`，需现场接线后显式启用。
+
+## 2026-11-12 30 fps 批次验收
+
+2026-11-12 12:54 为减小跨相机相位窗口，三路相机以 30 fps 重新启动。该启动批次顶部 D455 的 `fx/fy` 从 `388.13635/387.57257` 变为 `388.66394/388.09937`，变化约 **0.5276 px**；`D`、左腕和右腕参数不变。按“新启动批次须重新采证和版本化”的约定，旧 15 fps 批次的验收不能覆盖本次 30 fps 批次。
+
+本次新建：
+
+- 内参快照：[`collection_camera_info_snapshot.20261112.json`](../config/collection_camera_info_snapshot.20261112.json)，版本 `camera_info_snapshot_20261112_v1`。
+- 契约：[`camera_training_contract.v3.20261112.json`](../config/camera_training_contract.v3.20261112.json)，版本 `piper_rgb_joint_camera_contract_v3_20261112_30fps`。
+- 证据包：[`camera_evidence_20261112_v2`](/home/mips/pi05_datas/validation/camera_evidence_20261112_v2/manifest.json)，三路自动检查均通过。
+- 安装复核：[`camera_mount_review_20261112_v2.json`](/home/mips/pi05_datas/validation/camera_mount_review_20261112_v2.json)，沿用同一物理安装批次；复核人为 ZCode 只读复核。
+- 验收报告：[`camera_training_acceptance_20261112_v2.json`](/home/mips/pi05_datas/validation/camera_training_acceptance_20261112_v2.json)，`training_camera_evidence_ready=true`。
+- 状态索引：[`camera_calibration_status.20261112_v2.json`](../config/camera_calibration_status.20261112_v2.json)。
+
+控制台 `COLLECTION_VERSION_FILES` 的 `calibration_version` 已指向新快照，默认启动版本为 `camera_info_snapshot_20261112_v1`。旧 15 fps 批次（episode_000005～000007）继续保留 `camera_info_snapshot_20261110_v1` 和原验收；episode_000008 是在 30 fps 重启后、但新版本建立前录制，其元数据仍声明旧版本，顶部内参与旧快照不符，需用新版本重采。
+
+## 2026-11-12 15 fps 纯彩色固定曝光/白平衡批次验收
+
+30 fps 深度+彩色在当前主机上会使 Orbbec 发布帧率塌陷（1–13 fps），30 fps 纯彩色也只能到约 20 fps，且控制台多次重启后 Fast DDS 共享内存/端口资源被污染。最终采集配置改为 **15 fps、关闭深度、固定曝光与固定白平衡**：
+
+- 相机：`camera_fps:=15 enable_depth:=false`；三路稳定 15.0–15.2 fps。
+- 曝光：D455 顶部固定 80 µs、gain 32、白平衡 4000K；Orbbec 左右腕固定 100、gain 0、白平衡 4600K。
+- 自动曝光与自动白平衡均关闭：`rgb_camera.enable_auto_exposure=false`、`rgb_camera.enable_auto_white_balance=false`、`enable_color_auto_exposure=false`、`enable_color_auto_white_balance=false`。
+- 证据：[`camera_evidence_20261112_v7`](/home/mips/pi05_datas/validation/camera_evidence_20261112_v7/manifest.json)，三路自动检查通过。
+- 安装复核：[`camera_mount_review_20261112_v7.json`](/home/mips/pi05_datas/validation/camera_mount_review_20261112_v7.json)。
+- 验收：[`camera_training_acceptance_20261112_v7.json`](/home/mips/pi05_datas/validation/camera_training_acceptance_20261112_v7.json)，`training_camera_evidence_ready=true`。
+- 状态：[`camera_calibration_status.20261112_v7.json`](../config/camera_calibration_status.20261112_v7.json)。
+
+30 fps 批次（v2）、15 fps 自动曝光批次（v3）、15 fps 固定曝光但自动白平衡批次（v4）、顶部 4600K 批次（v5）、顶部 166 µs 批次（v6）保留为历史证据；v7 是顶部实际 16.59 fps 的启动批次，保留给 episode 8/9。当前新 Episode 应绑定 **v8** 验收和 `camera_info_snapshot_20261112_v2`。15 fps 顶部—左腕 p95 约 33 ms，使用 40 ms 阈值；30 ms 严格模式仍可显式指定。30 fps 不再作为当前采集配置。
+
+## 2026-11-12 顶部 15 fps 锁定批次验收（v8）
+
+现场发现 v7 批次顶部 D455 在 `640x480@15`、固定曝光、standalone 且关闭深度时实际输出 **16.59 fps**。通过 `top_fps_lock`（深度 + 主触发，不启用 align_depth）锁定为 15.0 fps 后，相机重启产生新的启动批次：
+
+- 顶部 K 从 v1 的 `fx=388.6639, fy=388.0994` 变为 `fx=388.4529, fy=387.8886`（约 0.211 px）；D、左腕和右腕不变。
+- 内参快照：[`collection_camera_info_snapshot.20261112_v2.json`](../config/collection_camera_info_snapshot.20261112_v2.json)，版本 `camera_info_snapshot_20261112_v2`。
+- 契约：[`camera_training_contract.v4.20261112.json`](../config/camera_training_contract.v4.20261112.json)，版本 `piper_rgb_joint_camera_contract_v4_20261112_15fps_lock`。
+- 证据包：[`camera_evidence_20261112_v8`](/home/mips/pi05_datas/validation/camera_evidence_20261112_v8/manifest.json)；顶部 14.988 fps、左腕/右腕 15.008 fps，三路 K 与快照逐项一致。
+- 安装复核：[`camera_mount_review_20261112_v8.json`](/home/mips/pi05_datas/validation/camera_mount_review_20261112_v8.json)。
+- 验收：[`camera_training_acceptance_20261112_v8.json`](/home/mips/pi05_datas/validation/camera_training_acceptance_20261112_v8.json)，`training_camera_evidence_ready=true`。
+- 状态：[`camera_calibration_status.20261112_v8.json`](../config/camera_calibration_status.20261112_v8.json)。
+
+控制台默认 `calibration_version` 已切到 `camera_info_snapshot_20261112_v2`。该批次仍只验收原始 RGB + 关节绝对位置训练路径的相机来源；内参几何精度、手眼、外参和运动规划几何未验收。
 
 ## 工具验证
 

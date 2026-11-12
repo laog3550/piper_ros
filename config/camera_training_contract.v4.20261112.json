@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "version_id": "piper_rgb_joint_camera_contract_v4_20261112_15fps_lock",
+  "purpose": "仅验收原始 RGB + 关节绝对位置训练的相机证据；不声明内参几何精度、手眼、跨相机外参或机器人运动安全",
+  "input_profile": "raw_rgb_joint_absolute_position",
+  "baseline_sources": {
+    "camera_map_sha256": "4f6e19311ce7ce1a25259e94e1745fa30e82da6a8155d86def9cd7b56dad3ca7",
+    "camera_info_sha256": "1673057336183d40616b9cc5bf0a6afb0d346bc8712006a24aadc66b02022f7b",
+    "camera_info_source_capture_sha256": "74df52a98829001779493c827e953b48b760c909f5e310b8e2a559b3f33a2650",
+    "previous_camera_info_sha256": "fd561ce5a731ccb76854f71f2a791447ad7305ad3bbdb62e1553cdd1bb683c41"
+  },
+  "limits": {
+    "width": 640,
+    "height": 480,
+    "encoding": "rgb8",
+    "max_rgb_info_skew_ns": 30000000,
+    "min_messages_per_stream": 10,
+    "intrinsic_absolute_tolerance": 1e-06
+  },
+  "cameras": {
+    "left_wrist": {
+      "node": "/camera_wrist_left/camera_wrist_left",
+      "rgb_topic": "/camera_wrist_left/color/image_raw",
+      "info_topic": "/camera_wrist_left/color/camera_info",
+      "frame_id": "camera_wrist_left_color_optical_frame",
+      "device_service": "/camera_wrist_left/get_device_info",
+      "device_service_type": "orbbec_camera_msgs/srv/GetDeviceInfo"
+    },
+    "right_wrist": {
+      "node": "/camera_wrist_right/camera_wrist_right",
+      "rgb_topic": "/camera_wrist_right/color/image_raw",
+      "info_topic": "/camera_wrist_right/color/camera_info",
+      "frame_id": "camera_wrist_right_color_optical_frame",
+      "device_service": "/camera_wrist_right/get_device_info",
+      "device_service_type": "orbbec_camera_msgs/srv/GetDeviceInfo"
+    },
+    "top": {
+      "node": "/camera_top/D455",
+      "rgb_topic": "/camera_top/D455/color/image_raw",
+      "info_topic": "/camera_top/D455/color/camera_info",
+      "frame_id": "D455_color_optical_frame",
+      "device_service": "/camera_top/D455/device_info",
+      "device_service_type": "realsense2_camera_msgs/srv/DeviceInfo"
+    }
+  },
+  "mount_review_required": true,
+  "geometry_status": "not_evaluated",
+  "training_does_not_require": [
+    "用于该输入路径的左右腕手眼外参",
+    "用于该输入路径的顶部到机器人或桌面外参",
+    "用于该输入路径的三相机共同坐标系",
+    "未作为输入的深度尺度和 RGB-Depth 对齐精度"
+  ],
+  "separate_requirements": [
+    "每条 Episode 的相机身份、安装批次和本证据包哈希关联",
+    "逐帧 RGB、关节状态、人类目标动作时间配对",
+    "主从实体归属、夹爪单位、零点与正方向",
+    "技能文本、完成帧、结果、数据划分和训练集归一化统计",
+    "使用去畸变、深度反投影、跨视角融合或机器人坐标目标时另行验收相应几何证据"
+  ],
+  "version_note": "2026-11-12 顶部 D455 15 fps 锁定启动批次：顶部固定曝光 standalone 实际输出 16.59 fps，改为 depth + 主触发后 15.0 fps；顶部 K/P 随启动批次变化，新建快照 v2 和契约 v4。不声明内参几何精度、手眼或跨相机外参。"
+}

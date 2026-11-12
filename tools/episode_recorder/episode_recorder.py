@@ -4,6 +4,7 @@
 import argparse
 import copy
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -24,7 +25,8 @@ from piper_msgs.srv import StartEpisode
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 from completion_validation import (supports_source_validation, validate_completion,
-                                   header_receive_ns)
+                                   header_receive_ns, recorded_image_preview)
+from startup_readiness import StartupReadiness
 from vlm_annotations import (required_text, validate_annotation, validate_plan,
                              validate_plan_link, validate_skill_context)
 
@@ -33,6 +35,23 @@ SKILLS = ("pick_and_place_banana_in_box", "flip_box_lid_bimanual", "latch_box_li
 ANNOTATION_KINDS = ("skill_start", "skill_complete", "outcome", "recovery_trigger",
                     "hold_start", "hold_end")
 CLOCK_STEP_THRESHOLD_NS = 50_000_000
+# The socket loop is also the only place that services the live master-target
+# subscription and the terminal-stale check.  Keep the accept timeout well
+# below the freshness window: at 0.2 s the last stale callback is already
+# older than the 0.1 s window when status() runs, so auto-trim never fires.
+LIVE_STALE_FRESHNESS_NS = 100_000_000
+RECORDER_STATUS_POLL_SEC = 0.05
+
+
+def drain_ros_callbacks(node, limit=32, budget_sec=0.005):
+    """Bound callback work while draining more than one source per socket poll."""
+    executor = rclpy.get_global_executor()
+    executor.add_node(node)
+    deadline = time.monotonic() + budget_sec
+    for _ in range(limit):
+        executor.spin_once(timeout_sec=0)
+        if time.monotonic() >= deadline:
+            break
 
 
 def atomic_json(path, data):
@@ -47,6 +66,26 @@ def atomic_json(path, data):
 def load_json(path):
     with open(path, encoding="utf-8") as stream:
         return json.load(stream)
+
+
+def write_storage_config(path):
+    """Allow nonblocking startup reads while cached rosbag batches are written."""
+    path.write_text('write:\n  pragmas: ["busy_timeout=5000", "journal_mode=WAL", '
+                    '"synchronous=NORMAL"]\n', encoding='utf-8')
+    return path
+
+
+def gripper_calibration_evidence(path):
+    """Pin the exact calibration chosen by the recording configuration."""
+    from to_lerobot import load_gripper_calibration
+    path = Path(path).expanduser().resolve()
+    raw = path.read_bytes()
+    settings = load_gripper_calibration(path)
+    if path.read_bytes() != raw:
+        raise ValueError("读取期间夹爪标定发生变化，请重新开始")
+    canonical = json.dumps(settings, sort_keys=True, separators=(",", ":")).encode()
+    return {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(),
+            "settings_sha256": hashlib.sha256(canonical).hexdigest(), "settings": settings}
 
 
 def write_qos_overrides(path, topics, depth):
@@ -86,24 +125,51 @@ def add_save_outcome_annotation(metadata, outcome, reviewed_at_unix_ns):
 
 
 def require_verified_skill_completion(metadata, outcome):
-    """Require a recorded completion frame before saving a successful v2 skill."""
+    """SFT-only gate. Raw saving records the status instead of calling this."""
     if (metadata.get("schema_version") != 2 or metadata.get("mode") != "skill"
             or outcome != "success"):
         return
+    status = assess_training_eligibility(metadata, outcome)
+    if status["status"] == "completion_pending":
+        raise ValueError("成功保存前须有唯一且已在 rosbag 核验的当前技能完成帧；请补标")
+    if status["status"] == "sft_frame_gate_failed":
+        raise ValueError("成功保存前完成帧须通过来源时效、同步及连续 16 步检查；请复核完成帧")
+
+
+def assess_training_eligibility(metadata, outcome):
+    """Report the SFT frame gate without blocking raw episode preservation."""
+    if metadata.get("schema_version") != 2 or metadata.get("mode") != "skill":
+        return {"eligible": False, "status": "not_skill_episode", "reasons": []}
+    if outcome != "success":
+        return {"eligible": False, "status": "not_success", "reasons": []}
     completes = [item for item in metadata.get("annotations", [])
                  if item.get("kind") == "skill_complete"]
-    if (len(completes) != 1 or completes[0].get("value") != metadata.get("skill")
-            or completes[0].get("verified_in_bag") is not True
-            or not completes[0].get("source_topic")
-            or type(completes[0].get("header_stamp_ns")) is not int):
-        raise ValueError("成功保存前须有唯一且已在 rosbag 核验的当前技能完成帧；请补标")
-    if supports_source_validation(metadata):
-        proof = completes[0].get("source_validation") or {}
-        if (proof.get("alignment_policy") != "causal_rgb_bundle_v1"
-                or proof.get("header_stamp_ns") != completes[0]["header_stamp_ns"]
-                or proof.get("source_topic") != completes[0]["source_topic"]
-                or type(proof.get("contiguous_frames")) is not int or proof["contiguous_frames"] < 16):
-            raise ValueError("成功保存前完成帧须通过来源时效、同步及连续 16 步检查；请复核完成帧")
+    if len(completes) != 1 or completes[0].get("value") != metadata.get("skill"):
+        return {"eligible": False, "status": "completion_pending",
+                "reasons": ["缺少唯一且与当前技能匹配的已确认完成帧"]}
+    item = completes[0]
+    reasons = []
+    if item.get("verified_in_bag") is not True:
+        reasons.append("完成帧未在 rosbag 核验")
+    if item.get("frame_verification_error"):
+        reasons.append(item["frame_verification_error"])
+    if item.get("source_validation_error"):
+        reasons.append(item["source_validation_error"])
+    proof = item.get("source_validation")
+    if not isinstance(proof, dict):
+        reasons.append("完成帧缺少来源连续性及 16 步校验")
+    else:
+        if proof.get("alignment_policy") not in ("causal_rgb_bundle_v1",
+                                                  "causal_follower_next_state_v1"):
+            reasons.append("完成帧对齐策略不匹配")
+        frames = proof.get("contiguous_frames")
+        if type(frames) is not int or frames < 16:
+            reasons.append(f"完成帧所在连续片段 {frames} 帧，少于 16")
+    if reasons:
+        return {"eligible": False, "status": "sft_frame_gate_failed", "reasons": reasons}
+    return {"eligible": False, "status": "sft_frame_gate_passed",
+            "frame_gate_passed": True, "scope": "completion_frame_only",
+            "reasons": ["完成帧门禁通过，仍须独立来源验收、数据集划分和训练统计检查"]}
 
 
 def required_topics_for_episode(topics, mode, metadata):
@@ -204,14 +270,18 @@ def recorded_frame_near(bag_dir, topic, target_ns, start_ns, stop_ns):
     return nearest[1], nearest[2]
 
 
-def recorded_header_exists(bag_dir, topic, header_ns, start_ns, stop_ns):
+def recorded_header_exists(bag_dir, topic, header_ns, start_ns, stop_ns, *, receive_stop_ns=None):
+    """Bound the image Header by the task, and receipt by the physical recording."""
+    if not start_ns <= header_ns <= stop_ns:
+        return False
+    receive_stop_ns = stop_ns if receive_stop_ns is None else receive_stop_ns
     for path in sorted(bag_dir.glob("*.db3")):
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
             rows = connection.execute(
                 "SELECT substr(messages.data, 1, 12) FROM messages "
                 "JOIN topics ON messages.topic_id=topics.id "
                 "WHERE topics.name=? AND messages.timestamp BETWEEN ? AND ?",
-                (topic, start_ns, stop_ns))
+                (topic, start_ns, receive_stop_ns))
             for (prefix,) in rows:
                 if len(prefix) < 12 or prefix[:1] != b"\0" or prefix[1] not in (0, 1):
                     continue
@@ -313,6 +383,23 @@ def terminal_stale_master_target(bag_dir, arm, start_ns, stop_ns):
     return tail
 
 
+def classify_master_target(message, arm):
+    """Classify a decoded master vector for live terminal-stale detection."""
+    quality_ok = (
+        bool(message.gripper_mapping_verified) and not any(message.missing)
+        and not bool(message.time_inconsistent)
+        and message.source_topic == f"/piper_direct/{arm}/master_target"
+        and message.header.frame_id == f"can_{arm}"
+        and list(message.source_can_ids) == [0x155, 0x156, 0x157, 0x159])
+    if not quality_ok:
+        return "reset"
+    if bool(message.valid) and not any(message.stale):
+        return "valid"
+    if not bool(message.valid) and any(message.stale):
+        return "stale"
+    return "reset"
+
+
 def recorded_frame_before_header(bag_dir, topic, boundary_ns, start_ns, stop_ns):
     """Choose an actual RGB Header strictly before the final target's stale boundary."""
     latest = None
@@ -340,6 +427,7 @@ def recorded_frame_before_header(bag_dir, topic, boundary_ns, start_ns, stop_ns)
 
 class Recorder:
     def __init__(self, config):
+        self.gripper_calibration_path = config.get("gripper_calibration_path")
         self.root = Path(config["output_dir"]).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.staging = self.root / ".staging"
@@ -385,6 +473,26 @@ class Recorder:
             if (isinstance(value, bool) or not isinstance(value, (int, float))
                     or not math.isfinite(value) or value <= 0):
                 raise ValueError(f"{name} 必须为正数")
+        self.auto_trim_stale_tail = config.get("auto_trim_stale_tail", False)
+        if not isinstance(self.auto_trim_stale_tail, bool):
+            raise ValueError("auto_trim_stale_tail 必须为布尔值")
+        self.stale_stop_grace_sec = config.get("stale_stop_grace_sec", 1.0)
+        if (isinstance(self.stale_stop_grace_sec, bool)
+                or not isinstance(self.stale_stop_grace_sec, (int, float))
+                or not math.isfinite(self.stale_stop_grace_sec)
+                or not 0.2 <= self.stale_stop_grace_sec <= 10):
+            raise ValueError("stale_stop_grace_sec 必须为 0.2 至 10 秒的有限数值")
+        self.max_camera_skew_ms = config.get("max_camera_skew_ms", 40)
+        self.max_source_skew_ms = config.get("max_source_skew_ms", 40)
+        for name, value in (("max_camera_skew_ms", self.max_camera_skew_ms),
+                            ("max_source_skew_ms", self.max_source_skew_ms)):
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or not 0 < value <= 100):
+                raise ValueError(f"{name} 必须为 0 至 100 的正数")
+        if self.max_source_skew_ms < self.max_camera_skew_ms:
+            raise ValueError("max_source_skew_ms 不能小于 max_camera_skew_ms")
+        self._master_monitor = {}
+        self._master_subscriptions = []
         self.socket_path = Path(config.get("socket_path", str(self.root / "recorder.sock"))).expanduser().resolve()
         self.lock = (self.root / ".recorder.lock").open("w")
         fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -490,7 +598,6 @@ class Recorder:
         return snapshot
 
     def _graph_ready(self, node_name):
-        time.sleep(0.1)
         publishers = self._publisher_snapshot()
         for topic in self.metadata.get("required_topics", self.topics):
             subs = self.node.get_subscriptions_info_by_topic(topic)
@@ -498,6 +605,42 @@ class Recorder:
                 return False
         self.metadata["source_publishers_at_ready"] = publishers
         return True
+
+    def _start_data_monitor(self):
+        required = self.metadata['required_topics']
+        topics = [topic for topic in required if topic in self.frame_topics
+                  or topic.endswith('/color/camera_info')
+                  or (topic.startswith('/piper_vector/') and topic.endswith('/slave_feedback'))]
+        self._startup_subscriptions = []
+        if not topics:
+            return StartupReadiness(())
+        from rclpy.serialization import deserialize_message
+        from rclpy.qos import QoSProfile, ReliabilityPolicy
+        from rosidl_runtime_py.utilities import get_message
+        vector_type = get_message('piper_msgs/msg/PiperArmVector')
+
+        def validate_vector(raw):
+            message = deserialize_message(raw, vector_type)
+            if (not message.valid or any(message.stale) or any(message.missing)
+                    or message.time_inconsistent or len(message.position) != 7
+                    or not all(math.isfinite(value) for value in message.position)):
+                raise ValueError('从臂反馈不完整、过期或数值无效')
+
+        monitor = StartupReadiness(topics, validate_vector)
+        qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+        for topic in topics:
+            msgtype = ('piper_msgs/msg/PiperArmVector' if topic.startswith('/piper_vector/') else
+                       'sensor_msgs/msg/CameraInfo' if topic.endswith('/camera_info') else
+                       'sensor_msgs/msg/Image')
+            self._startup_subscriptions.append(self.node.create_subscription(
+                get_message(msgtype), topic, lambda raw, topic=topic: monitor.observe(topic, raw),
+                qos, raw=True))
+        return monitor
+
+    def _clear_startup_monitor(self):
+        for subscription in getattr(self, '_startup_subscriptions', ()):
+            self.node.destroy_subscription(subscription)
+        self._startup_subscriptions = []
 
     def start(self, request):
         if self.current is not None:
@@ -516,6 +659,8 @@ class Recorder:
         if not isinstance(fields, dict):
             raise ValueError("metadata 必须是 JSON 对象")
         fields = dict(fields)
+        if getattr(self, "gripper_calibration_path", None):
+            fields["gripper_calibration_evidence"] = gripper_calibration_evidence(self.gripper_calibration_path)
         if mode == "skill" and "vlm" not in fields and skill not in SKILLS:
             raise ValueError("skill 不在固定技能集中")
         if "vlm" in fields:
@@ -546,8 +691,10 @@ class Recorder:
         self.deadline_monotonic_ns = None
         self.current = self.staging / uuid.uuid4().hex
         self.current.mkdir()
+        storage_path = write_storage_config(self.current / 'recording_storage.yaml')
         qos_topics = [topic for topic in self.topics
-                      if topic.startswith(("/piper_direct/", "/piper_vector/"))]
+                      if topic.startswith(("/piper_direct/", "/piper_vector/"))
+                      and topic.rsplit("/", 1)[-1] in ("master_target", "slave_feedback")]
         qos_path = None
         if self.raw_can_qos_depth and qos_topics:
             qos_path = write_qos_overrides(
@@ -566,16 +713,43 @@ class Recorder:
             "rosbag_cache_bytes": self.rosbag_cache_bytes,
             "raw_can_qos_depth": self.raw_can_qos_depth,
             "qos_profile_overrides": qos_path.name if qos_path else None,
+            "storage_config": storage_path.name,
+            "storage_policy": "sqlite_wal_normal_busy_timeout_5000_v1",
             "hold_policy": {"source": "operator_annotation",
                             "max_hold_sec": self.hold_max_sec,
                             "anchor_max_gap_sec": self.hold_anchor_max_gap_sec},
+            "auto_trim_stale_tail": getattr(self, "auto_trim_stale_tail", False),
+            "stale_stop_grace_sec": getattr(self, "stale_stop_grace_sec", 1.0),
+            "skew_thresholds": {
+                "max_camera_skew_ms": getattr(self, "max_camera_skew_ms", 40),
+                "max_source_skew_ms": getattr(self, "max_source_skew_ms", 40),
+            },
             "started_at_unix_ns": time.time_ns(),
             "timestamp_note": "rosbag2 messages.timestamp 是接收时间；原始消息 header.stamp 保留在 CDR 消息中",
         }
         self._write_current()
+        self._master_monitor = {}
+        self._master_subscriptions = []
+        if getattr(self, "auto_trim_stale_tail", False) and mode == "skill":
+            from piper_msgs.msg import PiperArmVector
+            from rclpy.qos import QoSProfile, ReliabilityPolicy
+            # This is a latest-state monitor, not the archival subscriber.
+            # Old queued flags delay stop detection; rosbag records every vector.
+            monitor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+            arm_mode = fields.get("arm_mode")
+            arms = ("left", "right") if arm_mode == "BIMANUAL" else (
+                (arm_mode.lower(),) if arm_mode in ("LEFT", "RIGHT") else ())
+            for arm in arms:
+                topic = f"/piper_vector/{arm}/master_target"
+                if topic not in self.topics:
+                    continue
+                self._master_subscriptions.append(self.node.create_subscription(
+                    PiperArmVector, topic,
+                    lambda message, arm=arm: self._on_master_target(arm, message),
+                    monitor_qos))
         node_name = f"piper_episode_{os.getpid()}"
         command = ["ros2", "bag", "record", "--storage", "sqlite3", "--max-cache-size",
-                   str(self.rosbag_cache_bytes)]
+                   str(self.rosbag_cache_bytes), "--storage-config-file", str(storage_path)]
         if qos_path is not None:
             command.extend(["--qos-profile-overrides-path", str(qos_path)])
         command.extend(["--node-name", node_name, "-o", str(self.current / "bag"), *self.topics])
@@ -593,33 +767,45 @@ class Recorder:
             log.close()
         deadline = time.monotonic() + self.timeout
         startup_error = None
-        while time.monotonic() < deadline:
-            if self.process.poll() is not None:
-                break
-            try:
-                ready_graph = self._graph_ready(node_name)
-            except ValueError as error:
-                startup_error = str(error)
-                break
-            if ready_graph and (self.current / "bag").is_dir():
-                self.metadata["state"] = "recording"
-                ready = time.time_ns()
-                self.metadata["ready_at_unix_ns"] = ready
-                self._last_clock_offset_ns = ready - time.monotonic_ns()
-                self.metadata["clock_adjustments"] = []
-                if self.metadata.get("schema_version") == 2 and mode == "task":
-                    self.metadata["active_skill"] = SKILLS[0]
-                    self.metadata["annotations"].append({
-                        "kind": "skill_start", "value": SKILLS[0],
-                        "annotation_origin": "automatic_task_start",
-                        "recorded_at_unix_ns": ready})
-                if duration is not None:
-                    duration_ns = round(duration * 1_000_000_000)
-                    self.ready_monotonic_ns = time.monotonic_ns()
-                    self.deadline_monotonic_ns = self.ready_monotonic_ns + duration_ns
-                    self.metadata["recording_deadline_unix_ns"] = ready + duration_ns
-                self._event("started")
-                return self.status()
+        readiness = None
+        try:
+            readiness = self._start_data_monitor()
+            while time.monotonic() < deadline:
+                if self.process.poll() is not None:
+                    break
+                time.sleep(0.02)
+                drain_ros_callbacks(self.node)
+                try:
+                    ready_graph = self._graph_ready(node_name)
+                except ValueError as error:
+                    startup_error = str(error)
+                    break
+                if ready_graph and (self.current / "bag").is_dir() and readiness.ready(self.current / "bag"):
+                    self.metadata["startup_data_readiness"] = readiness.evidence()
+                    self.metadata["state"] = "recording"
+                    ready = time.time_ns()
+                    self.metadata["ready_at_unix_ns"] = ready
+                    self._last_clock_offset_ns = ready - time.monotonic_ns()
+                    self.metadata["clock_adjustments"] = []
+                    if self.metadata.get("schema_version") == 2 and mode == "task":
+                        self.metadata["active_skill"] = SKILLS[0]
+                        self.metadata["annotations"].append({
+                            "kind": "skill_start", "value": SKILLS[0],
+                            "annotation_origin": "automatic_task_start",
+                            "recorded_at_unix_ns": ready})
+                    if duration is not None:
+                        duration_ns = round(duration * 1_000_000_000)
+                        self.ready_monotonic_ns = time.monotonic_ns()
+                        self.deadline_monotonic_ns = self.ready_monotonic_ns + duration_ns
+                        self.metadata["recording_deadline_unix_ns"] = ready + duration_ns
+                    self._event("started")
+                    return self.status()
+        except (ValueError, OSError) as error:
+            startup_error = str(error)
+        finally:
+            self._clear_startup_monitor()
+        if not startup_error and readiness is not None and readiness.last_error:
+            startup_error = "来源数据未就绪：" + readiness.last_error
         self._terminate()
         self.metadata["state"] = "failed"
         self.metadata["error"] = startup_error or "rosbag2 未在超时内订阅全部配置话题；见 rosbag.log"
@@ -698,19 +884,38 @@ class Recorder:
             raise ValueError("恢复原因不能为空")
         topic = request.get("source_topic")
         stamp = request.get("header_stamp_ns")
+        candidate_confirmation = bool(request.get("candidate"))
         if post_review:
-            topic = request.get("review_source_topic")
-            offset = request.get("review_offset_sec")
-            if topic not in self.frame_topics or not topic.endswith("/image_raw"):
-                raise ValueError("请选择已录制的彩色相机")
-            duration = self.metadata.get("recorded_duration_sec")
-            if (isinstance(offset, bool) or not isinstance(offset, (int, float))
-                    or not math.isfinite(offset) or offset < 0 or duration is None or offset > duration):
-                raise ValueError("完成时刻须在本条 Episode 的录制时长内")
-            ready = self.metadata["ready_at_unix_ns"]
-            received, stamp = recorded_frame_near(
-                self.current / "bag", topic, ready + round(offset * 1_000_000_000),
-                ready, self.metadata["stopped_at_unix_ns"])
+            topic = request.get("review_source_topic") or request.get("source_topic")
+            if candidate_confirmation:
+                candidate = self.metadata.get("auto_completion_candidate") or {}
+                stamp = request.get("header_stamp_ns")
+                if (topic not in self.frame_topics or not isinstance(topic, str)
+                        or not topic.endswith("/image_raw") or type(stamp) is not int
+                        or candidate.get("source_topic") != topic
+                        or candidate.get("header_stamp_ns") != stamp):
+                    raise ValueError("候选完成帧与当前自动候选不一致")
+                ready = self.metadata["ready_at_unix_ns"]
+                if not recorded_header_exists(
+                        self.current / "bag", topic, stamp, ready,
+                        self.metadata["stopped_at_unix_ns"],
+                        receive_stop_ns=self.metadata.get('raw_stopped_at_unix_ns',
+                                                         self.metadata['stopped_at_unix_ns'])):
+                    raise ValueError("候选完成帧未写入本条 rosbag")
+                received = header_receive_ns(self.current / "bag", topic, stamp)
+                offset = round((received - ready) / 1_000_000_000, 3)
+            else:
+                offset = request.get("review_offset_sec")
+                if topic not in self.frame_topics or not topic.endswith("/image_raw"):
+                    raise ValueError("请选择已录制的彩色相机")
+                duration = self.metadata.get("recorded_duration_sec")
+                if (isinstance(offset, bool) or not isinstance(offset, (int, float))
+                        or not math.isfinite(offset) or offset < 0 or duration is None or offset > duration):
+                    raise ValueError("完成时刻须在本条 Episode 的录制时长内")
+                ready = self.metadata["ready_at_unix_ns"]
+                received, stamp = recorded_frame_near(
+                    self.current / "bag", topic, ready + round(offset * 1_000_000_000),
+                    ready, self.metadata["stopped_at_unix_ns"])
         if (topic is None) != (stamp is None):
             raise ValueError("source_topic 与 header_stamp_ns 必须同时提供")
         if topic is not None and (topic not in self.frame_topics or
@@ -721,15 +926,25 @@ class Recorder:
             annotation["skill_result"] = "success"
         if post_review:
             if supports_source_validation(self.metadata):
-                annotation["source_validation"] = validate_completion(
-                    self.current, self.metadata, topic, stamp, exact_ns=stamp)
+                try:
+                    annotation["source_validation"] = validate_completion(
+                        self.current, self.metadata, topic, stamp, exact_ns=stamp,
+                        max_camera_skew_ms=getattr(self, "max_camera_skew_ms", 30),
+                        max_source_skew_ms=getattr(self, "max_source_skew_ms", 30))
+                except ValueError as error:
+                    # The operator can still confirm the completion event; the
+                    # separate SFT gate keeps rejecting an invalid segment.
+                    annotation["source_validation_error"] = str(error)
+                    annotation["source_validation_details"] = getattr(error, "details", {})
             self.metadata.pop("completion_review_required", None)
             self.metadata.pop("auto_completion_error", None)
-            annotation.update(annotation_origin="post_recording_review",
-                              reviewed_at_unix_ns=time.time_ns(),
-                              verified_in_bag=True,
-                              selected_offset_sec=offset,
-                              matched_offset_sec=round((received - ready) / 1_000_000_000, 3))
+            annotation.update(
+                annotation_origin=("operator_confirmed_candidate"
+                                   if candidate_confirmation else "post_recording_review"),
+                reviewed_at_unix_ns=time.time_ns(),
+                verified_in_bag=True,
+                selected_offset_sec=offset,
+                matched_offset_sec=round((received - ready) / 1_000_000_000, 3))
         else:
             annotation["recorded_at_unix_ns"] = time.time_ns()
         if kind == "recovery_trigger":
@@ -768,6 +983,45 @@ class Recorder:
             "event": "annotation", **annotation}, ensure_ascii=False)))
         return {"annotation": annotation, "active_skill": next_active}
 
+    def recheck_completion(self):
+        """Recheck the same human-confirmed image without moving its timestamp."""
+        if self.current is None or self.metadata.get("state") != "stopped":
+            raise ValueError("只能重新校验停止后待保存的完成帧")
+        markers = [a for a in self.metadata.get("annotations", []) if a.get("kind") == "skill_complete"]
+        if self.metadata.get("mode") != "skill" or len(markers) != 1:
+            raise ValueError("须有唯一已确认的原子技能完成帧")
+        item = markers[0]
+        topic, stamp = item.get("source_topic"), item.get("header_stamp_ns")
+        if topic not in self.frame_topics or type(stamp) is not int:
+            raise ValueError("完成帧缺少有效图像引用")
+        previous = {key: item.get(key) for key in ("verified_in_bag", "frame_verification_error",
+                                                  "source_validation", "source_validation_error",
+                                                  "source_validation_details")}
+        exists = recorded_header_exists(self.current / "bag", topic, stamp,
+                                        self.metadata["ready_at_unix_ns"],
+                                        self.metadata["stopped_at_unix_ns"],
+                                        receive_stop_ns=self.metadata.get('raw_stopped_at_unix_ns',
+                                                                         self.metadata['stopped_at_unix_ns']))
+        for key in ("source_validation", "source_validation_error", "source_validation_details",
+                    "frame_verification_error"):
+            item.pop(key, None)
+        item["verified_in_bag"] = exists
+        if not exists:
+            item["frame_verification_error"] = "完成帧未在实际 rosbag 中找到"
+        elif supports_source_validation(self.metadata):
+            try:
+                item["source_validation"] = validate_completion(
+                    self.current, self.metadata, topic, stamp, exact_ns=stamp,
+                    max_camera_skew_ms=getattr(self, "max_camera_skew_ms", 30),
+                    max_source_skew_ms=getattr(self, "max_source_skew_ms", 30))
+            except ValueError as error:
+                item["source_validation_error"] = str(error)
+                item["source_validation_details"] = getattr(error, "details", {})
+        item.setdefault("validation_reviews", []).append({
+            "reviewed_at_unix_ns": time.time_ns(), "previous_validation": previous})
+        self._write_current()
+        return {"annotation": item, "active_skill": self.metadata.get("active_skill")}
+
     def _terminate(self):
         if self.process and self.process.poll() is None:
             os.killpg(self.process.pid, signal.SIGINT)
@@ -777,6 +1031,14 @@ class Recorder:
                 os.killpg(self.process.pid, signal.SIGTERM)
                 self.process.wait(timeout=5)
         self.process = None
+        for subscription in getattr(self, "_master_subscriptions", []):
+            node = getattr(self, "node", None)
+            if node is not None:
+                try:
+                    node.destroy_subscription(subscription)
+                except Exception:
+                    pass
+        self._master_subscriptions = []
 
     def _close_open_holds(self, end_ns, reason):
         for segment in self.metadata.get("hold_segments", []):
@@ -797,6 +1059,26 @@ class Recorder:
             raise ValueError(self.metadata["error"])
         stopped = time.time_ns()
         self.metadata["stop_reason"] = reason
+        if (getattr(self, "auto_trim_stale_tail", False)
+                and self.metadata.get("mode") == "skill"
+                and self.metadata.get("schema_version") == 2):
+            now_ns = time.monotonic_ns()
+            monitor = {}
+            for arm, state in (getattr(self, "_master_monitor", {}) or {}).items():
+                last_valid = state.get("last_valid_monotonic_ns")
+                last_stale = state.get("last_stale_monotonic_ns")
+                monitor[arm] = {
+                    "last_valid_age_ns": int(now_ns - last_valid) if last_valid is not None else None,
+                    "last_stale_age_ns": int(now_ns - last_stale) if last_stale is not None else None,
+                    "stale_count": int(state.get("stale_count", 0)),
+                }
+            self.metadata["auto_trim_live_monitor"] = {
+                "status_poll_sec": RECORDER_STATUS_POLL_SEC,
+                "freshness_ns": LIVE_STALE_FRESHNESS_NS,
+                "grace_ns": int(getattr(self, "stale_stop_grace_sec", 1.0) * 1_000_000_000),
+                "elapsed_ns": self._terminal_stale_elapsed_ns(now_ns),
+                "arms": monitor,
+            }
         self.metadata["stop_requested_at_unix_ns"] = stopped
         self.metadata["recorded_duration_sec"] = round(
             ((time.monotonic_ns() - self.ready_monotonic_ns) if self.ready_monotonic_ns is not None
@@ -811,6 +1093,38 @@ class Recorder:
                 self.current / "bag", self.topics, self.frame_topics, self.expected_fps,
                 self.metadata["required_topics"])
             self.metadata["state"] = "stopped"
+            auto_trim = (reason == "stale_tail"
+                         and getattr(self, "auto_trim_stale_tail", False)
+                         and self.metadata.get("schema_version") == 2
+                         and self.metadata.get("mode") == "skill"
+                         and self.metadata.get("skill") in SKILLS)
+            arm_mode = self.metadata.get("task_metadata", {}).get("arm_mode")
+            stale_boundary = None
+            action_anchor = None
+            if auto_trim and arm_mode in ("LEFT", "RIGHT", "BIMANUAL"):
+                ready = self.metadata["ready_at_unix_ns"]
+                stop_requested = self.metadata["stop_requested_at_unix_ns"]
+                arms = ("left", "right") if arm_mode == "BIMANUAL" else (arm_mode.lower(),)
+                boundaries = {arm: terminal_stale_master_target(
+                    self.current / "bag", arm, ready, stop_requested) for arm in arms}
+                if all(boundaries.values()):
+                    boundary = min(item["last_valid_header_ns"] for item in boundaries.values())
+                    raw_stopped = self.metadata["stopped_at_unix_ns"]
+                    self.metadata["raw_stopped_at_unix_ns"] = raw_stopped
+                    self.metadata["trim_boundary_ns"] = boundary
+                    self.metadata["trimmed_tail_ns"] = max(0, raw_stopped - boundary)
+                    self.metadata["auto_trim_source"] = "terminal_stale_master_target"
+                    self.metadata["stopped_at_unix_ns"] = boundary
+                    self.metadata["recorded_duration_sec"] = round(
+                        (boundary - ready) / 1_000_000_000, 3)
+                    if len(arms) == 1:
+                        stale_boundary = boundaries[arms[0]]
+                        action_anchor = last_valid_master_target(
+                            self.current / "bag", arms[0], ready, stop_requested)
+                    else:
+                        self.metadata["auto_trim_stale_boundaries"] = boundaries
+                else:
+                    self.metadata["auto_trim_error"] = "未找到可确认的末尾 stale 边界，未裁切"
             if self.metadata.get("schema_version") == 2:
                 for item in list(self.metadata.get("annotations", [])):
                     if item.get("kind") != "skill_complete" or item.get("skill_result") != "success":
@@ -821,17 +1135,22 @@ class Recorder:
                                 self.metadata["ready_at_unix_ns"],
                                 self.metadata["stop_requested_at_unix_ns"]):
                             raise ValueError("点击成功时的相机帧未写入本条 rosbag")
-                        if supports_source_validation(self.metadata):
-                            item["source_validation"] = validate_completion(
-                                self.current, self.metadata, item["source_topic"],
-                                item["header_stamp_ns"], exact_ns=item["header_stamp_ns"])
                         item["verified_in_bag"] = True
+                        if supports_source_validation(self.metadata):
+                            try:
+                                item["source_validation"] = validate_completion(
+                                    self.current, self.metadata, item["source_topic"],
+                                    item["header_stamp_ns"], exact_ns=item["header_stamp_ns"],
+                                    max_camera_skew_ms=getattr(self, "max_camera_skew_ms", 30),
+                                    max_source_skew_ms=getattr(self, "max_source_skew_ms", 30))
+                            except ValueError as error:
+                                item.pop("source_validation", None)
+                                item["source_validation_error"] = str(error)
+                                item["source_validation_details"] = getattr(error, "details", {})
                     except (ValueError, KeyError, sqlite3.Error) as error:
                         if self.metadata.get("mode") == "skill":
-                            failed = dict(item)
-                            failed["frame_verification_error"] = str(error)
-                            self.metadata.setdefault("unverified_completion_attempts", []).append(failed)
-                            self.metadata["annotations"].remove(item)
+                            item["verified_in_bag"] = False
+                            item["frame_verification_error"] = str(error)
                             self.metadata["completion_review_required"] = True
                             self.metadata["auto_completion_error"] = str(error)
                             continue
@@ -839,10 +1158,10 @@ class Recorder:
                         item["frame_verification_error"] = str(error)
                         item.pop("source_topic", None)
                         item.pop("header_stamp_ns", None)
-            if (reason == "duration_limit" and self.metadata.get("schema_version") == 2
+            if (reason in ("duration_limit", "stale_tail")
+                    and self.metadata.get("schema_version") == 2
                     and self.metadata.get("mode") == "skill"
                     and self.metadata.get("skill") in SKILLS
-                    and not self.metadata.get("unverified_completion_attempts")
                     and not any(item.get("kind") == "skill_complete"
                                 for item in self.metadata.get("annotations", []))):
                 color_topics = [topic for topic in self.frame_topics
@@ -853,46 +1172,76 @@ class Recorder:
                         raise ValueError("没有配置彩色相机帧话题")
                     ready = self.metadata["ready_at_unix_ns"]
                     stop_requested = self.metadata["stop_requested_at_unix_ns"]
-                    arm_mode = self.metadata.get("task_metadata", {}).get("arm_mode")
-                    action_anchor = None
-                    stale_boundary = None
-                    if arm_mode in ("LEFT", "RIGHT"):
+                    if arm_mode in ("LEFT", "RIGHT") and stale_boundary is None:
                         stale_boundary = terminal_stale_master_target(
                             self.current / "bag", arm_mode.lower(), ready, stop_requested)
                         action_anchor = last_valid_master_target(
                             self.current / "bag", arm_mode.lower(), ready, stop_requested)
                     origin = "duration_limit_last_frame"
-                    if stale_boundary:
-                        origin = "duration_limit_before_terminal_stale"
+                    trimmed_boundary = self.metadata.get('trim_boundary_ns')
+                    candidate_boundary = (trimmed_boundary or
+                                          (stale_boundary['last_valid_header_ns'] if stale_boundary
+                                           else stop_requested))
+                    before_boundary = bool(trimmed_boundary or stale_boundary)
+                    if before_boundary:
+                        origin = ("stale_tail_before_terminal_stale" if reason == "stale_tail"
+                                  else "duration_limit_before_terminal_stale")
                         self.metadata["auto_completion_stale_boundary"] = stale_boundary
-                        self.metadata["auto_completion_boundary_policy"] = "operator_terminal_stale_convention"
+                        self.metadata["auto_completion_boundary_policy"] = (
+                            "auto_trim_terminal_stale_convention" if reason == "stale_tail"
+                            else "operator_terminal_stale_convention")
                     source_validation = None
+                    validation_error = None
+                    validation_details = {}
                     if supports_source_validation(self.metadata):
-                        boundary = stale_boundary["last_valid_header_ns"] if stale_boundary else stop_requested
-                        source_validation = validate_completion(
-                            self.current, self.metadata, color_topics[0], boundary,
-                            strictly_before=stale_boundary is not None)
+                        try:
+                            source_validation = validate_completion(
+                                self.current, self.metadata, color_topics[0], candidate_boundary,
+                                strictly_before=before_boundary,
+                                candidate_topics=color_topics,
+                                max_camera_skew_ms=getattr(self, "max_camera_skew_ms", 30),
+                                max_source_skew_ms=getattr(self, "max_source_skew_ms", 30))
+                        except ValueError as error:
+                            validation_error = str(error)
+                            validation_details = getattr(error, "details", {})
+                    if source_validation is not None:
+                        candidate_topic = source_validation["source_topic"]
                         stamp = source_validation["header_stamp_ns"]
-                        received = header_receive_ns(self.current / "bag", color_topics[0], stamp)
-                    elif stale_boundary:
+                        received = header_receive_ns(self.current / "bag", candidate_topic, stamp)
+                    elif before_boundary:
+                        candidate_topic = color_topics[0]
                         received, stamp = recorded_frame_before_header(
-                            self.current / "bag", color_topics[0], stale_boundary["last_valid_header_ns"],
+                            self.current / "bag", color_topics[0], candidate_boundary,
                             ready, stop_requested)
                     else:
+                        candidate_topic = color_topics[0]
                         received, stamp = recorded_frame_near(
                             self.current / "bag", color_topics[0], stop_requested, ready, stop_requested)
-                    self.metadata["annotations"].append({
-                        "kind": "skill_complete", "value": self.metadata["skill"],
-                        "annotation_origin": origin,
+                    if validation_details.get("header_stamp_ns") != stamp:
+                        validation_details = {}
+                    candidate = {
+                        "source_topic": candidate_topic,
+                        "header_stamp_ns": stamp,
+                        "matched_offset_sec": round((received - ready) / 1_000_000_000, 3),
+                        "candidate_origin": origin,
+                        "selection_policy": (source_validation or {}).get(
+                            "selection_policy", "unqualified_single_camera_fallback"),
+                        "stale_boundary": stale_boundary,
+                        "source_validation": source_validation,
+                        "source_validation_error": validation_error,
+                        "source_validation_details": validation_details,
+                        "contiguous_frames": (source_validation or validation_details).get("contiguous_frames"),
+                        "window_count": (source_validation or validation_details).get("window_count"),
+                        "segment_index": (source_validation or validation_details).get("segment_index"),
                         "reviewed_at_unix_ns": time.time_ns(),
-                        "verified_in_bag": True,
-                        "source_topic": color_topics[0], "header_stamp_ns": stamp,
-                        "matched_offset_sec": round((received - ready) / 1_000_000_000, 3)})
-                    if source_validation is not None:
-                        self.metadata["annotations"][-1]["source_validation"] = source_validation
+                    }
+                    self.metadata["auto_completion_candidate"] = candidate
+                    self.metadata["completion_review_required"] = True
                     if action_anchor:
-                        self.metadata["auto_completion_tail_gap_ms"] = round(
+                        candidate["tail_gap_ms"] = round(
                             (stop_requested - action_anchor[0]) / 1_000_000, 1)
+                        self.metadata["auto_completion_tail_gap_ms"] = candidate["tail_gap_ms"]
+                        candidate["master_header_ns"] = action_anchor[0]
                         self.metadata["auto_completion_master_header_ns"] = action_anchor[0]
                     arms = ("left", "right") if arm_mode == "BIMANUAL" else (
                         arm_mode.lower(),) if arm_mode in ("LEFT", "RIGHT") else ()
@@ -903,18 +1252,27 @@ class Recorder:
                             self.current / "bag", topic, received, ready)
                         source_gaps[arm] = (None if last_receive is None else
                                             round((received - last_receive) / 1_000_000, 1))
+                    candidate["master_gap_ms"] = source_gaps
                     self.metadata["auto_completion_master_gap_ms"] = source_gaps
                     if any(gap is None or gap > 100 for gap in source_gaps.values()):
                         self.metadata["auto_completion_source_warning"] = (
-                            "自动完成帧附近未收到持续主端目标；可保存实际结果，但此帧需逐帧审计"
+                            "自动完成候选附近未收到持续主端目标；可保存实际结果，但该帧需复核"
                         )
-                    if origin == "duration_limit_before_terminal_stale":
+                    if reason == "stale_tail":
                         self.metadata["auto_completion_source_warning"] = (
-                            "按采集约定选用末尾持续 stale 前的原始图像；结果仍须确认，训练资格另行审计"
+                            "末尾 stale 后无动作输出，已自动停止并裁切到最后一个有效主目标；候选完成帧需操作员确认"
+                        )
+                    elif origin == "duration_limit_before_terminal_stale":
+                        self.metadata["auto_completion_source_warning"] = (
+                            "按采集约定选用末尾持续 stale 前的原始图像；仅作为候选，需操作员确认"
                         )
                 except (ValueError, sqlite3.Error) as error:
                     self.metadata["auto_completion_error"] = str(error)
                     self.metadata["completion_review_required"] = True
+            if (self.metadata.get("schema_version") == 2 and self.metadata.get("mode") == "skill"
+                    and not any(item.get("kind") == "skill_complete"
+                                for item in self.metadata.get("annotations", []))):
+                self.metadata["completion_review_required"] = True
         except (ValueError, sqlite3.Error) as error:
             self.metadata["state"] = "failed"
             self.metadata["error"] = str(error)
@@ -943,7 +1301,10 @@ class Recorder:
             if outcome is not None and outcome != annotation["outcome"]:
                 raise ValueError("结果标签与人工标注不一致")
             outcome = annotation["outcome"]
-        require_verified_skill_completion(self.metadata, outcome)
+        self.metadata["completion_validation"] = assess_training_eligibility(self.metadata, outcome)
+        self.metadata["training_eligibility"] = {
+            "eligible": False, "status": "pending_independent_evidence_and_audit",
+            "reasons": ["原始采集保存不授予 SFT 导出或训练资格"]}
         if save_dir is not None and (not isinstance(save_dir, str) or not save_dir.strip()
                                      or not Path(save_dir).expanduser().is_absolute()):
             raise ValueError("save_dir 必须为非空的绝对目录路径")
@@ -1032,6 +1393,60 @@ class Recorder:
             atomic_json(self.discarded / f"{event['episode_id']}.json", metadata)
         return {"state": "discarded", "count": len(directories)}
 
+    def _on_master_target(self, arm, message):
+        if self.metadata.get("state") != "recording":
+            return
+        kind = classify_master_target(message, arm)
+        state = getattr(self, "_master_monitor", {}).setdefault(
+            arm, {"last_valid_monotonic_ns": None, "last_stale_monotonic_ns": None,
+                  "stale_count": 0})
+        received = time.monotonic_ns()
+        if kind == "valid":
+            state.update(last_valid_monotonic_ns=received,
+                         last_stale_monotonic_ns=None, stale_count=0)
+        elif kind == "stale":
+            state["last_stale_monotonic_ns"] = received
+            state["stale_count"] = state.get("stale_count", 0) + 1
+        else:
+            state["last_stale_monotonic_ns"] = None
+            state["stale_count"] = 0
+
+    def completion_preview(self):
+        if self.current is None or self.metadata.get('state') != 'stopped':
+            raise ValueError('停止后才能查看已录制的完成画面')
+        confirmed = [a for a in self.metadata.get('annotations', [])
+                     if a.get('kind') == 'skill_complete']
+        frame = confirmed[0] if len(confirmed) == 1 else self.metadata.get('auto_completion_candidate')
+        if not frame or frame.get('source_topic') not in self.frame_topics:
+            raise ValueError('没有可复核的完成画面')
+        result = recorded_image_preview(self.current / 'bag', frame['source_topic'], frame['header_stamp_ns'])
+        return {**result, 'episode_id': self.metadata['episode_id'],
+                'header_offset_sec': (frame['header_stamp_ns'] - self.metadata['ready_at_unix_ns']) / 1e9}
+
+    def _terminal_stale_elapsed_ns(self, now_ns):
+        if not getattr(self, "auto_trim_stale_tail", False):
+            return 0
+        if any(item.get("end_unix_ns") is None
+               for item in (self.metadata.get("hold_segments") or [])):
+            return 0
+        arm_mode = self.metadata.get("task_metadata", {}).get("arm_mode")
+        arms = ("left", "right") if arm_mode == "BIMANUAL" else (
+            (arm_mode.lower(),) if arm_mode in ("LEFT", "RIGHT") else ())
+        states = getattr(self, "_master_monitor", {})
+        if not arms or not all(arm in states for arm in arms):
+            return 0
+        elapsed = []
+        for arm in arms:
+            state = states[arm]
+            last_valid = state.get("last_valid_monotonic_ns")
+            last_stale = state.get("last_stale_monotonic_ns")
+            if (last_valid is None or last_stale is None
+                    or state.get("stale_count", 0) < 2
+                    or now_ns - last_stale > LIVE_STALE_FRESHNESS_NS):
+                return 0
+            elapsed.append(now_ns - last_valid)
+        return min(elapsed) if elapsed else 0
+
     def status(self):
         if self.current is not None:
             if self.metadata["state"] == "recording":
@@ -1046,6 +1461,14 @@ class Recorder:
                 self._event("failed")
                 time.sleep(0.15)
                 self._terminate()
+            if (self.metadata["state"] == "recording"
+                    and getattr(self, "auto_trim_stale_tail", False)
+                    and self.metadata.get("mode") == "skill"
+                    and self.metadata.get("schema_version") == 2
+                    and self.metadata.get("skill") in SKILLS):
+                elapsed = self._terminal_stale_elapsed_ns(time.monotonic_ns())
+                if elapsed >= int(getattr(self, "stale_stop_grace_sec", 1.0) * 1_000_000_000):
+                    return self.stop(reason="stale_tail")
             deadline = self.deadline_monotonic_ns
             if self.metadata["state"] == "recording" and deadline and time.monotonic_ns() >= deadline:
                 return self.stop(reason="duration_limit")
@@ -1163,7 +1586,7 @@ def serve(config):
     server.bind(str(path))
     os.chmod(path, 0o600)
     server.listen(8)
-    server.settimeout(0.2)
+    server.settimeout(RECORDER_STATUS_POLL_SEC)
     running = True
 
     def shutdown(_signum, _frame):
@@ -1174,7 +1597,9 @@ def serve(config):
     signal.signal(signal.SIGINT, shutdown)
     try:
         while running:
-            rclpy.spin_once(recorder.node, timeout_sec=0)
+            # Only recording has multiple high-rate monitor inputs. Idle polling
+            # must not busy-probe an empty executor dozens of times per cycle.
+            drain_ros_callbacks(recorder.node, limit=8 if recorder.process is not None else 1)
             try:
                 connection, _ = server.accept()
             except socket.timeout:
@@ -1185,7 +1610,8 @@ def serve(config):
                     request = json.loads(connection.recv(1_000_000).decode())
                     action = request.pop("action")
                     if action not in ("start", "stop", "save", "discard", "status", "list",
-                                      "plan_create", "plans", "vlm_export", "annotate"):
+                                      "plan_create", "plans", "vlm_export", "annotate", "recheck_completion",
+                                      "completion_preview"):
                         raise ValueError("未知操作")
                     if action == "start":
                         result = recorder.start(request)
@@ -1215,7 +1641,7 @@ def serve(config):
 def main():
     parser = argparse.ArgumentParser(description="ROS 2 Episode SQLite 录制器")
     parser.add_argument("action", choices=["serve", "start", "stop", "save", "discard", "status", "list",
-                                           "plan_create", "plans", "vlm_export", "annotate"])
+                                           "plan_create", "plans", "vlm_export", "annotate", "recheck_completion"])
     parser.add_argument("--config", required=True, help="JSON 配置文件")
     parser.add_argument("--mode", choices=["task", "skill"])
     parser.add_argument("--task")

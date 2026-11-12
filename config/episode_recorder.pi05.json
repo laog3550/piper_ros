@@ -1,6 +1,8 @@
 {
   "output_dir": "/home/mips/pi05_datas/banana_task_episodes",
   "topics": [
+    "/piper_direct/left/diagnostics",
+    "/piper_direct/right/diagnostics",
     "/piper_direct/left/master_target",
     "/piper_direct/left/slave_feedback",
     "/piper_direct/right/master_target",
@@ -26,6 +28,9 @@
     "/camera_wrist_right/color/image_raw": 15,
     "/camera_top/D455/color/image_raw": 15
   },
+  "action_source": "follower_next_state",
+  "max_camera_skew_ms": 40,
+  "max_source_skew_ms": 40,
   "teleoperation": {
     "source": "master_slave_teleoperation",
     "mapping_verified": true,
@@ -46,5 +51,8 @@
   "raw_can_qos_depth": 5000,
   "hold_max_sec": 10.0,
   "hold_anchor_max_gap_sec": 2.0,
-  "startup_timeout_sec": 15
+  "auto_trim_stale_tail": true,
+  "stale_stop_grace_sec": 1.0,
+  "startup_timeout_sec": 15,
+  "gripper_calibration_path": "config/gripper_collection_calibration.20261112.json"
 }

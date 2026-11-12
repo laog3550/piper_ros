@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把已保存的 rosbag2 Episode 转为本地 LeRobot v3。成功 SFT 示例：python to_lerobot.py INPUT OUTPUT --repo-id local/piper --arm-mode LEFT --input-format can-vector --fps 10 --max-age-ms 100 --max-source-skew-ms 30 --success-sft；阈值须按现场证据指定。"""
+"""把已保存的 rosbag2 Episode 转为本地 LeRobot v3。成功 SFT 示例：python to_lerobot.py INPUT OUTPUT --repo-id local/piper --arm-mode LEFT --input-format can-vector --fps 10 --max-age-ms 100 --max-camera-skew-ms 40 --max-source-skew-ms 40 --success-sft；阈值须按现场证据指定。"""
 
 import argparse
 from bisect import bisect_right
@@ -56,6 +56,9 @@ if Reader is not None:
     TYPESTORE = get_typestore(Stores.ROS2_HUMBLE)
     TYPESTORE.register(get_types_from_msg(VECTOR_MSG, VECTOR_TYPE))
 ALIGNMENT_POLICY = "causal_rgb_bundle_v1"
+FOLLOWER_ALIGNMENT_POLICY = "causal_follower_next_state_v1"
+ACTION_PROVENANCE = {"master_target": "human_demonstration",
+                     "follower_next_state": "teleoperation_follower_next_state"}
 
 
 def fail(message):
@@ -84,7 +87,7 @@ def source_check_pending(key, check, accepted_checks):
     return not (key in SOURCE_DECLARATION_CHECKS and check["status"] == "declared_pending_audit")
 
 
-def training_contract_reasons(meta, expected_mode, accepted_checks=()):
+def training_contract_reasons(meta, expected_mode, accepted_checks=(), action_source="master_target"):
     """Check source export evidence; train statistics are a later dataset asset."""
     fields = meta.get("task_metadata") or {}
     reasons = []
@@ -92,11 +95,22 @@ def training_contract_reasons(meta, expected_mode, accepted_checks=()):
         return ["task_metadata 必须为对象"]
     if expected_mode not in ("LEFT", "RIGHT", "BIMANUAL"):
         reasons.append("arm_mode 无效")
+    if action_source not in ACTION_PROVENANCE:
+        return [f"未知 action_source={action_source}"]
     for key, expected in (("arm_mode", expected_mode), ("time_domain", "unix_ns"),
-                          ("action_space", "absolute_joint_position_7"),
-                          ("action_provenance", "human_demonstration")):
+                          ("action_space", "absolute_joint_position_7")):
         if fields.get(key) != expected:
             reasons.append(f"缺少显式 {key}={expected} 元数据")
+    expected_provenance = ACTION_PROVENANCE[action_source]
+    if fields.get("action_provenance") != expected_provenance:
+        if "action_provenance" not in accepted_checks:
+            reasons.append(f"缺少显式 action_provenance={expected_provenance} 元数据")
+    if action_source != "master_target":
+        declared_source = fields.get("action_source")
+        if declared_source is not None and declared_source != action_source:
+            reasons.append(f"action_source={declared_source} 与请求的 {action_source} 不一致")
+        elif declared_source is None and "action_provenance" not in accepted_checks:
+            reasons.append(f"缺少显式 action_source={action_source} 元数据")
     for key in ("calibration_version", "data_convention_version"):
         if not isinstance(fields.get(key), str) or not fields[key].strip():
             reasons.append(f"缺少 {key} 标识")
@@ -216,13 +230,14 @@ def vector(message, topic, allow_negative_gripper=False):
     return values
 
 
-def can_vector(message, topic, max_can_skew_ns, gripper_calibration=None):
+def can_vector(message, topic, max_can_skew_ns, gripper_calibration=None, *, raw_signed_gripper=False):
     arm, kind = topic.split("/")[2:]
     if (message.source_topic != f"/piper_direct/{arm}/{kind}"
             or message.header.frame_id != f"can_{arm}"
             or list(message.source_can_ids) != CAN_IDS[kind]):
         fail(f"{topic}: CAN 来源话题、接口或 ID 不符")
-    values = vector(message, topic, allow_negative_gripper=gripper_calibration is not None)
+    values = vector(message, topic, allow_negative_gripper=(gripper_calibration is not None
+                                                           or raw_signed_gripper))
     flags = []
     if any(message.missing):
         flags.append("missing")
@@ -330,7 +345,14 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
                  max_camera_gap_ns=100_000_000, max_camera_skew_ns=30_000_000,
                  extra_frame_topics=(), max_source_skew_ns=None, gripper_calibration=None,
                  extract_valid_segments=False, require_training_contract=True, source_acceptance=None,
-                 _metadata_override=None, _reader_factory=None, _deserialize=None):
+                 action_source="master_target",
+                 _metadata_override=None, _reader_factory=None, _deserialize=None,
+                 _raw_signed_gripper=False, completion_header_range=None):
+    if action_source not in ACTION_PROVENANCE:
+        fail(f"action_source 无效：{action_source}")
+    if _raw_signed_gripper and (_metadata_override is None or require_training_contract
+                               or materialize or spool_dir is not None or source_acceptance is not None):
+        fail("有符号夹爪原值仅可用于不授予导出资格的只读完成帧检查")
     metadata_path = path / "episode.json"
     if not metadata_path.is_file() or not (path / "bag" / "metadata.yaml").is_file():
         fail(f"{path}: 缺少 episode.json 或 bag/metadata.yaml")
@@ -339,13 +361,23 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
         if require_training_contract or materialize or spool_dir is not None or source_acceptance is not None:
             fail("停止后元数据覆盖仅可用于不授予导出资格的只读完成帧检查")
         meta = dict(_metadata_override)
+    binding = (meta.get("task_metadata") or {}).get("gripper_calibration_evidence")
+    if binding and not _raw_signed_gripper:
+        if gripper_calibration is None:
+            fail("本 Episode 已绑定夹爪零点；请用 --gripper-calibration 指定该标定资产")
+        settings_hash = hashlib.sha256(json.dumps(gripper_calibration, sort_keys=True,
+                                                separators=(",", ":")).encode()).hexdigest()
+        if not isinstance(binding, dict) or settings_hash != binding.get("settings_sha256"):
+            fail("夹爪标定与录制时绑定的零点不一致，拒绝混用标定版本")
     hold_segments, hold_max_ns, hold_anchor_gap_ns = normalize_hold_segments(meta)
+    if action_source != "master_target" and hold_segments:
+        fail("follower_next_state 不接受保持段；从臂反馈本身就是连续动作来源")
     expected_mode = "BIMANUAL" if len(arms) == 2 else arms[0].upper()
     if meta.get("schema_version") not in (1, 2) or meta.get("state") != "saved":
         fail(f"{path}: 仅接受 schema_version=1/2 且 state=saved 的 Episode")
     acceptance = source_acceptance_for_episode(path, meta, source_acceptance)
     accepted_checks = acceptance["record"]["checks"] if acceptance else ()
-    contract_reasons = training_contract_reasons(meta, expected_mode, accepted_checks)
+    contract_reasons = training_contract_reasons(meta, expected_mode, accepted_checks, action_source)
     if require_training_contract and contract_reasons:
         fail(f"{path}: {'；'.join(contract_reasons)}")
     meta["_source_export_acceptance"] = acceptance
@@ -362,9 +394,15 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
     if type(start) is not int or type(stop) is not int or start <= 0 or stop <= start:
         fail(f"{path}: Episode 录制区间无效")
     state_topics = CAN_STATES if input_format == "can-vector" else STATES
-    action_topics = CAN_ACTIONS if input_format == "can-vector" else ACTIONS
+    if action_source != "master_target" and input_format != "can-vector":
+        fail("follower_next_state 仅适用于 can-vector")
+    action_topics = ((CAN_STATES if action_source == "follower_next_state" else CAN_ACTIONS)
+                     if input_format == "can-vector" else ACTIONS)
     camera_topics = [CAMERAS["top_rgb"], *(CAMERAS[f"{arm}_wrist_rgb"] for arm in arms)]
-    vector_topics = [*(state_topics[arm] for arm in arms), *(action_topics[arm] for arm in arms)]
+    vector_topics = list(dict.fromkeys([*(state_topics[arm] for arm in arms),
+                                        *(action_topics[arm] for arm in arms)]))
+    diagnostic_topics = {f"/piper_direct/{arm}/diagnostics" for arm in arms} if input_format == "can-vector" else set()
+    transport_diagnostics = {}
     if set(extra_frame_topics) & set(vector_topics):
         fail("完成帧必须引用相机 Image 话题")
     needed = {*camera_topics, *vector_topics, *extra_frame_topics}
@@ -379,16 +417,57 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
         fail("离线转换需要 rosbags；录制端完成帧检查须显式使用 ROS 只读解码器")
     deserialize = _deserialize or TYPESTORE.deserialize_cdr
     with reader_factory(path / "bag") as reader:
-        connections = [conn for conn in reader.connections if conn.topic in needed]
+        connections = [conn for conn in reader.connections if conn.topic in needed | diagnostic_topics]
         found = {conn.topic for conn in connections}
-        if found != needed:
+        if not needed <= found:
             fail(f"{path}: 缺少话题 {sorted(needed - found)}")
         for conn in connections:
-            expected_type = "sensor_msgs/msg/Image" if conn.topic in extra_frame_topics else TYPES[conn.topic]
+            expected_type = ("std_msgs/msg/String" if conn.topic in diagnostic_topics else
+                             "sensor_msgs/msg/Image" if conn.topic in extra_frame_topics else TYPES[conn.topic])
             if conn.msgtype != expected_type or conn.ext.serialization_format != "cdr":
                 fail(f"{conn.topic}: 消息类型或序列化格式不符")
         for conn, _, raw in reader.messages(connections=connections):
             message = deserialize(raw, conn.msgtype)
+            if conn.topic in diagnostic_topics:
+                try:
+                    data = json.loads(message.data)
+                except (TypeError, json.JSONDecodeError) as error:
+                    fail(f"{conn.topic}: 无效 CAN 传输诊断：{error}")
+                if (not isinstance(data, dict) or data.get("schema_version") != "piper_direct_can_diagnostics/1"
+                        or type(data.get("stamp_ns")) is not int
+                        or data.get("channel") != "can_" + conn.topic.split("/")[2]
+                        or not isinstance(data.get("streams"), dict)
+                        or type(data.get("capture_failed")) is not bool):
+                    fail(f"{conn.topic}: CAN 传输诊断格式或实体归属无效")
+                if not start <= data["stamp_ns"] <= stop:
+                    continue
+                for kind in ("master_target", "slave_feedback"):
+                    counters = data["streams"].get(kind)
+                    if not isinstance(counters, dict) or any(
+                            type(counters.get(key)) is not int or counters[key] < 0
+                            for key in ("overflow", "publish_errors", "shutdown_discarded")):
+                        fail(f"{conn.topic}: CAN 传输诊断缺少完整损失计数")
+                    if any(counters[key] for key in ("overflow", "publish_errors", "shutdown_discarded")):
+                        fail(f"{conn.topic}: CAN 队列溢出、发布失败或退出丢帧，拒绝不完整来源")
+                if data["capture_failed"]:
+                    fail(f"{conn.topic}: CAN 接收/发布通路已标记采集失败：{data.get('error')}")
+                previous = transport_diagnostics.get(conn.topic)
+                if previous and previous["last"]["stamp_ns"] > data["stamp_ns"]:
+                    fail(f"{conn.topic}: CAN 传输诊断时间倒退")
+                peaks = previous["peaks"] if previous else {}
+                for kind in ("master_target", "slave_feedback"):
+                    counters = data["streams"][kind]
+                    kind_peaks = peaks.setdefault(kind, {})
+                    for key in ("interval_max_kernel_to_app_ms", "interval_max_queue_wait_ms",
+                                "interval_max_publish_call_ms", "max_kernel_to_app_ms",
+                                "max_queue_wait_ms", "max_publish_call_ms"):
+                        value = counters.get(key)
+                        if isinstance(value, (int, float)) and value > kind_peaks.get(key, 0):
+                            kind_peaks[key] = value
+                transport_diagnostics[conn.topic] = {
+                    "observations": (previous["observations"] if previous else 0) + 1,
+                    "last": data, "peaks": peaks}
+                continue
             timestamp, topic = stamp(message), conn.topic
             error = None
             if topic in camera_topics:
@@ -410,8 +489,14 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
                     "raw_valid": bool(message.valid),
                     "gripper_mapping_verified": bool(message.gripper_mapping_verified)}
                 try:
-                    value, can_stamps = can_vector(message, topic, max_can_skew_ns, gripper_calibration)
-                    if min(can_stamps) < start or max(can_stamps) > stop:
+                    value, can_stamps = can_vector(message, topic, max_can_skew_ns, gripper_calibration,
+                                                   raw_signed_gripper=_raw_signed_gripper)
+                    # The next-state action for the last state may be one grid
+                    # period after the Episode's logical stop.
+                    source_stop = stop
+                    if action_source == "follower_next_state" and topic in action_topics.values():
+                        source_stop += round(1_000_000_000 / fps)
+                    if min(can_stamps) < start or max(can_stamps) > source_stop:
                         raise InvalidFrame(f"{topic}: CAN 来源时间不在 Episode 录制区间内")
                 except InvalidFrame as exception:
                     if not extract_valid_segments:
@@ -431,6 +516,9 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
             else:
                 value, can_stamps = vector(message, topic), None
             streams[topic].append((timestamp, value, can_stamps, error))
+    for topic in found & diagnostic_topics:
+        if topic not in transport_diagnostics:
+            fail(f"{topic}: 缺少录制区间内的 CAN 传输诊断")
     for topic, values in streams.items():
         if not values:
             fail(f"{path}: {topic} 没有消息")
@@ -440,10 +528,15 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
             deduplicated = [values[0]]
             for item in values[1:]:
                 if item[0] == deduplicated[-1][0]:
-                    # Without rewriting Header or using receive time as a source
-                    # clock, a later stale copy cannot be placed more precisely.
-                    # Conservatively reject this Header if any copy was invalid.
-                    if item[3] is not None or deduplicated[-1][3] is None:
+                    # A repeated Header may be published again after the source
+                    # stops.  Keep the observation that was valid at its own
+                    # source time; current expiration is checked separately by
+                    # the age limit at each sampled frame.
+                    if deduplicated[-1][3] is not None and item[3] is None:
+                        deduplicated[-1] = item
+                    elif deduplicated[-1][3] is None and item[3] is not None:
+                        continue
+                    else:
                         deduplicated[-1] = item
                 else:
                     deduplicated.append(item)
@@ -517,23 +610,24 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
             "stale_flags": list(quality.get("stale", [])),
             "hold_start_ns": segment["start_ns"], "hold_end_ns": segment["end_ns"]}
 
-    def preceding(topic, timestamp, allow_hold=False, hold_timestamp=None):
+    def preceding(topic, timestamp, allow_hold=False, hold_timestamp=None, allow_after_stop_ns=0):
         index = bisect_right(indexes[topic], timestamp) - 1
+        segment = hold_at(timestamp if hold_timestamp is None else hold_timestamp) if allow_hold else None
         age_limit = min(max_age_ns, max_camera_gap_ns) if extract_valid_segments and topic in camera_topics else max_age_ns
         if index < 0 or timestamp - indexes[topic][index] > age_limit:
-            if allow_hold:
-                segment = hold_at(timestamp if hold_timestamp is None else hold_timestamp)
-                if segment is not None:
-                    return hold_action(topic, timestamp if hold_timestamp is None else hold_timestamp, segment)
+            if segment is not None:
+                return hold_action(topic, timestamp if hold_timestamp is None else hold_timestamp, segment)
             raise InvalidFrame(f"{path}: {topic} 在动作时间 {timestamp} 前缺帧或超窗")
         item = streams[topic][index]
+        if segment is not None and item[0] < segment["start_ns"]:
+            # The explicit hold starts after this observation; reuse the last
+            # valid absolute target instead of rejecting the frame on skew.
+            return hold_action(topic, timestamp if hold_timestamp is None else hold_timestamp, segment)
         if item[3] is not None:
-            if allow_hold:
-                segment = hold_at(timestamp if hold_timestamp is None else hold_timestamp)
-                if segment is not None:
-                    return hold_action(topic, timestamp if hold_timestamp is None else hold_timestamp, segment)
+            if segment is not None:
+                return hold_action(topic, timestamp if hold_timestamp is None else hold_timestamp, segment)
             raise InvalidFrame(item[3])
-        if not start <= item[0] <= stop:
+        if not start <= item[0] <= stop + allow_after_stop_ns:
             raise InvalidFrame(f"{path}: {topic} 的 Header 时间不在 Episode 录制区间内")
         return item[:3] + (None,)
 
@@ -580,26 +674,55 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
 
     def build_aligned_frame(timestamp, index=None, reference=None, camera_selection=None):
         reference = timestamp if reference is None else reference
-        source_stamps, can_sources, actions, states = {}, {}, [], []
+        follower_action = action_source == "follower_next_state"
+        action_reference = reference + period if follower_action else reference
+        source_stamps, can_sources = {}, {}
+        action_source_stamps, action_can_sources = {}, {}
+        actions, states = [], []
         hold_actions = {}
-        for topics, target in ((action_topics, actions), (state_topics, states)):
+        if follower_action:
             for arm in arms:
-                topic = topics[arm]
-                if topics is action_topics and input_format == "joint-state":
-                    actual, value, can_stamps = streams[topic][index][:3]
-                    hold = None
-                else:
-                    actual, value, can_stamps, hold = preceding(
-                        topic, reference, allow_hold=topics is action_topics,
-                        hold_timestamp=timestamp)
-                if input_format == "can-vector" and actual > reference:
+                topic = state_topics[arm]
+                actual, value, can_stamps, _ = preceding(topic, reference)
+                if actual > reference:
                     raise InvalidFrame(f"{topic}: 来源 Header 晚于图像组参考时刻")
                 source_stamps[topic] = actual
                 if can_stamps is not None:
                     can_sources[topic] = can_stamps
-                target.append(value)
-                if hold is not None:
-                    hold_actions[topic] = hold
+                states.append(value)
+            for arm in arms:
+                topic = action_topics[arm]
+                # The last state's action is the next observed state, which may
+                # be up to one grid period after the logical Episode stop.
+                actual, value, can_stamps, _ = preceding(
+                    topic, action_reference, allow_after_stop_ns=period)
+                if actual > action_reference:
+                    raise InvalidFrame(f"{topic}: 下一状态 Header 晚于动作参考时刻")
+                if actual <= source_stamps[topic]:
+                    raise InvalidFrame(f"{topic}: 下一状态反馈没有前进，不能作为下一时刻动作")
+                action_source_stamps[topic] = actual
+                if can_stamps is not None:
+                    action_can_sources[topic] = can_stamps
+                actions.append(value)
+        else:
+            for topics, target in ((action_topics, actions), (state_topics, states)):
+                for arm in arms:
+                    topic = topics[arm]
+                    if topics is action_topics and input_format == "joint-state":
+                        actual, value, can_stamps = streams[topic][index][:3]
+                        hold = None
+                    else:
+                        actual, value, can_stamps, hold = preceding(
+                            topic, reference, allow_hold=topics is action_topics,
+                            hold_timestamp=timestamp)
+                    if input_format == "can-vector" and actual > reference:
+                        raise InvalidFrame(f"{topic}: 来源 Header 晚于图像组参考时刻")
+                    source_stamps[topic] = actual
+                    if can_stamps is not None:
+                        can_sources[topic] = can_stamps
+                    target.append(value)
+                    if hold is not None:
+                        hold_actions[topic] = hold
         if len({item["hold_id"] for item in hold_actions.values()}) > 1:
             raise InvalidFrame(f"{path}: 同一帧包含多个保持段")
         hold_info = None
@@ -608,10 +731,16 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
             hold_info["arms"] = sorted(topic.split("/")[2] for topic in hold_actions)
         frame = {"task": task, "observation.state": np.concatenate(states),
                  "action": np.concatenate(actions), "__source_header_ns__": source_stamps,
-                 "__source_can_stamps_ns__": can_sources, "__target_timestamp_ns__": timestamp,
+                 "__action_source_header_ns__": action_source_stamps,
+                 "__source_can_stamps_ns__": can_sources,
+                 "__action_source_can_stamps_ns__": action_can_sources,
+                 "__target_timestamp_ns__": timestamp,
+                 "__action_target_timestamp_ns__": action_reference,
                  "__hold__": hold_info,
                  "__source_vector_quality__": {topic: vector_quality[topic][source_stamps[topic]]
-                     for topic in vector_topics} if input_format == "can-vector" else {}}
+                     for topic in vector_topics if topic in source_stamps} if input_format == "can-vector" else {},
+                 "__action_source_vector_quality__": {topic: vector_quality[topic][action_source_stamps[topic]]
+                     for topic in action_source_stamps} if follower_action and input_format == "can-vector" else {}}
         for camera in ("top_rgb", *(f"{arm}_wrist_rgb" for arm in arms)):
             topic = CAMERAS[camera]
             if camera_selection is None:
@@ -632,10 +761,20 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
         source_skew = max(fresh_sources) - min(fresh_sources)
         if max_source_skew_ns is not None and source_skew > max_source_skew_ns:
             raise InvalidFrame(f"{path}: RGB、状态与示教目标 Header 总体时间差 {source_skew} ns 超过同步阈值")
+        if follower_action:
+            action_headers = list(action_source_stamps.values())
+            if any(not 0 <= action_reference - source <= max_age_ns for source in action_headers):
+                raise InvalidFrame(f"{path}: 下一状态反馈相对动作参考时刻缺帧或超窗")
+            if max(action_headers) - min(action_headers) > max_can_skew_ns:
+                raise InvalidFrame(f"{path}: 左右臂下一状态反馈 Header 时间差超过同步阈值")
         if input_format == "can-vector":
-            frame["__alignment__"] = {"policy": ALIGNMENT_POLICY,
-                                      "reference_timestamp_ns": reference,
-                                      "grid_lag_ns": timestamp - reference}
+            frame["__alignment__"] = {
+                "policy": FOLLOWER_ALIGNMENT_POLICY if follower_action else ALIGNMENT_POLICY,
+                "reference_timestamp_ns": reference,
+                "action_reference_timestamp_ns": action_reference,
+                "action_source": action_source,
+                "action_offset_ns": period if follower_action else 0,
+                "grid_lag_ns": timestamp - reference}
         return frame, skew, source_skew
 
     def aligned_frame(timestamp, index=None, required_camera=None):
@@ -719,7 +858,11 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
     hold_frame_counts = Counter(frame["__hold__"]["hold_id"] for frame in frames
                                 if frame.get("__hold__"))
     meta["_quality"] = {"camera_max_gap_ns": camera_gaps,
-                        "alignment_policy": ALIGNMENT_POLICY if input_format == "can-vector" else "joint_state_grid",
+                        "transport_diagnostics": transport_diagnostics,
+                        "alignment_policy": ((FOLLOWER_ALIGNMENT_POLICY if action_source == "follower_next_state"
+                                              else ALIGNMENT_POLICY) if input_format == "can-vector"
+                                             else "joint_state_grid"),
+                        "action_source": action_source,
                         "max_grid_lag_ns": max((frame.get("__alignment__", {}).get("grid_lag_ns", 0)
                                                 for frame in frames), default=0),
                         "max_selected_camera_skew_ns": max_selected_camera_skew,
@@ -743,21 +886,32 @@ def read_episode(path, arms, fps, max_age_ns, jitter_ns, materialize=False, spoo
     if extract_valid_segments:
         completion_segments = {}
         completion_errors = {}
+        completion_proofs = {}
         for topic, timestamps in meta["_camera_header_stamps"].items():
             completion_segments[topic] = {}
             for timestamp in timestamps:
+                if completion_header_range is not None and not (
+                        completion_header_range[0] <= timestamp <= completion_header_range[1]):
+                    continue
                 segment = next((item for item in segments if item["valid_start_ns"] <= timestamp <= item["valid_stop_ns"]), None)
                 if segment is None:
                     completion_errors[(topic, timestamp)] = "完成帧不在已对齐的连续片段内"
                     continue
                 try:
-                    aligned_frame(timestamp, required_camera=(topic, timestamp))
+                    completion_frame, camera_skew, source_skew = aligned_frame(
+                        timestamp, required_camera=(topic, timestamp))
                 except InvalidFrame as error:
                     completion_errors[(topic, timestamp)] = str(error)
                     continue
                 completion_segments[topic][timestamp] = segment["segment_index"]
+                completion_proofs[(topic, timestamp)] = {
+                    "reference_timestamp_ns": completion_frame['__alignment__']['reference_timestamp_ns'],
+                    "source_header_stamps_ns": completion_frame['__source_header_ns__'],
+                    "action_source_header_stamps_ns": completion_frame['__action_source_header_ns__'],
+                    "camera_skew_ns": camera_skew, "source_skew_ns": source_skew}
         meta["_completion_segment_by_header"] = completion_segments
         meta["_completion_errors"] = completion_errors
+        meta["_completion_proofs"] = completion_proofs
         meta["_continuous_source_domains"] = domains
     return meta, frames
 
@@ -838,7 +992,8 @@ def sft_label(meta):
         if ((item.get("kind") == "outcome" and item.get("annotation_origin") == "save_selection")
                 or (item.get("kind") == "skill_complete"
                     and item.get("annotation_origin") in (
-                        "post_recording_review", "duration_limit_last_frame",
+                        "post_recording_review", "operator_confirmed_candidate",
+                        "duration_limit_last_frame",
                         "duration_limit_last_valid_master_frame", "duration_limit_before_terminal_stale"))):
             reviewed = item.get("reviewed_at_unix_ns")
             if (type(reviewed) is not int or type(meta.get("stopped_at_unix_ns")) is not int
@@ -873,14 +1028,19 @@ def select_sft_frames(meta, frames, label, arms, input_format):
     topic, timestamp = complete["source_topic"], complete["header_stamp_ns"]
     if timestamp not in meta["_camera_header_stamps"].get(topic, ()):
         fail("完成帧 Header 未在该 Episode 的相机消息中找到")
-    action_topics = CAN_ACTIONS if input_format == "can-vector" else ACTIONS
+    follower_action = bool(frames and frames[0].get("__action_source_header_ns__"))
+    action_topics = (CAN_STATES if follower_action else
+                     CAN_ACTIONS if input_format == "can-vector" else ACTIONS)
+    def action_stamp(frame, arm):
+        headers = frame.get("__action_source_header_ns__") or frame["__source_header_ns__"]
+        return headers[action_topics[arm]]
     segment_index = None
     segmented = meta["_quality"].get("segment_extraction", False)
     if segmented:
         segment_index = meta["_completion_segment_by_header"].get(topic, {}).get(timestamp)
         if segment_index is None:
             fail("完成帧不属于任何连续有效片段；其他片段不能继承成功标注")
-    selected = [frame for frame in frames if max(frame["__source_header_ns__"][action_topics[arm]]
+    selected = [frame for frame in frames if max(action_stamp(frame, arm)
                   for arm in arms) <= timestamp and (not segmented or (
                   frame["__segment_index__"] == segment_index and frame["__target_timestamp_ns__"] <= timestamp))]
     minimum = ACTION_HORIZON if segmented else 2
@@ -905,6 +1065,7 @@ def convert(args):
     gripper_calibration = load_gripper_calibration(calibration_path) if calibration_path else None
     acceptance_path = getattr(args, "source_acceptance", None)
     source_acceptance = load_source_acceptance(acceptance_path) if acceptance_path else None
+    action_source = getattr(args, "action_source", "master_target")
     paths = sorted(path for path in args.input_dir.glob("episode_*") if path.is_dir())
     if not paths:
         fail("输入目录没有 episode_* 目录")
@@ -943,11 +1104,12 @@ def convert(args):
                                         int(args.jitter_ms * 1e6), input_format=args.input_format,
                                         max_can_skew_ns=int(args.max_can_skew_ms * 1e6),
                                         max_camera_gap_ns=int(getattr(args, "max_camera_gap_ms", 100) * 1e6),
-                                        max_camera_skew_ns=int(getattr(args, "max_camera_skew_ms", 30) * 1e6),
+                                        max_camera_skew_ns=int(getattr(args, "max_camera_skew_ms", 40) * 1e6),
                                         max_source_skew_ns=int(source_skew_ms * 1e6) if source_skew_ms is not None else None,
                                         extra_frame_topics=extra_frames,
                                         gripper_calibration=gripper_calibration,
                                         extract_valid_segments=extract_segments,
+                                        action_source=action_source,
                                         source_acceptance=source_acceptance)
             annotation_stats = None
             if success_sft:
@@ -995,7 +1157,15 @@ def convert(args):
                 "extract_valid_segments": extract_segments,
                 "action_horizon": ACTION_HORIZON if extract_segments else None,
                 "max_source_skew_ms": source_skew_ms,
-                "alignment_policy": ALIGNMENT_POLICY if args.input_format == "can-vector" else "joint_state_grid",
+                "max_camera_skew_ms": getattr(args, "max_camera_skew_ms", 40),
+                "action_source": action_source,
+                "action_provenance": ACTION_PROVENANCE[action_source],
+                "action_offset_ns": (round(1_000_000_000 / args.fps)
+                                     if action_source == "follower_next_state" else 0),
+                "alignment_policy": ((FOLLOWER_ALIGNMENT_POLICY
+                                      if action_source == "follower_next_state"
+                                      else ALIGNMENT_POLICY) if args.input_format == "can-vector"
+                                     else "joint_state_grid"),
                 "arm_mode": args.arm_mode, "input_format": args.input_format,
                 "joint_names": [f"{arm}.{joint}" for arm in arms for joint in JOINTS],
                 "state_unit": "rad (joint1..6), m (gripper)", "action_space": "absolute_joint_position_7",
@@ -1022,12 +1192,13 @@ def convert(args):
                                          input_format=args.input_format,
                                          max_can_skew_ns=int(args.max_can_skew_ms * 1e6),
                                          max_camera_gap_ns=int(getattr(args, "max_camera_gap_ms", 100) * 1e6),
-                                         max_camera_skew_ns=int(getattr(args, "max_camera_skew_ms", 30) * 1e6),
+                                         max_camera_skew_ns=int(getattr(args, "max_camera_skew_ms", 40) * 1e6),
                                          max_source_skew_ns=int(source_skew_ms * 1e6) if source_skew_ms is not None else None,
                                          extra_frame_topics=(label["completion_frame"]["source_topic"],) if (
                                              label and label["completion_frame"]["source_topic"] not in CAMERAS.values()) else (),
                                          gripper_calibration=gripper_calibration,
                                          extract_valid_segments=extract_segments,
+                                         action_source=action_source,
                                          source_acceptance=source_acceptance)
                 if success_sft:
                     frames, _ = select_sft_frames(written_meta, frames, label, arms, args.input_format)
@@ -1047,6 +1218,10 @@ def convert(args):
                                                       "header_timestamp_ns": frame.pop("__source_header_ns__"),
                                                       "source_can_stamps_ns": frame.pop("__source_can_stamps_ns__"),
                                                       "source_vector_quality": frame.pop("__source_vector_quality__"),
+                                                      "action_target_timestamp_ns": frame.pop("__action_target_timestamp_ns__", None),
+                                                      "action_source_header_timestamp_ns": frame.pop("__action_source_header_ns__", None),
+                                                      "action_source_can_stamps_ns": frame.pop("__action_source_can_stamps_ns__", None),
+                                                      "action_source_vector_quality": frame.pop("__action_source_vector_quality__", None),
                                                       "hold": frame.pop("__hold__", None),
                                                       "alignment": frame.pop("__alignment__", None)},
                                                      ensure_ascii=False) + "\n")
@@ -1101,6 +1276,8 @@ def main():
     parser.add_argument("--repo-id", required=True)
     parser.add_argument("--arm-mode", choices=("LEFT", "RIGHT", "BIMANUAL"), required=True)
     parser.add_argument("--input-format", choices=("joint-state", "can-vector"), required=True)
+    parser.add_argument("--action-source", choices=tuple(ACTION_PROVENANCE), default="master_target",
+                        help="master_target：主臂绝对目标；follower_next_state：从臂反馈 t+1 作为动作")
     parser.add_argument("--gripper-calibration", type=Path,
                         help="can-vector 的四路夹爪闭合零点与 0～100 mm 导出范围 JSON")
     parser.add_argument("--source-acceptance", type=Path,
@@ -1112,7 +1289,7 @@ def main():
     parser.add_argument("--jitter-ms", type=float, default=2)
     parser.add_argument("--max-can-skew-ms", type=float, default=30)
     parser.add_argument("--max-camera-gap-ms", type=float, default=100)
-    parser.add_argument("--max-camera-skew-ms", type=float, default=30)
+    parser.add_argument("--max-camera-skew-ms", type=float, default=40)
     parser.add_argument("--max-source-skew-ms", type=float,
                         help="成功 SFT 必填；每帧 RGB、状态、示教目标 Header 的最大总体跨度")
     parser.add_argument("--success-sft", action="store_true", help="仅导出 v2 已核验成功的原子技能 Episode")
@@ -1130,6 +1307,8 @@ def main():
         parser.error("fps 或时间阈值、test-percent 无效")
     if (args.success_sft or args.extract_valid_segments) and args.max_source_skew_ms is None:
         parser.error("--success-sft/--extract-valid-segments 必须显式指定 --max-source-skew-ms")
+    if args.action_source != "master_target" and args.input_format != "can-vector":
+        parser.error("--action-source follower_next_state 仅适用于 --input-format can-vector")
     if args.skills and not args.success_sft:
         parser.error("--skills 只能与 --success-sft 同用")
     try:

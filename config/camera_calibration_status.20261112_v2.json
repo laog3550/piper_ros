@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "version_id": "camera_training_acceptance_20261112_v2",
+  "status": "accepted_for_raw_rgb_joint_training_camera_source",
+  "scope": "2026-11-12 12:54 重启后的 30 fps 三路原始 RGB 与 CameraInfo 来源；Episode 逐帧审计、训练统计和几何标定另行验收",
+  "camera_contract_version": "piper_rgb_joint_camera_contract_v3_20261112_30fps",
+  "camera_info_snapshot_version": "camera_info_snapshot_20261112_v1",
+  "installation_epoch_id": "piper_camera_installation_20261110_operator_confirmed_v1",
+  "top_intrinsics_note": "顶部 D455 K/P 相对 11-10 快照变化约 0.5276 px；本批次另建快照和契约，不声明变化物理原因或几何精度",
+  "sources": {
+    "manifest": {
+      "path": "/home/mips/pi05_datas/validation/camera_evidence_20261112_v2/manifest.json",
+      "sha256": "2d38aa2a97854d1943fb174149b93f510f0c93c7aa0d1660f275b1fca5541ead"
+    },
+    "capture": {
+      "path": "/home/mips/pi05_datas/validation/camera_evidence_20261112_v2/capture.json",
+      "sha256": "948a5c32c3e11f2af17fa6cdf891967b5ba751062f265063e0c73fc16ea4084f"
+    },
+    "contract": {
+      "path": "/home/mips/pi05_datas/validation/camera_evidence_20261112_v2/contract.json",
+      "sha256": "d157907ee28e57899d1aa8d08c8c38a6f696f1dbb96804ca4c350c03568e966d"
+    },
+    "baseline": {
+      "path": "/home/mips/pi05_datas/validation/camera_evidence_20261112_v2/baseline.json",
+      "sha256": "fd561ce5a731ccb76854f71f2a791447ad7305ad3bbdb62e1553cdd1bb683c41"
+    },
+    "mount_review": {
+      "path": "/home/mips/pi05_datas/validation/camera_mount_review_20261112_v2.json",
+      "sha256": "aee78f77519faa7db8bd5fa3624a3ee4e0e29a51b8199075b645658e788b40d1"
+    },
+    "audit_report": {
+      "path": "/home/mips/pi05_datas/validation/camera_training_acceptance_20261112_v2.json",
+      "sha256": "79ed2873d77efe966e5bee889152ea63c901460d623582111c2c2bda2a5027d8"
+    }
+  },
+  "training_camera_evidence_ready": true,
+  "episode_training_eligible": "not_evaluated",
+  "intrinsic_geometry_verified": false,
+  "extrinsic_geometry_verified": false,
+  "motion_planning_geometry_ready": false,
+  "remaining": "每条 Episode 需绑定本验收、逐帧同步与动作来源审计；训练归一化和 checkpoint 另行验收。"
+}

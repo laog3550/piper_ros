@@ -57,6 +57,8 @@ def publish(node, stop):
             vector.source_topic = f"/piper_direct/{arm}/slave_feedback"
             vector.position = [0.1] * 6 + [0.02]
             vector.source_stamps = [image.header.stamp] * 4
+            vector.header.stamp = image.header.stamp
+            vector.valid = True
             publisher.publish(vector)
         next_frame += 1 / 30
         stop.wait(max(0, next_frame - time.monotonic()))
@@ -194,9 +196,19 @@ def main():
                     assert not window.mark_complete.isEnabled()
                     stage[0] = "skill_wait_stop"
                 elif stage[0] == "skill_wait_stop" and window.state == "stopped":
-                    assert not window.mark_complete.isEnabled()
-                    stage[0] = "skill_labeled"
-                elif stage[0] == "skill_labeled" and window.state == "stopped" and len(window.annotations) >= 1:
+                    assert window.mark_complete.isEnabled()
+                    stage[0] = "skill_candidate_ready"
+                elif (stage[0] == "skill_candidate_ready" and window.last_metadata.get("auto_completion_candidate")
+                      and window.mark_candidate.isEnabled()):
+                    candidate = window.last_metadata["auto_completion_candidate"]
+                    assert candidate["source_topic"] in config["frame_topics"]
+                    assert "候选完成" in window.completion_label.text()
+                    assert window.completion_preview['key'][1:] == (
+                        candidate['source_topic'], candidate['header_stamp_ns'])
+                    window.mark_candidate.click(); stage[0] = "skill_candidate_confirmed"
+                elif stage[0] == "skill_candidate_confirmed" and any(
+                        item.get("annotation_origin") == "operator_confirmed_candidate"
+                        for item in window.annotations):
                     meta = recorder_request(socket_path, {"action": "status"})["metadata"]
                     assert meta["mode"] == "skill" and meta["skill"] == "pick_and_place_banana_in_box"
                     assert meta["task_metadata"]["initial_conditions"]["perturbation_id"] == "synthetic-scene-1"
@@ -208,12 +220,12 @@ def main():
                     assert "action_provenance" not in meta["task_metadata"]
                     assert meta["task_metadata"]["training_eligibility"]["eligible"] is False
                     assert any(a["kind"] == "skill_complete" and a.get("source_topic") == TOPICS[2]
+                               and a.get("annotation_origin") == "operator_confirmed_candidate"
                                for a in meta["annotations"])
-                    assert any(a.get("annotation_origin") == "duration_limit_last_frame"
-                               for a in meta["annotations"])
-                    assert skill_completion_issue(meta["skill"], meta["annotations"], set(config["frame_topics"])) is None
-                    window.mark_success.click()
-                    assert window.outcome.currentText() == "成功"
+                    assert skill_completion_issue(meta["skill"], meta["annotations"],
+                                                  set(config["frame_topics"]), meta) is not None
+                    window.outcome.setCurrentIndex(1)
+                    assert window.save.isEnabled()
                     window.save.click(); stage[0] = "skill_saving"
                 elif stage[0] == "skill_saving" and window.state == "idle":
                     assert window.task.text() == "合成抓取"
@@ -228,16 +240,14 @@ def main():
                     window.stop.click(); stage[0] = "manual_stop"
                 elif stage[0] == "manual_stop" and window.state == "stopped":
                     window.outcome.setCurrentIndex(1)
-                    assert not window.save.isEnabled()
-                    window.save_recording()
-                    assert "完成帧" in window.message.text()
+                    assert window.save.isEnabled()
                     assert recorder_request(socket_path, {"action": "status"})["state"] == "stopped"
                     window.review_offset.setText("0.4")
                     window.mark_complete.click(); stage[0] = "manual_review"
                 elif stage[0] == "manual_review" and window.state == "stopped" and any(
                         item.get("kind") == "skill_complete" for item in window.annotations):
                     meta = recorder_request(socket_path, {"action": "status"})["metadata"]
-                    assert skill_completion_issue(meta["skill"], meta["annotations"], set(config["frame_topics"])) is None
+                    assert any(item.get("kind") == "skill_complete" for item in meta["annotations"])
                     assert window.save.isEnabled()
                     window.save.click(); stage[0] = "manual_saving"
                 elif stage[0] == "manual_saving" and window.state == "idle":
@@ -254,8 +264,8 @@ def main():
                     window.stop.click(); stage[0] = "recorded_stop"
                 elif stage[0] == "recorded_stop" and window.state == "stopped":
                     meta = recorder_request(socket_path, {"action": "status"})["metadata"]
-                    assert skill_completion_issue(meta["skill"], meta["annotations"], set(config["frame_topics"])) is None
                     assert window.outcome.currentText() == "成功"
+                    assert window.save.isEnabled()
                     window.save.click(); stage[0] = "recorded_saving"
                 elif stage[0] == "recorded_saving" and window.state == "idle":
                     window.task.setText("丢弃测试")

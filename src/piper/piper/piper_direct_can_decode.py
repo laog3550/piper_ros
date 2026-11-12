@@ -13,7 +13,7 @@ FRAME_IDS = TARGET_IDS | FEEDBACK_IDS
 RAD_PER_MILLI_DEGREE = math.pi / 180000.0
 
 
-def decode_frame(frame, parser=None):
+def decode_frame(frame, parser=None, decoded_message=None):
     """Return one independently timestamped frame, or None for unrelated/invalid traffic."""
     can_id = frame.arbitration_id
     if (can_id not in FRAME_IDS or frame.is_extended_id or frame.is_remote_frame
@@ -22,7 +22,7 @@ def decode_frame(frame, parser=None):
         return None
 
     parser = parser or C_PiperParserV2()
-    decoded = PiperMessage()
+    decoded = decoded_message if decoded_message is not None else PiperMessage()
     if not parser.DecodeMessage(frame, decoded):
         return None
 

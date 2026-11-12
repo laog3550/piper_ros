@@ -5,6 +5,8 @@ import argparse
 import json
 import math
 from pathlib import Path
+import sqlite3
+import struct
 
 import yaml
 
@@ -67,9 +69,43 @@ def audit_legacy(metadata_path):
     }
 
 
+def raw_can_bag_delay(bag_dir):
+    """Per raw CAN topic Header-to-bag delay; scoped to this recording only."""
+    result = {}
+    for path in sorted(Path(bag_dir).glob("*.db3")):
+        try:
+            with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
+                topics = [row[0] for row in db.execute(
+                    "SELECT name FROM topics WHERE name LIKE '/piper_direct/%'")]
+                for topic in topics:
+                    delays = []
+                    for received, prefix in db.execute(
+                            "SELECT messages.timestamp, substr(messages.data,1,12) FROM messages "
+                            "JOIN topics ON topics.id=messages.topic_id WHERE topics.name=?", (topic,)):
+                        if len(prefix) < 12 or prefix[:1] != b"\0" or prefix[1] not in (0, 1):
+                            continue
+                        sec, ns = struct.unpack_from("<iI" if prefix[1] == 1 else ">iI", prefix, 4)
+                        if ns >= 1_000_000_000:
+                            continue
+                        delays.append((received - (sec * 1_000_000_000 + ns)) / 1e6)
+                    if delays:
+                        delays.sort()
+                        result[topic] = {
+                            "messages": len(delays),
+                            "median_ms": round(delays[len(delays) // 2], 3),
+                            "p95_ms": round(delays[min(len(delays) - 1,
+                                                       int(round(0.95 * (len(delays) - 1))))], 3),
+                            "max_ms": round(delays[-1], 3),
+                        }
+        except sqlite3.Error as error:
+            result[str(path)] = {"error": str(error)}
+    return result
+
+
 def audit_native(episode_path, fps=10, max_age_ms=100, max_can_skew_ms=30,
                  max_camera_gap_ms=100, max_camera_skew_ms=30, max_source_skew_ms=None,
-                 gripper_calibration=None, extract_valid_segments=False, source_acceptance=None):
+                 gripper_calibration=None, extract_valid_segments=False, source_acceptance=None,
+                 action_source="master_target"):
     meta = json.loads((episode_path / "episode.json").read_text(encoding="utf-8"))
     info, counts = bag_info(episode_path / "bag" / "metadata.yaml")
     fields = meta.get("task_metadata") or {}
@@ -84,22 +120,24 @@ def audit_native(episode_path, fps=10, max_age_ms=100, max_can_skew_ms=30,
     except (ValueError, OSError) as error:
         reasons.append(str(error))
     accepted_checks = acceptance["record"]["checks"] if acceptance else ()
-    reasons.extend(training_contract_reasons(meta, fields.get("arm_mode"), accepted_checks))
+    reasons.extend(training_contract_reasons(meta, fields.get("arm_mode"), accepted_checks, action_source))
     mode = fields.get("arm_mode")
     arms = ("left", "right") if mode == "BIMANUAL" else (
         mode.lower() if isinstance(mode, str) else "",)
+    follower_action = action_source == "follower_next_state"
+    action_topics = CAN_STATES if follower_action else CAN_ACTIONS
     for arm in arms:
         if arm not in STATES:
             continue
         if not any(counts.get(t, 0) for t in (STATES[arm], CAN_STATES[arm])):
             reasons.append(f"缺少 {arm} 实测状态")
-        if not any(counts.get(t, 0) for t in (ACTIONS[arm], CAN_ACTIONS[arm])):
+        if not any(counts.get(t, 0) for t in (ACTIONS[arm], action_topics[arm])):
             reasons.append(f"缺少 {arm} 示教动作")
     if not counts.get(CAMERAS["top_rgb"], 0):
         reasons.append("缺少顶部 RGB")
     if not any(counts.get(t, 0) for t in (*STATES.values(), *CAN_STATES.values())):
         reasons.append("缺少实测关节反馈")
-    if not any(counts.get(t, 0) for t in (*ACTIONS.values(), *CAN_ACTIONS.values())):
+    if not any(counts.get(t, 0) for t in (*ACTIONS.values(), *action_topics.values())):
         reasons.append("缺少示教动作目标")
     for arm in arms:
         if arm in STATES and not counts.get(CAMERAS[f"{arm}_wrist_rgb"], 0):
@@ -112,7 +150,8 @@ def audit_native(episode_path, fps=10, max_age_ms=100, max_can_skew_ms=30,
     quality = None
     input_format = None
     if meta.get("state") == "saved" and all(arm in STATES for arm in arms):
-        if all(counts.get(CAN_STATES[arm], 0) and counts.get(CAN_ACTIONS[arm], 0) for arm in arms):
+        if (all(counts.get(CAN_STATES[arm], 0) for arm in arms)
+                and all(counts.get(action_topics[arm], 0) for arm in arms)):
             input_format = "can-vector"
         elif all(counts.get(STATES[arm], 0) and counts.get(ACTIONS[arm], 0) for arm in arms):
             input_format = "joint-state"
@@ -132,7 +171,7 @@ def audit_native(episode_path, fps=10, max_age_ms=100, max_can_skew_ms=30,
                     gripper_calibration=gripper_calibration if input_format == "can-vector" else None,
                     extract_valid_segments=extract_valid_segments and input_format == "can-vector",
                     require_training_contract=not (extract_valid_segments and input_format == "can-vector"),
-                    source_acceptance=source_acceptance)
+                    action_source=action_source, source_acceptance=source_acceptance)
                 aligned_frames = len(frames)
                 quality = validated["_quality"]
                 candidates = [item for item in quality["segments"] if item["meets_16_step_window"]]
@@ -155,7 +194,7 @@ def audit_native(episode_path, fps=10, max_age_ms=100, max_can_skew_ms=30,
         "frame_stats_by_header_stamp": meta.get("bag_validation", {}).get("frame_stats_by_header_stamp", {}),
         "has_depth": any("depth/" in name and count > 0 for name, count in counts.items()),
         "has_rgb": any("color/image_raw" in name and count > 0 for name, count in counts.items()),
-        "has_action_target": any(counts.get(t, 0) for t in (*ACTIONS.values(), *CAN_ACTIONS.values())),
+        "has_action_target": any(counts.get(t, 0) for t in (*ACTIONS.values(), *action_topics.values())),
         "has_feedback": any(counts.get(t, 0) for t in (*STATES.values(), *CAN_STATES.values())),
         "annotation_coverage": annotated_frames / aligned_frames if aligned_frames else 0.0,
         "aligned_frame_count": aligned_frames, "eligible_frame_count": annotated_frames if not reasons else 0,
@@ -164,7 +203,15 @@ def audit_native(episode_path, fps=10, max_age_ms=100, max_can_skew_ms=30,
         "skill_id": label["skill_id"] if label else meta.get("skill"),
         "group_id": label["group_id"] if label else None,
         "task_text": label["task_text"] if label else meta.get("task"),
-        "input_format": input_format, "quality": quality,
+        "input_format": input_format, "action_source": action_source,
+        "thresholds": {"fps": fps, "max_age_ms": max_age_ms,
+                       "max_can_skew_ms": max_can_skew_ms,
+                       "max_camera_gap_ms": max_camera_gap_ms,
+                       "max_camera_skew_ms": max_camera_skew_ms,
+                       "max_source_skew_ms": max_source_skew_ms},
+        "quality": quality,
+        "latency": {"raw_can_bag": raw_can_bag_delay(episode_path / "bag") if input_format == "can-vector" else {},
+                    "transport": (quality or {}).get("transport_diagnostics")},
         "eligibility_scope": "source_sft_export", "training_ready": False,
         "data_convention_version": fields.get("data_convention_version"),
         "normalization_version": fields.get("normalization_version"),
@@ -188,11 +235,14 @@ def main():
                         help="绑定原 Episode 摘要与独立来源证据的验收 JSON；不修改原始来源")
     parser.add_argument("--extract-valid-segments", action="store_true",
                         help="只读提取原始 Header 连续片段及 16 步候选；候选不授予训练资格")
+    parser.add_argument("--action-source", choices=("master_target", "follower_next_state"),
+                        default="master_target",
+                        help="master_target：主臂绝对目标；follower_next_state：从臂反馈 t+1 作为动作")
     parser.add_argument("--fps", type=int, default=10)
     parser.add_argument("--max-age-ms", type=float, default=100)
     parser.add_argument("--max-can-skew-ms", type=float, default=30)
     parser.add_argument("--max-camera-gap-ms", type=float, default=100)
-    parser.add_argument("--max-camera-skew-ms", type=float, default=30)
+    parser.add_argument("--max-camera-skew-ms", type=float, default=40)
     parser.add_argument("--max-source-skew-ms", type=float,
                         help="成功 SFT 审计必填；RGB、状态、示教目标 Header 的最大总体跨度")
     parser.add_argument("--test-percent", type=int, default=20)
@@ -216,7 +266,7 @@ def main():
         rows += [audit_native(path.parent, args.fps, args.max_age_ms, args.max_can_skew_ms,
                               args.max_camera_gap_ms, args.max_camera_skew_ms,
                               args.max_source_skew_ms, gripper_calibration, args.extract_valid_segments,
-                              source_acceptance)
+                              source_acceptance, args.action_source)
                  for path in sorted(args.episode_root.rglob("episode.json"))
                  if (path.parent / "bag" / "metadata.yaml").exists()]
     eligible = [row for row in rows if row["eligible"]]

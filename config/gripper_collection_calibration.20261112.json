@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "description": "2026-11-12 操作员确认四路空载实际闭合的软件零点；以本轮原始 CAN 末端稳定簇中位数校正",
+  "unit": "m",
+  "valid_range": {
+    "min": 0.0,
+    "max": 0.1
+  },
+  "evidence_path": "/home/mips/pi05_datas/validation/gripper_zero_20261112",
+  "direction": "opening_increases_value",
+  "arm_mapping": {
+    "left": {
+      "master_target": "/piper_vector/left/master_target",
+      "slave_feedback": "/piper_vector/left/slave_feedback"
+    },
+    "right": {
+      "master_target": "/piper_vector/right/master_target",
+      "slave_feedback": "/piper_vector/right/slave_feedback"
+    }
+  },
+  "streams": {
+    "/piper_vector/left/master_target": {
+      "closed_reference": -0.0027,
+      "observed_open": 0.0992,
+      "zero_evidence": {
+        "samples": 14,
+        "first_header_sec": 1794448492.758112,
+        "last_header_sec": 1794448492.8231118,
+        "median_raw_counts": -2700.0,
+        "range_raw_counts": [
+          -2800,
+          -2700
+        ]
+      },
+      "observed_open_source": "历史 2026-11-05 原始开口记录；本轮不作为新全开标定"
+    },
+    "/piper_vector/left/slave_feedback": {
+      "closed_reference": -0.0018,
+      "observed_open": 0.0985,
+      "zero_evidence": {
+        "samples": 6813,
+        "first_header_sec": 1794448492.9423792,
+        "last_header_sec": 1794448527.0026762,
+        "median_raw_counts": -1800,
+        "range_raw_counts": [
+          -1800,
+          -1700
+        ]
+      },
+      "observed_open_source": "历史 2026-11-05 原始开口记录；本轮不作为新全开标定"
+    },
+    "/piper_vector/right/master_target": {
+      "closed_reference": -0.0014,
+      "observed_open": 0.1017,
+      "zero_evidence": {
+        "samples": 71,
+        "first_header_sec": 1794448499.195469,
+        "last_header_sec": 1794448500.0455022,
+        "median_raw_counts": -1400,
+        "range_raw_counts": [
+          -1400,
+          -1300
+        ]
+      },
+      "observed_open_source": "历史 2026-11-05 原始开口记录；本轮不作为新全开标定"
+    },
+    "/piper_vector/right/slave_feedback": {
+      "closed_reference": -0.0011,
+      "observed_open": 0.0996,
+      "zero_evidence": {
+        "samples": 5528,
+        "first_header_sec": 1794448499.3690932,
+        "last_header_sec": 1794448527.0043101,
+        "median_raw_counts": -1100.0,
+        "range_raw_counts": [
+          -1100,
+          -1000
+        ]
+      },
+      "observed_open_source": "历史 2026-11-05 原始开口记录；本轮不作为新全开标定"
+    }
+  },
+  "application_status": "measured_zero_for_explicit_conversion",
+  "notes": "原始 CAN 不改写，不向电机写入硬件零点。校正值=原始值-各自 closed_reference。100 mm 范围沿用项目约定，observed_open 沿用历史资料，本轮未测全行程。左主端末段 14 帧约65ms，波动100个原始计数（0.1mm）；额外左侧窗口没有收到主端新帧，不声明重复主端端点验收通过。",
+  "version_id": "piper_gripper_actual_closed_zero_20261112_v1",
+  "recorded_at_unix_ns": 1794448712067529980,
+  "previous_calibration_sha256": "f4a4ec03411e42d421ca3cc3c6837c3fc3384957f71b256783f2d39399798c6b",
+  "evidence_sha256": {
+    "close_repeat_left_2.jsonl": "553a97d6c073396bc734e3a2cb9cb674d1e65fc0c804384b2618e1fe10408a3a",
+    "closed_initial.jsonl": "0da34878526a03ce9c5c21bb6337393cd2380ea69d0ae51fe3190392e7daac1e",
+    "close_repeat_1.jsonl": "6dee0ddb5a2fb28f105f6327a761089675c48459da6c2d614bf044ee7acf1ef9"
+  }
+}

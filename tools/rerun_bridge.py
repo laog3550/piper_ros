@@ -66,6 +66,24 @@ def stamp_ns(msg, fallback_ns):
     return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
 
+def episode_cutoffs(bag_path):
+    """Return the logical episode window recorded in the adjacent episode.json."""
+    path = Path(bag_path)
+    for metadata_path in (path / "episode.json", path.parent / "episode.json"):
+        if not metadata_path.is_file():
+            continue
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None, None, None
+        start = metadata.get("ready_at_unix_ns") or metadata.get("started_at_unix_ns")
+        stop = metadata.get("trim_boundary_ns") or metadata.get("stopped_at_unix_ns")
+        if type(start) is not int or type(stop) is not int or stop <= start:
+            return None, None, None
+        return start, stop, metadata_path
+    return None, None, None
+
+
 def raw_image(msg):
     encoding = msg.encoding.lower()
     formats = {
@@ -208,7 +226,7 @@ def live(bridge):
             rclpy.shutdown()
 
 
-def replay(bridge, bag, storage_id):
+def replay(bridge, bag, storage_id, full=False):
     import rosbag2_py
     from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
@@ -216,6 +234,10 @@ def replay(bridge, bag, storage_id):
     bag = Path(bag)
     if not (bag / "metadata.yaml").is_file() and (bag / "bag" / "metadata.yaml").is_file():
         bag = bag / "bag"
+    start_ns = stop_ns = None
+    metadata_path = None
+    if not full:
+        start_ns, stop_ns, metadata_path = episode_cutoffs(bag)
     reader = rosbag2_py.SequentialReader()
     reader.open(rosbag2_py.StorageOptions(uri=str(bag), storage_id=storage_id),
                 rosbag2_py.ConverterOptions("", ""))
@@ -224,10 +246,22 @@ def replay(bridge, bag, storage_id):
         if topic in bag_types and bag_types[topic] != MESSAGE_TYPES[spec["type"]]:
             raise ValueError(f"rosbag2 消息类型不匹配: {topic}: {bag_types[topic]}")
     classes = {topic: get_message(bag_types[topic]) for topic in bridge.topics if topic in bag_types}
+    skipped = 0
     while reader.has_next():
         topic, payload, when = reader.read_next()
-        if topic in classes:
-            bridge.accept(topic, deserialize_message(payload, classes[topic]), when)
+        if topic not in classes:
+            continue
+        message = deserialize_message(payload, classes[topic])
+        if start_ns is not None:
+            logical_ns = stamp_ns(message, when)
+            if logical_ns < start_ns or logical_ns > stop_ns:
+                skipped += 1
+                continue
+        bridge.accept(topic, message, when)
+    if metadata_path is not None:
+        print(f"Rerun replay 按 {metadata_path} 裁切到 "
+              f"{start_ns}..{stop_ns} ns；跳过 {skipped} 条窗口外消息。"
+              "加 --full 可显示原始 bag。", flush=True)
 
 
 def main():
@@ -239,6 +273,10 @@ def main():
     replay_parser = commands.add_parser("replay")
     replay_parser.add_argument("bag", help="rosbag2 episode 目录")
     replay_parser.add_argument("--storage-id", default="sqlite3", help="sqlite3 或 mcap")
+    replay_parser.add_argument(
+        "--full", action="store_true",
+        help="显示原始 bag 的全部消息，不按 episode.json 的 ready/trim_boundary 裁切；"
+             "默认在存在 episode.json 时只显示逻辑 Episode 窗口")
     args = parser.parse_args()
     config, topics = load_config(args.config)
     rr.init("piper_episode", spawn=not args.save)
@@ -248,7 +286,7 @@ def main():
     if args.mode == "live":
         live(bridge)
     else:
-        replay(bridge, args.bag, args.storage_id)
+        replay(bridge, args.bag, args.storage_id, args.full)
 
 
 if __name__ == "__main__":

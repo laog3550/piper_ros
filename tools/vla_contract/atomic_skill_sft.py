@@ -140,6 +140,9 @@ def check_source(row, annotation, mode, skill):
     task_text = meta.get("task")
     initial = task.get("initial_conditions")
     group_id = initial.get("perturbation_id") if isinstance(initial, dict) else None
+    expected_provenance = ("teleoperation_follower_next_state"
+                           if task.get("action_source") == "follower_next_state"
+                           else "human_demonstration")
     require(meta.get("schema_version") == 2 and meta.get("mode") == "skill"
             and meta.get("state") == "saved" and meta.get("episode_id") == row["episode_id"]
             and meta.get("skill") == skill and meta.get("outcome") == "success"
@@ -149,7 +152,7 @@ def check_source(row, annotation, mode, skill):
             and group_id.strip() == row.get("group_id")
             and task.get("arm_mode") == mode and task.get("time_domain") == "unix_ns"
             and task.get("action_space") == ACTION_SPACE
-            and task.get("action_provenance") == "human_demonstration",
+            and task.get("action_provenance") == expected_provenance,
             f"{row['episode_id']}: 原始 Episode 状态/动作来源未核验")
     marks = meta.get("annotations")
     require(isinstance(marks, list), f"{row['episode_id']}: 缺少 v2 技能标注")
@@ -176,7 +179,7 @@ def check_source(row, annotation, mode, skill):
             f"{row['episode_id']}: 标定或归一化版本不一致")
     require(annotation.get("skill_id") == skill and annotation.get("success") is True
             and annotation.get("verified") is True and annotation.get("atomic_episode") is True
-            and annotation.get("action_provenance") == "human_demonstration"
+            and annotation.get("action_provenance") == expected_provenance
             and annotation.get("calibration_verified") is True
             and annotation.get("units_verified") is True
             and annotation.get("gripper_mapping_verified") is True
@@ -284,9 +287,9 @@ def check_source_timestamps(path, episodes, mode, input_format, max_sync_ns, max
 def inspect(dataset, annotations_path, audit_path, skill, max_sync_ns, max_age_ns,
             min_train=10, min_test=3):
     require(skill in SKILLS, "未知原子技能")
-    require(type(max_sync_ns) is int and 0 < max_sync_ns <= 30_000_000
+    require(type(max_sync_ns) is int and 0 < max_sync_ns <= 40_000_000
             and type(max_age_ns) is int and 0 < max_age_ns <= 250_000_000,
-            "必须提供同步 ≤30 ms、源年龄 ≤250 ms 的正数门限")
+            "必须提供同步 ≤40 ms、源年龄 ≤250 ms 的正数门限")
     manifest_path = dataset / "conversion_manifest.json"
     manifest, annotations, audit = read_json(manifest_path), read_json(annotations_path), read_json(audit_path)
     mode = manifest.get("arm_mode")

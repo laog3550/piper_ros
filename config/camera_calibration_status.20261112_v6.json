@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "version_id": "camera_training_acceptance_20261112_v6",
+  "status": "accepted_for_raw_rgb_joint_training_camera_source",
+  "scope": "2026-11-12 15 fps 纯彩色、固定曝光与固定白平衡的三路原始 RGB 与 CameraInfo 来源；Episode 逐帧审计、训练统计和几何标定另行验收",
+  "camera_contract_version": "piper_rgb_joint_camera_contract_v3_20261112_30fps",
+  "camera_info_snapshot_version": "camera_info_snapshot_20261112_v1",
+  "installation_epoch_id": "piper_camera_installation_20261110_operator_confirmed_v1",
+  "exposure_note": "D455 顶部固定曝光 166 µs、gain 64、白平衡 4000K；Orbbec 左右腕固定曝光 100、gain 0、白平衡 4600K；自动曝光和自动白平衡关闭。",
+  "top_intrinsics_note": "顶部 D455 K/P 相对 11-10 快照变化约 0.5276 px；本批次使用 2026-11-12 新快照，不声明变化物理原因或几何精度",
+  "sources": {
+    "manifest": {
+      "path": "/home/mips/pi05_datas/validation/camera_evidence_20261112_v6/manifest.json",
+      "sha256": "d3570a5701152dcb62d76d5403c29c43b5964fbe2cf87e561b3a403dd485c41c"
+    },
+    "capture": {
+      "path": "/home/mips/pi05_datas/validation/camera_evidence_20261112_v6/capture.json",
+      "sha256": "3fb88c6ecf7b984140e659e080db8dc0b3d9a8dff5bf6e33ccf204af3e1d4c89"
+    },
+    "contract": {
+      "path": "/home/mips/pi05_datas/validation/camera_evidence_20261112_v6/contract.json",
+      "sha256": "d157907ee28e57899d1aa8d08c8c38a6f696f1dbb96804ca4c350c03568e966d"
+    },
+    "baseline": {
+      "path": "/home/mips/pi05_datas/validation/camera_evidence_20261112_v6/baseline.json",
+      "sha256": "fd561ce5a731ccb76854f71f2a791447ad7305ad3bbdb62e1553cdd1bb683c41"
+    },
+    "mount_review": {
+      "path": "/home/mips/pi05_datas/validation/camera_mount_review_20261112_v6.json",
+      "sha256": "405cf2a8e0d6e849d802acd4784b37078fea8b5ff9610868f2a4d9154481155e"
+    },
+    "audit_report": {
+      "path": "/home/mips/pi05_datas/validation/camera_training_acceptance_20261112_v6.json",
+      "sha256": "99d64b5bec79459f37a2c5b5ce2a6ab98445dc25548a2c252c8c6a2cd7f0e584"
+    }
+  },
+  "training_camera_evidence_ready": true,
+  "episode_training_eligible": "not_evaluated",
+  "intrinsic_geometry_verified": false,
+  "extrinsic_geometry_verified": false,
+  "motion_planning_geometry_ready": false,
+  "remaining": "每条 Episode 需绑定本验收、逐帧同步与动作来源审计；训练归一化和 checkpoint 另行验收。"
+}

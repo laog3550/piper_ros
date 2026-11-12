@@ -272,10 +272,19 @@ def check_dataset(dataset, evidence, audit_report, *, require_normalization=True
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     proof = json.loads(evidence.read_text(encoding="utf-8"))
     audit = json.loads(audit_report.read_text(encoding="utf-8"))
+    action_source = manifest.get("action_source", "master_target")
+    if action_source not in ("master_target", "follower_next_state"):
+        raise ValueError("转换清单的 action_source 无效")
+    expected_provenance = ("teleoperation_follower_next_state"
+                           if action_source == "follower_next_state" else "human_demonstration")
+    manifest_provenance = manifest.get(
+        "action_provenance",
+        "human_demonstration" if action_source == "master_target" else None)
     if (manifest.get("format") != "LeRobotDataset v3.0"
             or manifest.get("purpose") != "success_sft"
             or manifest.get("arm_mode") not in ("LEFT", "RIGHT")
             or manifest.get("action_space") != "absolute_joint_position_7"
+            or manifest_provenance != expected_provenance
             or manifest.get("joint_names") != [f"{manifest.get('arm_mode', '').lower()}.joint{i}" for i in range(1, 7)]
             + [f"{manifest.get('arm_mode', '').lower()}.gripper"]):
         raise ValueError("LeRobot 转换清单不是单臂 Piper 绝对 7 维数据")
@@ -289,7 +298,8 @@ def check_dataset(dataset, evidence, audit_report, *, require_normalization=True
             or proof.get("source_audit_sha256") != digest(audit_report)
             or proof.get("action_space") != "absolute_joint_position_7"
             or proof.get("arm_mode") != manifest["arm_mode"]
-            or proof.get("action_provenance") != "human_demonstration"
+            or proof.get("action_provenance") != expected_provenance
+            or proof.get("action_source", "master_target") != action_source
             or proof.get("gripper_mapping_verified") is not True
             or proof.get("calibration_verified") is not True):
         raise ValueError("缺少与数据清单匹配的独立 Piper 训练核验证据")
@@ -327,6 +337,7 @@ def check_dataset(dataset, evidence, audit_report, *, require_normalization=True
                 or audited_row.get("skill_id") != skill
                 or audited_row.get("group_id") != group_id
                 or audited_row.get("task_text") != task_text
+                or audited_row.get("action_source", "master_target") != action_source
                 or audited_row.get("suggested_split") != split):
             raise ValueError("Episode 技能、任务文本、场景组或审计切分不一致")
         source = Path(row.get("source", ""))
@@ -344,7 +355,8 @@ def check_dataset(dataset, evidence, audit_report, *, require_normalization=True
                 or fields.get("arm_mode") != manifest["arm_mode"]
                 or fields.get("time_domain") != "unix_ns"
                 or fields.get("action_space") != "absolute_joint_position_7"
-                or fields.get("action_provenance") != "human_demonstration"
+                or fields.get("action_provenance") != expected_provenance
+                or fields.get("action_source", "master_target") != action_source
                 or fields.get("calibration_version") != row.get("calibration_version")
                 or fields.get("data_convention_version") != row.get("data_convention_version")
                 or not isinstance(initial, dict)

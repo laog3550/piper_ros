@@ -102,11 +102,15 @@ def test_skill_success_needs_recorded_frame_and_verified_save(recorder):
                                 "header_stamp_ns": 123})
     assert result["annotation"]["skill_result"] == "success"
     module = load_recorder_module()
-    with pytest.raises(ValueError, match="已在 rosbag 核验"):
-        module.require_verified_skill_completion(recorder.metadata, "success")
+    status = module.assess_training_eligibility(recorder.metadata, "success")
+    assert not status["eligible"] and status["status"] == "sft_frame_gate_failed"
     result["annotation"]["verified_in_bag"] = True
-    module.require_verified_skill_completion(recorder.metadata, "success")
-    module.require_verified_skill_completion(recorder.metadata, "failure")
+    result["annotation"]["source_validation"] = {
+        "alignment_policy": "causal_rgb_bundle_v1", "contiguous_frames": 16}
+    status = module.assess_training_eligibility(recorder.metadata, "success")
+    assert not status["eligible"] and status["status"] == "sft_frame_gate_passed"
+    assert status["frame_gate_passed"] is True
+    assert not module.assess_training_eligibility(recorder.metadata, "failure")["eligible"]
 
 
 def test_recovery_trigger_has_stable_link(recorder):
@@ -199,6 +203,7 @@ def test_duplicate_discovered_after_bag_start_stops_recorder(tmp_path, monkeypat
         return [publisher_info(gid=1)] if len(calls) == 1 else [
             publisher_info(gid=1), publisher_info(gid=2)]
     instance.node = SimpleNamespace(get_publishers_info_by_topic=publishers)
+    monkeypatch.setattr(module, "drain_ros_callbacks", lambda node: None)
     monkeypatch.setattr(module.time, "sleep", lambda _: None)
     monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **kw:
                         SimpleNamespace(pid=1234, poll=lambda: None))
@@ -316,6 +321,53 @@ def test_terminal_stale_requires_observation_continuity_to_stop(tmp_path, monkey
     assert module.terminal_stale_master_target(bag, "left", base, base + 500_000_000) is None
 
 
+def test_classify_master_target_for_live_stale_trim():
+    module = load_recorder_module()
+    def message(**overrides):
+        values = dict(header=SimpleNamespace(frame_id="can_left"),
+                      source_topic="/piper_direct/left/master_target",
+                      source_can_ids=[0x155, 0x156, 0x157, 0x159],
+                      valid=True, stale=[False] * 4, missing=[False] * 4,
+                      time_inconsistent=False, gripper_mapping_verified=True)
+        values.update(overrides)
+        return SimpleNamespace(**values)
+    assert module.classify_master_target(message(), "left") == "valid"
+    assert module.classify_master_target(message(valid=False, stale=[True] * 4), "left") == "stale"
+    assert module.classify_master_target(message(missing=[True] + [False] * 3), "left") == "reset"
+    assert module.classify_master_target(message(gripper_mapping_verified=False), "left") == "reset"
+    assert module.classify_master_target(message(valid=False, stale=[False] * 4), "left") == "reset"
+
+
+def test_live_terminal_stale_requires_two_stale_messages_and_no_open_hold(recorder):
+    recorder.auto_trim_stale_tail = True
+    recorder.stale_stop_grace_sec = 1.0
+    recorder.metadata.update(mode="skill", task_metadata={"arm_mode": "LEFT"}, hold_segments=[])
+    recorder._master_monitor = {"left": {"last_valid_monotonic_ns": 1_000,
+                                         "last_stale_monotonic_ns": None, "stale_count": 0}}
+    assert recorder._terminal_stale_elapsed_ns(2_000_000_000) == 0
+    recorder._master_monitor["left"].update(last_stale_monotonic_ns=2_000_000_000, stale_count=1)
+    assert recorder._terminal_stale_elapsed_ns(2_000_000_000) == 0
+    recorder._master_monitor["left"]["stale_count"] = 2
+    assert recorder._terminal_stale_elapsed_ns(2_000_000_000) == 1_999_999_000
+    recorder.metadata["hold_segments"] = [{"end_unix_ns": None}]
+    assert recorder._terminal_stale_elapsed_ns(2_000_000_000) == 0
+
+
+def test_live_terminal_stale_requires_status_within_freshness_window(recorder):
+    recorder.auto_trim_stale_tail = True
+    recorder.metadata.update(mode="skill", task_metadata={"arm_mode": "LEFT"}, hold_segments=[])
+    recorder._master_monitor = {"left": {"last_valid_monotonic_ns": 1_000,
+                                         "last_stale_monotonic_ns": 2_000_000_000,
+                                         "stale_count": 2}}
+    assert recorder._terminal_stale_elapsed_ns(2_050_000_000) == 2_049_999_000
+    assert recorder._terminal_stale_elapsed_ns(2_150_000_000) == 0
+
+
+def test_status_poll_period_is_shorter_than_live_stale_freshness():
+    module = load_recorder_module()
+    assert module.RECORDER_STATUS_POLL_SEC * 1_000_000_000 < module.LIVE_STALE_FRESHNESS_NS
+
+
 def test_frame_before_stale_does_not_select_a_distant_or_later_image(tmp_path, monkeypatch):
     module, bag, base = stale_bag(tmp_path, monkeypatch, [], [(50, 50), (211, 210)])
     with pytest.raises(ValueError, match="100 ms"):
@@ -345,15 +397,49 @@ def test_stop_marks_terminal_stale_preceding_frame(recorder, monkeypatch, camera
     monkeypatch.setattr(globals_["time"], "sleep", lambda _: None)
     recorder.stop(reason="duration_limit")
     assert recorder.metadata["state"] == "stopped"
+    assert recorder.metadata["annotations"] == []
     if expected:
-        complete, = recorder.metadata["annotations"]
-        assert complete["annotation_origin"] == "duration_limit_before_terminal_stale"
-        assert complete["header_stamp_ns"] == base + 180_000_000
-        assert complete["verified_in_bag"] is True
+        candidate = recorder.metadata["auto_completion_candidate"]
+        assert candidate["candidate_origin"] == "duration_limit_before_terminal_stale"
+        assert candidate["header_stamp_ns"] == base + 180_000_000
+        assert candidate["source_topic"].endswith("/color/image_raw")
         assert recorder.metadata["auto_completion_stale_boundary"]["first_stale_receive_ns"] == base + 320_000_000
+        assert recorder.metadata["completion_review_required"] is True
     else:
-        assert recorder.metadata["annotations"] == []
+        assert "auto_completion_candidate" not in recorder.metadata
         assert "100 ms" in recorder.metadata["auto_completion_error"]
+
+
+def test_stale_tail_stop_trims_to_last_valid_master_header(recorder, monkeypatch):
+    records = [(200, 200, "valid"), *[(t, 200, "valid") for t in range(220, 301, 20)],
+               *[(t, 200, "stale") for t in range(320, 501, 20)]]
+    module, bag, base = stale_bag(recorder.current, monkeypatch, records,
+                                 [(185, 180), (311, 310), (490, 490)])
+    recorder.metadata.update(mode="skill", skill="pick_and_place_banana_in_box",
+                             active_skill="pick_and_place_banana_in_box", ready_at_unix_ns=base,
+                             task_metadata={"arm_mode": "LEFT"}, required_topics=[],
+                             hold_segments=[])
+    recorder.topics, recorder.expected_fps = [], {}
+    recorder.process = SimpleNamespace(poll=lambda: None)
+    recorder.ready_monotonic_ns = None
+    recorder.auto_trim_stale_tail = True
+    recorder.stale_stop_grace_sec = 1.0
+    monkeypatch.setattr(recorder, "_sample_clock", lambda: None)
+    monkeypatch.setattr(recorder, "_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(recorder, "_terminate", lambda: None)
+    monkeypatch.setattr(recorder, "status", lambda: {"state": recorder.metadata["state"]})
+    globals_ = recorder.stop.__globals__
+    monkeypatch.setitem(globals_, "inspect_bag", lambda *args: {})
+    monkeypatch.setattr(globals_["time"], "time_ns", lambda: base + 500_000_000)
+    monkeypatch.setattr(globals_["time"], "sleep", lambda _: None)
+    recorder.stop(reason="stale_tail")
+    assert recorder.metadata["trim_boundary_ns"] == base + 200_000_000
+    assert recorder.metadata["stopped_at_unix_ns"] == base + 200_000_000
+    assert recorder.metadata["recorded_duration_sec"] == 0.2
+    assert recorder.metadata["auto_trim_source"] == "terminal_stale_master_target"
+    candidate = recorder.metadata["auto_completion_candidate"]
+    assert candidate["candidate_origin"] == "stale_tail_before_terminal_stale"
+    assert candidate["header_stamp_ns"] == base + 180_000_000
 
 
 def test_hold_segment_requires_explicit_operator_annotation(recorder):
@@ -398,3 +484,18 @@ def test_qos_override_deepens_raw_can_reader_queue(tmp_path):
     assert "/piper_direct/left/master_target:" in text
     assert "history: keep_last" in text and "depth: 5000" in text
     assert "reliability: reliable" in text and "durability: volatile" in text
+
+
+def test_ros_callback_drain_handles_multiple_sources_but_has_a_work_budget(monkeypatch):
+    module = load_recorder_module()
+    calls = []
+    executor = SimpleNamespace(add_node=lambda node: None,
+                               spin_once=lambda **kw: calls.append(kw))
+    monkeypatch.setattr(module.rclpy, 'get_global_executor', lambda: executor, raising=False)
+    monkeypatch.setattr(module.time, 'monotonic', lambda: 0)
+    module.drain_ros_callbacks(object(), limit=4)
+    assert len(calls) == 4 and all(c['timeout_sec'] == 0 for c in calls)
+    calls.clear();clock = iter([0, .006])
+    monkeypatch.setattr(module.time, 'monotonic', lambda: next(clock))
+    module.drain_ros_callbacks(object(), limit=32, budget_sec=.005)
+    assert len(calls) == 1

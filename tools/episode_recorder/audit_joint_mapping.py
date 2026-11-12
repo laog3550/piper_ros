@@ -91,7 +91,9 @@ def audit(bag, tolerance_ns):
     source_lookup = {}
     duplicate_keys = conflicting_keys = 0
     with Reader(bag) as reader:
-        connections = [c for c in reader.connections if c.topic.startswith(("/piper_direct/", "/piper_vector/"))]
+        diagnostics = {f"/piper_direct/{side}/diagnostics" for side in ("left", "right")}
+        connections = [c for c in reader.connections
+                       if c.topic.startswith(("/piper_direct/", "/piper_vector/")) and c.topic not in diagnostics]
         for connection, received, raw in reader.messages(connections=connections):
             message = typestore.deserialize_cdr(raw, connection.msgtype)
             topic = connection.topic

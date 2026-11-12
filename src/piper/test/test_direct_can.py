@@ -94,8 +94,11 @@ class DirectCanDecodeTest(unittest.TestCase):
                 self._publishers.append(publisher)
                 return publisher
 
+            def create_timer(self, *_args):
+                pass
+
         fake_rclpy = types.ModuleType('rclpy')
-        fake_rclpy.ok = mock.Mock(side_effect=(True, True, False))
+        fake_rclpy.ok = mock.Mock(return_value=True)
         fake_rclpy.shutdown = mock.Mock()
         fake_rclpy_node = types.ModuleType('rclpy.node')
         fake_rclpy_node.Node = FakeNode
@@ -106,12 +109,23 @@ class DirectCanDecodeTest(unittest.TestCase):
             'ExternalShutdownException', (RuntimeError,), {})
         fake_messages = types.ModuleType('piper_msgs.msg')
         fake_messages.PiperDirectCanFrame = Message
+        fake_qos = types.ModuleType('rclpy.qos')
+        fake_qos.QoSProfile = lambda **kwargs: types.SimpleNamespace(**kwargs)
+        fake_qos.HistoryPolicy = types.SimpleNamespace(KEEP_LAST=1)
+        fake_qos.ReliabilityPolicy = types.SimpleNamespace(RELIABLE=1)
+        fake_qos.DurabilityPolicy = types.SimpleNamespace(VOLATILE=1)
+        fake_std = types.ModuleType('std_msgs.msg')
+        fake_std.String = lambda: types.SimpleNamespace(data='')
 
         bus = mock.MagicMock()
         bus.__enter__.return_value = bus
-        bus.recv.side_effect = [
-            frame(0x155, bytes(8)), frame(0x2A8, bytes(8))
-        ]
+        incoming = [frame(0x155, bytes(8)), frame(0x2A8, bytes(8))]
+        def receive(**_kwargs):
+            if incoming:
+                return incoming.pop(0)
+            node._stop.set()
+            return None
+        bus.recv.side_effect = receive
         node_path = (pathlib.Path(__file__).resolve().parents[1]
                      / 'piper' / 'piper_direct_can_node.py')
         spec = importlib.util.spec_from_file_location('piper_direct_can_node_test', str(node_path))
@@ -120,6 +134,8 @@ class DirectCanDecodeTest(unittest.TestCase):
                                            'rclpy.node': fake_rclpy_node,
                                            'rclpy._rclpy_pybind11': fake_rclpy_core,
                                            'rclpy.executors': fake_rclpy_executors,
+                                           'rclpy.qos': fake_qos,
+                                           'std_msgs.msg': fake_std,
                                            'piper_msgs.msg': fake_messages}):
             spec.loader.exec_module(module)
             with (mock.patch.object(can, 'Bus', return_value=bus) as bus_factory,
@@ -127,9 +143,13 @@ class DirectCanDecodeTest(unittest.TestCase):
                 with mock.patch.object(module.threading.Thread, 'start'):
                     node = module.PiperDirectCanNode()
                 node._listen('can_left')
+                self.assertFalse(publications['/piper_direct/left/master_target'])
+                node._publish_stop.set()
+                for kind in ('master_target', 'slave_feedback'):
+                    node._publish_loop('can_left', kind)
 
         bus_factory.assert_called_once()
-        self.assertEqual(bus.recv.call_count, 2)
+        self.assertEqual(bus.recv.call_count, 3)
         bus.send.assert_not_called()
         bus.send_periodic.assert_not_called()
         self.assertEqual(len(publications['/piper_direct/left/master_target']), 1)
@@ -144,3 +164,17 @@ class DirectCanDecodeTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_reused_sdk_message_matches_fresh_decode_across_roles():
+    import random
+    from piper.piper_direct_can_decode import C_PiperParserV2, PiperMessage, FRAME_IDS
+    rng = random.Random(20261112)
+    parser, reused = C_PiperParserV2(), PiperMessage()
+    for _ in range(1000):
+        cid = rng.choice(sorted(FRAME_IDS))
+        data = (rng.randint(-180000, 180000).to_bytes(4, 'big', signed=True)
+                + rng.randint(-3000, 3000).to_bytes(2, 'big', signed=True)
+                + bytes((rng.randrange(4), 0)))
+        message = frame(cid, data)
+        assert decode_frame(message, parser, reused) == decode_frame(message)

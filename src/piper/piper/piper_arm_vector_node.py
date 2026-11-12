@@ -8,6 +8,7 @@ import time
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from piper_msgs.msg import PiperArmVector, PiperDirectCanFrame
 
 from piper.piper_arm_vector import ArmVectorAssembler
@@ -25,6 +26,12 @@ class PiperArmVectorNode(Node):
         max_skew_ms = self.declare_parameter('max_skew_ms', 30.0).value
         publish_hz = self.declare_parameter('publish_hz', 50.0).value
         side = self.declare_parameter('side', 'all').value
+        input_depth = self.declare_parameter('input_qos_depth', 32).value
+        if isinstance(input_depth, bool) or not isinstance(input_depth, int) or not 1 <= input_depth <= 100_000:
+            raise ValueError('input_qos_depth 必须为 1 至 100000 的整数')
+        self._input_qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=input_depth,
+                                     reliability=ReliabilityPolicy.BEST_EFFORT,
+                                     durability=DurabilityPolicy.VOLATILE)
         self._gripper_verified = self.declare_parameter(
             'gripper_mapping_verified', False).value
         if max_age_ms <= 0 or max_skew_ms < 0 or publish_hz <= 0:
@@ -42,7 +49,7 @@ class PiperArmVectorNode(Node):
                 publisher = self.create_publisher(PiperArmVector, output_topic, 10)
                 self.create_subscription(
                     PiperDirectCanFrame, assembler.source_topic,
-                    lambda msg, a=assembler: a.add(msg), 1000)
+                    lambda msg, a=assembler: a.add(msg), self._input_qos)
                 self._streams.append((assembler, publisher))
         self.create_timer(1.0 / publish_hz, self._publish)
 

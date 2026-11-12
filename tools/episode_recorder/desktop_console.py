@@ -2,6 +2,7 @@
 """本地三路相机与 Episode 控制台。运行：python3 tools/episode_recorder/desktop_console.py --config config.json。"""
 
 import argparse
+import base64
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import json
@@ -11,6 +12,7 @@ import socket
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -29,6 +31,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from piper_msgs.msg import PiperArmVector
 from preview_depth import DEPTH_MAX_METERS, camera_topics, depth_to_bgr, overlay_color_edges
+from episode_catalog import scan_episode_directory
 from skill_web_console import (SKILLS, ARM_TOPICS, start_request, annotation_request,
                                collection_contract_diagnostics, provisional_collection_versions)
 
@@ -46,18 +49,52 @@ STATE_NAMES = {"idle": "空闲", "starting": "启动中", "recording": "录制�
                "interrupted": "意外中断，待丢弃"}
 
 
-def skill_completion_issue(skill, annotations, frame_topics):
-    """Describe why a successful atomic episode lacks one verified completion frame."""
+def completion_status_text(metadata):
+    """Describe the automatic completion candidate and its SFT gate result."""
+    candidate = (metadata or {}).get("auto_completion_candidate") or {}
+    if not candidate:
+        return (metadata or {}).get("auto_completion_error") or ""
+    parts = []
+    offset = candidate.get("matched_offset_sec")
+    if isinstance(offset, (int, float)):
+        parts.append(f"候选完成 {offset:.3f}s")
+    frames = candidate.get("contiguous_frames")
+    if isinstance(frames, int):
+        parts.append(f"完成前连续 {frames} 帧（需 16）")
+    total = candidate.get("source_validation_details", {}).get("segment_frames")
+    if isinstance(total, int):
+        parts.append(f"所在片段共 {total} 帧")
+    if candidate.get("source_validation_error"):
+        parts.append(candidate["source_validation_error"])
+    if (metadata or {}).get("auto_completion_source_warning"):
+        parts.append(metadata["auto_completion_source_warning"])
+    return "；".join(parts)
+
+
+def skill_completion_issue(skill, annotations, frame_topics, metadata=None):
+    """Explain the raw completion state and the separate SFT continuity gate."""
     completions = [item for item in annotations if item.get("kind") == "skill_complete"]
     if len(completions) != 1 or completions[0].get("value") != skill:
-        return "成功保存前须有且仅有一条与当前技能匹配的完成帧标注"
+        detail = completion_status_text(metadata)
+        return "缺少已确认完成帧" + (f"；{detail}" if detail else "")
     item = completions[0]
     topic, stamp = item.get("source_topic"), item.get("header_stamp_ns")
     if (topic not in frame_topics or not isinstance(topic, str)
             or not topic.endswith("/color/image_raw") or type(stamp) is not int or stamp <= 0):
         return "完成帧缺少已录制彩色相机的有效 Header 引用"
     if item.get("verified_in_bag") is not True or item.get("frame_verification_error"):
-        return "完成帧尚未通过 rosbag 核验；请在录制后补标"
+        return "完成帧尚未通过 rosbag 核验；可保存为成功待复核，SFT 导出会拒绝"
+    if item.get("source_validation_error"):
+        return "完成帧已确认，但 SFT 连续性不足：" + item["source_validation_error"]
+    proof = item.get("source_validation")
+    if not isinstance(proof, dict):
+        return "完成帧已确认，但缺少来源连续性与 16 步校验；SFT 导出会拒绝"
+    frames = proof.get("contiguous_frames")
+    if type(frames) is not int or frames < 16:
+        return f"完成帧所在连续片段 {frames} 帧，少于 16；SFT 导出会拒绝"
+    if proof.get("alignment_policy") not in ("causal_rgb_bundle_v1",
+                                              "causal_follower_next_state_v1"):
+        return "完成帧对齐策略不匹配；SFT 导出会拒绝"
     return None
 
 
@@ -76,6 +113,15 @@ def recorder_request(socket_path, request):
     if not result.get("ok"):
         raise ValueError(result.get("error", "录制操作失败"))
     return result["result"]
+
+
+def completion_preview_key(metadata):
+    metadata = metadata or {}
+    confirmed = [a for a in metadata.get('annotations', []) if a.get('kind') == 'skill_complete']
+    frame = confirmed[0] if len(confirmed) == 1 else metadata.get('auto_completion_candidate')
+    if not frame:
+        return None
+    return (metadata.get('episode_id'), frame.get('source_topic'), frame.get('header_stamp_ns'))
 
 
 def to_pixmap(message):
@@ -224,8 +270,13 @@ class Console(QMainWindow):
         root = Path(config["output_dir"]).expanduser().resolve()
         self.socket_path = Path(config.get("socket_path", str(root / "recorder.sock"))).expanduser().resolve()
         self.pool = ThreadPoolExecutor(max_workers=1)
+        self.catalog_pool = ThreadPoolExecutor(max_workers=1)
         self.depth_pool = ThreadPoolExecutor(max_workers=2)
         self.pending = {}
+        self._closing = False
+        self.completion_preview = None
+        self.completion_preview_requested = None
+        self.catalog_refresh_again = False
         self.state = "unknown"
         self.last_sequence = [[0] * 3 for _ in range(2)]
         self.depth_draw_at = [0.0] * 3
@@ -364,6 +415,7 @@ class Console(QMainWindow):
         self.mark_start = QPushButton("开始下一技能")
         self.mark_start.hide()
         self.mark_complete = QPushButton("录制后补标完成帧")
+        self.mark_candidate = QPushButton("确认候选完成帧")
         self.mark_success = QPushButton("标记当前技能成功")
         self.mark_failure = QPushButton("标记本条失败")
         self.mark_exception = QPushButton("标记异常")
@@ -376,11 +428,11 @@ class Console(QMainWindow):
         self.review_offset = QLineEdit()
         self.review_offset.setPlaceholderText("完成时刻：录制开始后第几秒")
         self.review_offset.setMaximumWidth(230)
-        for widget in (self.mark_start, self.mark_complete, self.mark_success, self.mark_failure,
-                       self.mark_exception, self.mark_recovery, self.mark_hold, self.trigger_reason,
-                       self.camera_ref, self.review_offset):
+        for widget in (self.mark_start, self.mark_complete, self.mark_candidate, self.mark_success,
+                       self.mark_failure, self.mark_exception, self.mark_recovery, self.mark_hold,
+                       self.trigger_reason, self.camera_ref, self.review_offset):
             marks.addWidget(widget)
-        mark_help = QLabel("完整任务：录制中点击“标记当前技能成功”记录当前画面并进入下一技能。原子技能：可在成功时点击记录当前画面，再停止录制；停机核验通过后自动选择成功。到时自动取末帧，提前停止可补标。成功保存须有一条经 rosbag 核验的完成帧。")
+        mark_help = QLabel("完整任务：录制中点击“标记当前技能成功”记录当前画面并进入下一技能。原子技能：可在成功时点击记录当前画面；到时自动停止只生成完成候选，需点击“确认候选完成帧”或录制后补标确认。任务结果为成功但完成帧/连续性未通过时，仍可保存为“成功待复核”，SFT 导出会继续严格检查。")
         mark_help.setWordWrap(True)
         layout.addWidget(mark_help)
         self.annotation_label = QLabel("尚无标注")
@@ -388,6 +440,15 @@ class Console(QMainWindow):
         self.completion_label = QLabel("")
         self.completion_label.setWordWrap(True)
         layout.addWidget(self.completion_label)
+        records_bar = QHBoxLayout()
+        records_bar.addWidget(QLabel('已保存记录（编号从大到小）'))
+        self.records_status = QLabel('等待读取保存目录')
+        records_bar.addWidget(self.records_status, 1)
+        self.refresh_records_button = QPushButton('刷新记录')
+        self.refresh_records_button.setToolTip('重新扫描当前 Episode 保存目录；已删除记录将移除，按目录编号倒序排列')
+        self.refresh_records_button.clicked.connect(self.refresh_list)
+        records_bar.addWidget(self.refresh_records_button)
+        layout.addLayout(records_bar)
         self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels(("编号", "类型", "技能", "任务", "语言指令", "结果", "录制时长", "开始时间", "路径"))
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -411,11 +472,14 @@ class Console(QMainWindow):
         self.mark_exception.clicked.connect(lambda: self.mark_annotation("recovery_trigger", "异常：" + (self.trigger_reason.text().strip() or "人工触发")))
         self.mark_recovery.clicked.connect(lambda: self.mark_annotation("recovery_trigger", "恢复：" + (self.trigger_reason.text().strip() or "人工触发")))
         self.mark_hold.clicked.connect(self.toggle_hold)
+        self.mark_candidate.clicked.connect(self.confirm_candidate)
+        self.save_dir.editingFinished.connect(self.refresh_list)
         self.config = config
         self.active_skill = None
         self.active_mode = None
         self.annotations = []
         self.hold_segments = []
+        self.last_metadata = {}
         self._text_context = None
         self._text_cache = {}
         self.update_contract()
@@ -437,7 +501,7 @@ class Console(QMainWindow):
         QTimer.singleShot(0, self.refresh_list)
 
     def submit(self, key, request):
-        if key not in self.pending:
+        if not self._closing and key not in self.pending:
             self.pending[key] = self.pool.submit(recorder_request, self.socket_path, request)
 
     def refresh(self):
@@ -445,8 +509,15 @@ class Console(QMainWindow):
             self.submit("status", {"action": "status"})
 
     def refresh_list(self):
-        if "action" not in self.pending:
-            self.submit("list", {"action": "list"})
+        if self._closing:
+            return
+        if 'list' in self.pending:
+            self.catalog_refresh_again = True
+            return
+        directory = self.save_dir.text().strip()
+        self.records_status.setText('正在读取保存目录…')
+        self.refresh_records_button.setEnabled(False)
+        self.pending['list'] = self.catalog_pool.submit(scan_episode_directory, directory)
 
     def action(self, name, **fields):
         if "action" in self.pending:
@@ -504,13 +575,14 @@ class Console(QMainWindow):
     def mark_skill_success(self):
         if self.state == "stopped" and self.active_mode == "skill":
             issue = self.success_completion_issue()
-            if issue:
-                self.message.setText(issue + "；请先补标，再选择成功")
-            else:
-                self.outcome.setCurrentIndex(1)
-                self.message.setText("完成帧已核验；已选择本条原子技能成功，可保存 Episode")
+            self.outcome.setCurrentIndex(1)
+            self.message.setText(
+                "完成帧已核验；已选择本条原子技能成功，可保存 Episode" if not issue
+                else f"已选择任务成功；{issue}；可保存为成功待复核")
         else:
             self.mark_annotation("skill_complete", self.active_skill)
+            self.outcome.setCurrentIndex(1)
+            self.message.setText("已记录当前完成帧并选择任务成功；停止后仍可复核")
 
     def mark_skill_failure(self):
         if self.state == "stopped" and self.active_mode == "skill":
@@ -525,6 +597,28 @@ class Console(QMainWindow):
             self.mark_annotation("hold_end", "operator_release")
         else:
             self.mark_annotation("hold_start", "operator_keep_last_target")
+
+    def confirm_candidate(self):
+        if any(a.get("kind") == "skill_complete" for a in self.annotations):
+            self.action("recheck_completion")
+            return
+        candidate = (self.last_metadata or {}).get("auto_completion_candidate") or {}
+        if not candidate:
+            self.message.setText("当前没有自动完成候选")
+            return
+        if (not self.completion_preview or self.completion_preview['key'] !=
+                completion_preview_key(self.last_metadata)):
+            self.message.setText('请等待已录制的候选画面加载后再确认')
+            return
+        body = {"kind": "skill_complete", "value": self.active_skill, "candidate": True,
+                "review_source_topic": candidate.get("source_topic"),
+                "header_stamp_ns": candidate.get("header_stamp_ns")}
+        try:
+            request = annotation_request(body, self.cameras)
+        except ValueError as exc:
+            self.message.setText(str(exc))
+            return
+        self.action(request.pop("action"), **request)
 
     def mark_annotation(self, kind, value):
         try:
@@ -548,11 +642,6 @@ class Console(QMainWindow):
     def save_recording(self):
         outcome = (None, "success", "failure")[self.outcome.currentIndex()]
         if outcome:
-            if outcome == "success" and self.active_mode == "skill":
-                issue = self.success_completion_issue()
-                if issue:
-                    self.message.setText(issue + "；请先补标，再保存")
-                    return
             path = self.save_dir.text().strip()
             if not path:
                 self.message.setText("请填写 Episode 保存目录")
@@ -563,13 +652,15 @@ class Console(QMainWindow):
         selected = QFileDialog.getExistingDirectory(self, "选择 Episode 保存目录", self.save_dir.text())
         if selected:
             self.save_dir.setText(selected)
+            self.refresh_list()
 
     def discard_recording(self):
         if QMessageBox.question(self, "确认丢弃", "确定丢弃当前 Episode？录制数据将被删除。") == QMessageBox.Yes:
             self.action("discard")
 
     def success_completion_issue(self):
-        return skill_completion_issue(self.active_skill, self.annotations, self.cameras.frame_topics)
+        return skill_completion_issue(self.active_skill, self.annotations,
+                                      self.cameras.frame_topics, self.last_metadata)
 
     def update_buttons(self):
         busy = "action" in self.pending
@@ -585,13 +676,13 @@ class Console(QMainWindow):
         success_issue = (self.success_completion_issue() if self.state == "stopped"
                          and self.active_mode == "skill" else None)
         success_selected = self.outcome.currentIndex() == 1
-        self.save.setEnabled(not busy and self.state == "stopped" and self.outcome.currentIndex() > 0
-                             and not (success_selected and success_issue))
-        self.completion_label.setText(
-            f"原子技能完成帧：{success_issue}。选择彩色相机并填写完成时刻后点击补标。"
-            if self.state == "stopped" and self.active_mode == "skill" and success_issue
-            else "原子技能完成帧：已在 rosbag 中核验。"
-            if self.state == "stopped" and self.active_mode == "skill" else "")
+        self.save.setEnabled(not busy and self.state == "stopped" and self.outcome.currentIndex() > 0)
+        if self.state == "stopped" and self.active_mode == "skill":
+            detail = success_issue or "已确认并通过 SFT 帧门禁。"
+            suffix = " 可保存为成功待复核，SFT 导出会继续严格检查。" if success_issue else ""
+            self.completion_label.setText("原子技能完成帧：" + detail + suffix)
+        else:
+            self.completion_label.setText("")
         self.discard.setEnabled(not busy and self.state in ("recording", "stopped", "failed", "interrupted"))
         recording = not busy and self.state == "recording"
         mode = self.active_mode if self.state in ("recording", "stopped") else self.mode.currentData()
@@ -600,6 +691,11 @@ class Console(QMainWindow):
         skill_review = not busy and self.state == "stopped" and mode == "skill"
         completed = any(a.get("kind") == "skill_complete" for a in self.annotations)
         self.mark_complete.setEnabled(skill_review and not completed)
+        self.mark_candidate.setEnabled(
+            skill_review and (completed or (bool(self.last_metadata.get("auto_completion_candidate"))
+                and self.completion_preview is not None and self.completion_preview['key'] ==
+                completion_preview_key(self.last_metadata))))
+        self.mark_candidate.setText("重新校验已确认帧" if completed else "确认候选完成帧")
         self.review_offset.setEnabled(skill_review)
         self.camera_ref.setEnabled(recording or skill_review)
         self.mark_success.setEnabled((recording and bool(self.active_skill)) or skill_review)
@@ -624,6 +720,12 @@ class Console(QMainWindow):
                     self.active_skill = meta.get("active_skill") or (meta.get("skill") if meta.get("mode") == "skill" else None)
                     self.annotations = meta.get("annotations") or []
                     self.hold_segments = meta.get("hold_segments") or []
+                    self.last_metadata = meta
+                    preview_key = completion_preview_key(meta) if self.state == 'stopped' else None
+                    if (preview_key and preview_key != self.completion_preview_requested
+                            and 'completion_preview' not in self.pending):
+                        self.completion_preview_requested = preview_key
+                        self.submit('completion_preview', {'action': 'completion_preview'})
                     recorded_outcomes = [item.get("value") for item in self.annotations
                                          if item.get("kind") == "outcome"]
                     if self.outcome.currentIndex() == 0 and recorded_outcomes:
@@ -667,7 +769,22 @@ class Console(QMainWindow):
                         detail += f" · {meta['error']}"
                     self.state_label.setText(f"录制状态：{STATE_NAMES.get(self.state, self.state)}{detail}")
                 elif key == "list":
-                    self.show_episodes(result["episodes"])
+                    if result['directory'] == str(Path(self.save_dir.text().strip()).expanduser().resolve()):
+                        self.show_episodes(result['episodes'])
+                        warnings = result.get('warnings', [])
+                        suffix = f'；{len(warnings)} 条无法读取' if warnings else ''
+                        self.records_status.setText(
+                            f"已刷新 {len(result['episodes'])} 条 · {datetime.now():%H:%M:%S}{suffix}")
+                        self.records_status.setToolTip('\n'.join([result['directory'], *warnings]))
+                    else:
+                        self.catalog_refresh_again = True
+                elif key == 'completion_preview':
+                    message = SimpleNamespace(width=result['width'], height=result['height'],
+                        step=result['step'], encoding=result['encoding'],
+                        data=base64.b64decode(result['data_base64'], validate=True))
+                    self.completion_preview = {
+                        'key': (result['episode_id'], result['source_topic'], result['header_stamp_ns']),
+                        'pixmap': to_pixmap(message), 'offset_sec': result['header_offset_sec']}
                 else:
                     if result.get("state") == "saved":
                         self.message.setText(f"已保存至 {result['path']}")
@@ -680,11 +797,22 @@ class Console(QMainWindow):
                         self.outcome.setCurrentIndex(0)
                     self.refresh(); self.refresh_list()
             except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
-                if key == "status":
+                if key == 'list':
+                    self.show_episodes([])
+                    self.records_status.setText(f'记录刷新失败：{exc}')
+                    self.records_status.setToolTip(self.save_dir.text().strip())
+                elif key == "status":
                     self.state = "unknown"
                     self.state_label.setText(f"录制服务未连接：{exc}")
                 else:
                     self.message.setText(f"操作失败：{exc}")
+                    if key == 'completion_preview':
+                        self.completion_preview_requested = None
+            if key == 'list':
+                self.refresh_records_button.setEnabled(True)
+                if self.catalog_refresh_again:
+                    self.catalog_refresh_again = False
+                    self.refresh_list()
             self.update_buttons()
 
     def show_episodes(self, episodes):
@@ -707,6 +835,18 @@ class Console(QMainWindow):
             images = self.images if kind == 0 else self.depth_images
             labels = self.camera_labels if kind == 0 else self.depth_labels
             for index, (message, sequence, received_at) in enumerate(frames):
+                preview = self.completion_preview
+                if (kind == 0 and self.state == 'stopped' and preview
+                        and preview['key'] == completion_preview_key(self.last_metadata)
+                        and self.cameras.topics[index] == preview['key'][1]):
+                    size_key = (index, images[index].width(), images[index].height())
+                    if preview.get('drawn_size') != size_key:
+                        images[index].setPixmap(preview['pixmap'].scaled(images[index].size(),
+                            Qt.KeepAspectRatio, Qt.FastTransformation))
+                        preview['drawn_size'] = size_key
+                    labels[index].setText(f"{CAMERA_NAMES[index]}：已录制完成画面 · "
+                                          f"Header 时刻 {preview['offset_sec']:.3f} s")
+                    continue
                 if kind == 1 and self.cameras.depth_topics[index] is None:
                     continue
                 if kind == 1:
@@ -778,8 +918,10 @@ class Console(QMainWindow):
             self.fps_at = now
 
     def closeEvent(self, event):
+        self._closing = True
         self.frames_timer.stop(); self.status_timer.stop(); self.list_timer.stop(); self.work_timer.stop()
         self.pool.shutdown(wait=False, cancel_futures=True)
+        self.catalog_pool.shutdown(wait=False, cancel_futures=True)
         self.depth_pool.shutdown(wait=False, cancel_futures=True)
         super().closeEvent(event)
 
